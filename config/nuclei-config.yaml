@@ -1,1 +1,17 @@
+# Default configuration for passive nuclei scans.
+# Adjust the rate limits and template selection based on your environment.
+templates:
+  - passive/
+  - dns/
+  - network/
 
+# Tune concurrency so that it fits within the 2 vCPU / 8 GB Hetzner instance.
+bulk-size: 25
+rate-limit: 150
+
+# Enable passive mode by default and include helpful metadata.
+passive: true
+silent: true
+
+# Store JSONL results so they can be post-processed easily.
+jsonl: true
