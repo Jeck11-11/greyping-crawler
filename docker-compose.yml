@@ -1,1 +1,17 @@
+version: "3.9"
 
+services:
+  nuclei:
+    build: .
+    image: greyping/nuclei-passive:latest
+    container_name: nuclei-passive
+    restart: unless-stopped
+    environment:
+      # Path inside the container that will be used to read targets. Override if needed.
+      - NUCLEI_TARGETS_FILE=/data/input/targets.txt
+      # Extra CLI flags appended to the generated nuclei command.
+      - NUCLEI_ADDITIONAL_ARGS=-stats
+    volumes:
+      - ./data:/data
+      - ./config/nuclei-config.yaml:/etc/nuclei/config.yaml:ro
+    command: ["scan"]
