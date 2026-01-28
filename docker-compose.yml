@@ -15,3 +15,19 @@ services:
       - ./data:/data
       - ./config/nuclei-config.yaml:/etc/nuclei/config.yaml:ro
     command: ["scan"]
+
+  nuclei-api:
+    build: .
+    image: greyping/nuclei-passive:latest
+    container_name: nuclei-passive-api
+    restart: unless-stopped
+    environment:
+      - NUCLEI_ADDITIONAL_ARGS=-stats
+      - NUCLEI_API_HOST=0.0.0.0
+      - NUCLEI_API_PORT=8080
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+      - ./config/nuclei-config.yaml:/etc/nuclei/config.yaml:ro
+    command: ["api"]

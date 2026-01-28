@@ -43,4 +43,9 @@ if [ "$#" -eq 0 ] || [ "$1" = "scan" ]; then
   fi
 fi
 
+if [ "$#" -gt 0 ] && [ "$1" = "api" ]; then
+  shift
+  exec python3 /usr/local/bin/nuclei_api.py "$@"
+fi
+
 exec "$@"
