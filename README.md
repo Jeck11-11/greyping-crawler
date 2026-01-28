@@ -161,6 +161,41 @@ If you need to customize resolvers or template paths, extend this file and mount
   docker compose down
   ```
 
+## API mode
+
+If you want to expose nuclei as a lightweight HTTP API (for passive scans only), use the `nuclei-api` service.
+
+1. **Start the API container**
+
+   ```bash
+   docker compose up -d nuclei-api
+   ```
+
+2. **Submit a passive scan**
+
+   ```bash
+   curl -X POST http://localhost:8080/scan \
+     -H "Content-Type: application/json" \
+     -d '{"targets":["example.com"],"additional_args":"-stats"}'
+   ```
+
+   The response includes the generated targets file, output log location, and nuclei stdout/stderr.
+
+3. **Check API health**
+
+   ```bash
+   curl http://localhost:8080/health
+   ```
+
+### API configuration
+
+The API uses the same environment variables as the CLI flow plus the following:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `NUCLEI_API_HOST` | Host address bound by the HTTP server. | `0.0.0.0` |
+| `NUCLEI_API_PORT` | Port exposed by the HTTP server. | `8080` |
+
 ## Resource considerations
 
 The provided defaults were chosen for the target Hetzner instance:

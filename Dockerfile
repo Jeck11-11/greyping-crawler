@@ -5,10 +5,11 @@ LABEL maintainer="GreyPing" \
       org.opencontainers.image.description="Nuclei passive scanner with opinionated defaults"
 
 # Install a few helpful packages required for shell scripting and time zone handling.
-RUN apk add --no-cache bash tzdata
+RUN apk add --no-cache bash tzdata python3
 
 COPY config/nuclei-config.yaml /etc/nuclei/config.yaml
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY docker/api_server.py /usr/local/bin/nuclei_api.py
 
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
