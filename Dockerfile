@@ -1,18 +1,14 @@
-FROM projectdiscovery/nuclei:latest
+FROM python:3.11-alpine
 
-LABEL maintainer="GreyPing" \
-      org.opencontainers.image.source="https://github.com/projectdiscovery/nuclei" \
-      org.opencontainers.image.description="Nuclei passive scanner with opinionated defaults"
+WORKDIR /app
 
-# Install a few helpful packages required for shell scripting and time zone handling.
-RUN apk add --no-cache bash tzdata
+RUN apk add --no-cache docker-cli curl
 
-COPY config/nuclei-config.yaml /etc/nuclei/config.yaml
-COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
 
-RUN chmod +x /usr/local/bin/entrypoint.sh
+COPY api.py worker.py /app/
 
-VOLUME ["/data"]
+ENV PYTHONUNBUFFERED=1
 
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
-CMD ["scan"]
+CMD ["python", "-m", "api"]

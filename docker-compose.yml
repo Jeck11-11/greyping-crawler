@@ -1,17 +1,41 @@
 version: "3.9"
 
 services:
-  nuclei:
+  api:
     build: .
-    image: greyping/nuclei-passive:latest
-    container_name: nuclei-passive
-    restart: unless-stopped
+    container_name: nuclei-api
     environment:
-      # Path inside the container that will be used to read targets. Override if needed.
-      - NUCLEI_TARGETS_FILE=/data/input/targets.txt
-      # Extra CLI flags appended to the generated nuclei command.
-      - NUCLEI_ADDITIONAL_ARGS=-stats
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_BACKEND_URL=redis://redis:6379/0
+      - RATE_LIMIT_COUNT=5
+      - RATE_LIMIT_WINDOW=60
+    ports:
+      - "8081:8080"
+    command: ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8080"]
+    depends_on:
+      - redis
+
+  worker:
+    build: .
+    container_name: nuclei-worker
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_BACKEND_URL=redis://redis:6379/0
+      - NUCLEI_IMAGE=projectdiscovery/nuclei
+      - NUCLEI_TEMPLATES_PATH=/opt/nuclei-templates
+      - XANO_URL=
+      - XANO_API_KEY=
     volumes:
-      - ./data:/data
-      - ./config/nuclei-config.yaml:/etc/nuclei/config.yaml:ro
-    command: ["scan"]
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /opt/nuclei-templates:/opt/nuclei-templates:ro
+    command: ["celery", "-A", "worker.celery_app", "worker", "--loglevel=info", "--concurrency=1"]
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:7-alpine
+    container_name: nuclei-redis
+    ports:
+      - "6379:6379"
