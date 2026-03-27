@@ -3,3 +3,8 @@
 # Python caches (if any future scripts are added)
 __pycache__/
 *.pyc
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+.env
