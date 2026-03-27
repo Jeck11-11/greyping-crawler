@@ -48,4 +48,12 @@ if [ "$#" -gt 0 ] && [ "$1" = "api" ]; then
   exec python3 /usr/local/bin/nuclei_api.py "$@"
 fi
 
+if [ "$#" -gt 0 ] && [ "$1" = "osint-api" ]; then
+  shift
+  OSINT_HOST="${OSINT_API_HOST:-0.0.0.0}"
+  OSINT_PORT="${OSINT_API_PORT:-8089}"
+  export PYTHONPATH="/usr/local/lib/osint_api:${PYTHONPATH:-}"
+  exec python3 -m uvicorn src.app:app --host "${OSINT_HOST}" --port "${OSINT_PORT}" "$@"
+fi
+
 exec "$@"

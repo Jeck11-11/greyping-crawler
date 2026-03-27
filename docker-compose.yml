@@ -31,3 +31,21 @@ services:
       - ./data:/data
       - ./config/nuclei-config.yaml:/etc/nuclei/config.yaml:ro
     command: ["api"]
+
+  osint-api:
+    build: .
+    image: greyping/nuclei-passive:latest
+    container_name: greyping-osint-api
+    restart: unless-stopped
+    environment:
+      - LOG_LEVEL=INFO
+      # Set a Have I Been Pwned API key to enable breach lookups
+      - HIBP_API_KEY=${HIBP_API_KEY:-}
+      - OSINT_API_HOST=0.0.0.0
+      - OSINT_API_PORT=8089
+    ports:
+      - "8089:8089"
+    volumes:
+      - ./data:/data
+      - ./src:/usr/local/lib/osint_api/src:ro
+    command: ["osint-api"]
