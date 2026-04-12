@@ -203,6 +203,25 @@ class SensitivePathFinding(BaseModel):
     severity: str = Field(default="high")
 
 
+class IoCFinding(BaseModel):
+    """An Indicator of Compromise detected on a page."""
+
+    ioc_type: str = Field(
+        ..., description="Category: cryptominer, hidden_iframe, obfuscated_js, seo_spam, "
+        "credential_harvest, defacement, webshell_path, suspicious_script.",
+    )
+    description: str = Field(..., description="Human-readable explanation of the finding.")
+    evidence: str = Field(
+        default="",
+        description="Truncated snippet or URL that triggered the detection.",
+    )
+    location: str = Field(
+        default="body",
+        description="Where in the page (script, body, iframe, form).",
+    )
+    severity: str = Field(default="high", description="critical, high, medium, low.")
+
+
 class PageResult(BaseModel):
     """Scan results for a single crawled page."""
 
@@ -217,6 +236,10 @@ class PageResult(BaseModel):
     links: list[LinkInfo] = Field(default_factory=list)
     contacts: ContactInfo = Field(default_factory=ContactInfo)
     secrets: list[SecretFinding] = Field(default_factory=list)
+    ioc_findings: list[IoCFinding] = Field(
+        default_factory=list,
+        description="Indicators of compromise detected on this page.",
+    )
     error: str | None = None
 
 
@@ -235,6 +258,7 @@ class DomainSummary(BaseModel):
     ssl_grade: str = Field(default="", description="A-F grade for SSL/TLS certificate.")
     cookie_issues: int = Field(default=0, description="Number of cookies with security issues.")
     sensitive_paths_found: int = Field(default=0, description="Number of exposed sensitive paths.")
+    ioc_findings: int = Field(default=0, description="Number of indicators of compromise detected.")
 
 
 class DomainResult(BaseModel):
@@ -291,6 +315,10 @@ class DomainResult(BaseModel):
         default_factory=list,
         description="Exposed sensitive paths.",
     )
+    ioc_findings: list[IoCFinding] = Field(
+        default_factory=list,
+        description="Aggregated indicators of compromise across all pages.",
+    )
     metadata: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
 
@@ -313,6 +341,7 @@ class ScanSummary(BaseModel):
     breaches_found: int = 0
     total_cookie_issues: int = 0
     total_sensitive_paths: int = 0
+    total_ioc_findings: int = 0
 
 
 class ScanResponse(BaseModel):

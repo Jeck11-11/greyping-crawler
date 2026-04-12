@@ -174,6 +174,7 @@ async def _scan_single_target(
     internal_links: set[str] = set()
     ext_link_sources: dict[str, dict] = {}   # url -> {anchor_text, found_on}
     all_secrets = []
+    all_iocs = []
 
     for page in pages:
         page_url = page.url
@@ -192,6 +193,7 @@ async def _scan_single_target(
                 )
                 entry["found_on"].append(page_url)
         all_secrets.extend(page.secrets)
+        all_iocs.extend(page.ioc_findings)
 
     # Build provenance-tracked lists
     email_findings = [
@@ -245,6 +247,7 @@ async def _scan_single_target(
         ssl_grade=ssl_result.grade,
         cookie_issues=cookie_issues_count,
         sensitive_paths_found=len(paths_result),
+        ioc_findings=len(all_iocs),
     )
 
     return DomainResult(
@@ -266,6 +269,7 @@ async def _scan_single_target(
         ssl_certificate=ssl_result,
         cookies=cookie_findings,
         sensitive_paths=paths_result,
+        ioc_findings=all_iocs,
         metadata={
             "domain": domain,
             "render_js": request.render_js,
@@ -313,6 +317,7 @@ async def scan(request: ScanRequest) -> ScanResponse:
         breaches_found=total_breaches,
         total_cookie_issues=sum(r.summary.cookie_issues for r in domain_results),
         total_sensitive_paths=sum(r.summary.sensitive_paths_found for r in domain_results),
+        total_ioc_findings=sum(r.summary.ioc_findings for r in domain_results),
     )
 
     # Determine overall status
