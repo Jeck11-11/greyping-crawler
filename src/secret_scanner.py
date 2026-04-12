@@ -53,9 +53,9 @@ _PATTERNS: list[_Pattern] = [
     # SendGrid
     _Pattern("sendgrid_api_key", "sendgrid_key",
              re.compile(r"SG\.[A-Za-z0-9_\-]{22}\.[A-Za-z0-9_\-]{43}")),
-    # Heroku
+    # Heroku – require a keyword so bare UUIDs (CSS IDs, tracking pixels, etc.) don't match
     _Pattern("heroku_api_key", "heroku_key",
-             re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", re.I)),
+             re.compile(r"""(?:heroku[_\s-]*(?:api[_\s-]*)?key|HEROKU_API_KEY)\s*[:=]\s*['"]?([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})['"]?""", re.I)),
     # Private keys
     _Pattern("private_key", "private_key",
              re.compile(r"-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----")),

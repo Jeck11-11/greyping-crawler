@@ -54,6 +54,16 @@ class TestScanSecrets:
         findings = scan_secrets(html)
         assert any(f.secret_type == "slack_webhook" for f in findings)
 
+    def test_detects_heroku_key_with_context(self):
+        html = '<script>var HEROKU_API_KEY = "abcd1234-abcd-1234-abcd-1234abcd5678";</script>'
+        findings = scan_secrets(html)
+        assert any(f.secret_type == "heroku_key" for f in findings)
+
+    def test_no_false_positive_bare_uuid(self):
+        html = '<div id="abcd1234-abcd-1234-abcd-1234abcd5678" class="widget">hello</div>'
+        findings = scan_secrets(html)
+        assert not any(f.secret_type == "heroku_key" for f in findings)
+
     def test_no_false_positives_on_clean_html(self):
         html = "<html><body><h1>Hello World</h1><p>This is a normal page.</p></body></html>"
         findings = scan_secrets(html)
