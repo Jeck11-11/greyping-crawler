@@ -44,7 +44,8 @@ Both services are packaged in the same image and can be run individually or side
 │   └── breach_checker.py      # Have I Been Pwned integration
 ├── tests/                     # pytest suite for the OSINT API
 ├── pyproject.toml             # pytest / asyncio configuration
-├── requirements.txt           # Python dependencies for the OSINT API
+├── requirements.txt           # Runtime Python dependencies (Docker)
+├── requirements-dev.txt       # Adds Playwright + pytest for local development
 └── data/                      # Persisted templates, projects, logs (ignored by git)
 ```
 
@@ -226,6 +227,10 @@ The API uses the same environment variables as the CLI flow plus the following:
 ## OSINT Reconnaissance API
 
 The `osint-api` service exposes an asynchronous FastAPI application that performs real-time website reconnaissance against one or more authorised targets and returns structured JSON suitable for a security dashboard.
+
+### JS rendering note
+
+The Docker image is built on Alpine Linux (musl libc). Playwright does not publish Alpine-compatible wheels, so **JavaScript rendering (`render_js`) is not available when running inside the container**. The crawler falls back to static fetching via `httpx` automatically. If you need JS rendering, run the API locally with `requirements-dev.txt` (see [Local development](#local-development-python) below).
 
 ### Starting the service
 
@@ -455,16 +460,17 @@ You can run the OSINT API and its test suite directly against a local Python int
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
-playwright install chromium   # one-time download for the rendered crawler
+pip install -r requirements-dev.txt
+playwright install chromium   # one-time download for the JS renderer
 
-# Run the API
+# Run the API (with full Playwright support)
 uvicorn src.app:app --reload --host 127.0.0.1 --port 8089
 
 # Or run the test suite
 pytest -q
 ```
 
+The dev requirements file pulls in the base `requirements.txt` automatically.
 The test suite uses mocked HTTP + Playwright responses, so no outbound network access is required.
 
 ## Resource considerations

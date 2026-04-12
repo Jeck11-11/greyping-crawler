@@ -1,0 +1,9 @@
+# Includes all runtime dependencies
+-r requirements.txt
+
+# Headless browser for JS rendering (requires glibc – not available on Alpine)
+playwright>=1.43,<2
+
+# Testing
+pytest>=8,<9
+pytest-asyncio>=0.23,<1

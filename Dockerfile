@@ -8,12 +8,12 @@ LABEL maintainer="GreyPing" \
 RUN apk add --no-cache bash tzdata python3 py3-pip
 
 # Install Python dependencies for the OSINT API
+# NOTE: Playwright is omitted because the base image is Alpine (musl).
+# The crawler falls back to static fetching via httpx automatically.
+# For JS rendering, run the API locally with requirements-dev.txt.
 COPY requirements.txt /tmp/requirements.txt
 RUN pip3 install --no-cache-dir --break-system-packages -r /tmp/requirements.txt && \
     rm /tmp/requirements.txt
-
-# Install Playwright Chromium browser for JS rendering
-RUN playwright install --with-deps chromium 2>/dev/null || true
 
 COPY config/nuclei-config.yaml /etc/nuclei/config.yaml
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
