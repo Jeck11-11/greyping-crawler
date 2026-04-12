@@ -15,7 +15,7 @@ mkdir -p "${TEMPLATE_DIR}" "${PROJECT_DIR}" "${LOG_DIR}"
 
 if [ "${UPDATE_TEMPLATES}" = "true" ]; then
   echo "Updating nuclei templates in ${TEMPLATE_DIR}..."
-  if ! nuclei -update-templates -update-directory "${TEMPLATE_DIR}"; then
+  if ! nuclei -update-templates; then
     echo "Template update failed; continuing with existing templates" >&2
   fi
 fi
