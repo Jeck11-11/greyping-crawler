@@ -139,6 +139,70 @@ class BreachRecord(BaseModel):
     description: str = Field(default="", description="Breach description.")
 
 
+# ---------------------------------------------------------------------------
+# Security-hardening check models
+# ---------------------------------------------------------------------------
+
+class HeaderFinding(BaseModel):
+    """Result for a single security header check."""
+
+    header: str = Field(..., description="Header name (e.g. 'Strict-Transport-Security').")
+    status: str = Field(..., description="'present', 'missing', or 'weak'.")
+    value: str = Field(default="", description="Header value if present.")
+    recommendation: str = Field(default="", description="What to do to fix this.")
+    severity: str = Field(default="medium", description="low, medium, high, critical.")
+
+
+class SecurityHeadersResult(BaseModel):
+    """Aggregated security-headers audit for a target."""
+
+    grade: str = Field(default="", description="Letter grade: A, B, C, D, F.")
+    score: int = Field(default=0, description="Numeric score 0-100.")
+    findings: list[HeaderFinding] = Field(default_factory=list)
+    server: str = Field(default="", description="Server header value (information leakage).")
+    powered_by: str = Field(default="", description="X-Powered-By value (information leakage).")
+
+
+class CookieFinding(BaseModel):
+    """Security audit for a single cookie."""
+
+    name: str
+    secure: bool = False
+    http_only: bool = False
+    same_site: str = Field(default="", description="None, Lax, or Strict.")
+    path: str = ""
+    issues: list[str] = Field(default_factory=list)
+    severity: str = Field(default="low")
+
+
+class SSLCertResult(BaseModel):
+    """TLS certificate details and issues."""
+
+    is_valid: bool = True
+    issuer: str = ""
+    subject: str = ""
+    not_before: str = ""
+    not_after: str = ""
+    days_until_expiry: int = 0
+    version: int = 0
+    serial_number: str = ""
+    signature_algorithm: str = ""
+    san: list[str] = Field(default_factory=list, description="Subject Alternative Names.")
+    issues: list[str] = Field(default_factory=list)
+    grade: str = Field(default="", description="A, B, C, D, F based on issues found.")
+
+
+class SensitivePathFinding(BaseModel):
+    """An exposed sensitive path discovered on the target."""
+
+    path: str
+    url: str = ""
+    status_code: int = 0
+    content_length: int = 0
+    risk: str = Field(default="", description="Why this path is sensitive.")
+    severity: str = Field(default="high")
+
+
 class PageResult(BaseModel):
     """Scan results for a single crawled page."""
 
@@ -167,6 +231,10 @@ class DomainSummary(BaseModel):
     external_links_found: int = 0
     secrets_found: int = 0
     breaches_found: int = 0
+    security_headers_grade: str = Field(default="", description="A-F grade for security headers.")
+    ssl_grade: str = Field(default="", description="A-F grade for SSL/TLS certificate.")
+    cookie_issues: int = Field(default=0, description="Number of cookies with security issues.")
+    sensitive_paths_found: int = Field(default=0, description="Number of exposed sensitive paths.")
 
 
 class DomainResult(BaseModel):
@@ -207,6 +275,22 @@ class DomainResult(BaseModel):
         description="Aggregated secrets across all pages.",
     )
     breaches: list[BreachRecord] = Field(default_factory=list)
+    security_headers: SecurityHeadersResult = Field(
+        default_factory=SecurityHeadersResult,
+        description="Security headers audit for the landing page.",
+    )
+    ssl_certificate: SSLCertResult = Field(
+        default_factory=SSLCertResult,
+        description="TLS certificate analysis.",
+    )
+    cookies: list[CookieFinding] = Field(
+        default_factory=list,
+        description="Cookie security audit.",
+    )
+    sensitive_paths: list[SensitivePathFinding] = Field(
+        default_factory=list,
+        description="Exposed sensitive paths.",
+    )
     metadata: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
 
@@ -227,6 +311,8 @@ class ScanSummary(BaseModel):
     external_links_found: int = 0
     secrets_found: int = 0
     breaches_found: int = 0
+    total_cookie_issues: int = 0
+    total_sensitive_paths: int = 0
 
 
 class ScanResponse(BaseModel):

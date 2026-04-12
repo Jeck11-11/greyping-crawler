@@ -12,7 +12,10 @@ from urllib.parse import urlparse
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
+import httpx
+
 from .breach_checker import check_breaches
+from .cookie_checker import analyze_cookies
 from .crawler import crawl_domain
 from .models import (
     ContactInfo,
@@ -24,8 +27,13 @@ from .models import (
     ScanRequest,
     ScanResponse,
     ScanSummary,
+    SecurityHeadersResult,
     SocialFinding,
+    SSLCertResult,
 )
+from .path_scanner import scan_sensitive_paths
+from .security_headers import analyze_headers
+from .ssl_checker import check_ssl
 
 logger = logging.getLogger("osint_api")
 logging.basicConfig(
@@ -85,6 +93,21 @@ def _normalise_target(raw: str) -> str:
     return raw
 
 
+async def _fetch_landing_page(target: str, timeout: int = 15) -> tuple[dict[str, str], httpx.Cookies]:
+    """GET the landing page and return (response_headers, cookies)."""
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=httpx.Timeout(timeout),
+            verify=False,
+        ) as client:
+            resp = await client.get(target, headers={"User-Agent": "GreypingCrawler/1.0"})
+            return dict(resp.headers), resp.cookies
+    except Exception as exc:
+        logger.warning("Landing page fetch for header/cookie audit failed: %s", exc)
+        return {}, httpx.Cookies()
+
+
 async def _scan_single_target(
     target: str,
     request: ScanRequest,
@@ -93,22 +116,55 @@ async def _scan_single_target(
     domain = _extract_domain(target)
     started = datetime.now(timezone.utc).isoformat()
 
-    try:
-        pages = await crawl_domain(
-            target,
-            render_js=request.render_js,
-            follow_redirects=request.follow_redirects,
-            max_depth=request.max_depth,
-            timeout=request.timeout,
-        )
-    except Exception as exc:
+    # Run crawl, SSL check, landing-page fetch (for headers/cookies),
+    # and sensitive-path scan concurrently.
+    crawl_task = crawl_domain(
+        target,
+        render_js=request.render_js,
+        follow_redirects=request.follow_redirects,
+        max_depth=request.max_depth,
+        timeout=request.timeout,
+    )
+    ssl_task = check_ssl(target, timeout=request.timeout)
+    landing_task = _fetch_landing_page(target, timeout=request.timeout)
+    paths_task = scan_sensitive_paths(target, timeout=request.timeout)
+
+    crawl_result, ssl_result, landing_result, paths_result = await asyncio.gather(
+        crawl_task, ssl_task, landing_task, paths_task,
+        return_exceptions=True,
+    )
+
+    # Handle crawl failure
+    if isinstance(crawl_result, Exception):
         logger.exception("Crawl failed for %s", target)
         return DomainResult(
             target=target,
             scan_started_at=started,
             scan_finished_at=datetime.now(timezone.utc).isoformat(),
-            error=str(exc),
+            error=str(crawl_result),
         )
+
+    pages = crawl_result
+
+    # Process SSL result
+    if isinstance(ssl_result, Exception):
+        logger.warning("SSL check failed for %s: %s", target, ssl_result)
+        ssl_result = SSLCertResult(is_valid=False, issues=[f"Check failed: {ssl_result}"])
+
+    # Process headers + cookies
+    if isinstance(landing_result, Exception):
+        logger.warning("Landing page fetch failed for %s: %s", target, landing_result)
+        resp_headers, resp_cookies = {}, httpx.Cookies()
+    else:
+        resp_headers, resp_cookies = landing_result
+
+    headers_result = analyze_headers(resp_headers)
+    cookie_findings = analyze_cookies(resp_cookies)
+
+    # Process sensitive paths
+    if isinstance(paths_result, Exception):
+        logger.warning("Path scan failed for %s: %s", target, paths_result)
+        paths_result = []
 
     # Aggregate contacts, links, and secrets across all pages,
     # tracking which page URL each finding came from.
@@ -174,6 +230,8 @@ async def _scan_single_target(
 
     finished = datetime.now(timezone.utc).isoformat()
 
+    cookie_issues_count = sum(1 for c in cookie_findings if c.issues)
+
     domain_summary = DomainSummary(
         pages_scanned=len(pages),
         emails_found=len(email_findings),
@@ -183,6 +241,10 @@ async def _scan_single_target(
         external_links_found=len(ext_link_findings),
         secrets_found=len(all_secrets),
         breaches_found=len(breaches),
+        security_headers_grade=headers_result.grade,
+        ssl_grade=ssl_result.grade,
+        cookie_issues=cookie_issues_count,
+        sensitive_paths_found=len(paths_result),
     )
 
     return DomainResult(
@@ -200,6 +262,10 @@ async def _scan_single_target(
         external_links=ext_link_findings,
         secrets=all_secrets,
         breaches=breaches,
+        security_headers=headers_result,
+        ssl_certificate=ssl_result,
+        cookies=cookie_findings,
+        sensitive_paths=paths_result,
         metadata={
             "domain": domain,
             "render_js": request.render_js,
@@ -245,6 +311,8 @@ async def scan(request: ScanRequest) -> ScanResponse:
         external_links_found=sum(r.summary.external_links_found for r in domain_results),
         secrets_found=total_secrets,
         breaches_found=total_breaches,
+        total_cookie_issues=sum(r.summary.cookie_issues for r in domain_results),
+        total_sensitive_paths=sum(r.summary.sensitive_paths_found for r in domain_results),
     )
 
     # Determine overall status
