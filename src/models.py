@@ -156,12 +156,29 @@ class PageResult(BaseModel):
     error: str | None = None
 
 
+class DomainSummary(BaseModel):
+    """Quick-glance counts for a single target."""
+
+    pages_scanned: int = 0
+    emails_found: int = 0
+    phone_numbers_found: int = 0
+    social_profiles_found: int = 0
+    internal_links_found: int = 0
+    external_links_found: int = 0
+    secrets_found: int = 0
+    breaches_found: int = 0
+
+
 class DomainResult(BaseModel):
     """Aggregated results for a single target domain."""
 
     target: str
     scan_started_at: str = ""
     scan_finished_at: str = ""
+    summary: DomainSummary = Field(
+        default_factory=DomainSummary,
+        description="Quick-glance counts before the detailed data.",
+    )
     pages_scanned: int = 0
     pages: list[PageResult] = Field(default_factory=list)
     contacts: ContactInfo = Field(
@@ -198,6 +215,20 @@ class DomainResult(BaseModel):
 # Top-level response
 # ---------------------------------------------------------------------------
 
+class ScanSummary(BaseModel):
+    """Top-level quick-glance counts across all targets."""
+
+    targets: int = 0
+    pages_scanned: int = 0
+    emails_found: int = 0
+    phone_numbers_found: int = 0
+    social_profiles_found: int = 0
+    internal_links_found: int = 0
+    external_links_found: int = 0
+    secrets_found: int = 0
+    breaches_found: int = 0
+
+
 class ScanResponse(BaseModel):
     """Top-level JSON response returned by POST /scan."""
 
@@ -208,6 +239,10 @@ class ScanResponse(BaseModel):
     )
     started_at: str = ""
     finished_at: str = ""
+    summary: ScanSummary = Field(
+        default_factory=ScanSummary,
+        description="Quick-glance totals across all targets.",
+    )
     total_targets: int = 0
     total_pages_scanned: int = 0
     total_secrets_found: int = 0

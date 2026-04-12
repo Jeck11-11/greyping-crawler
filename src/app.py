@@ -17,11 +17,13 @@ from .crawler import crawl_domain
 from .models import (
     ContactInfo,
     DomainResult,
+    DomainSummary,
     EmailFinding,
     ExternalLinkFinding,
     PhoneFinding,
     ScanRequest,
     ScanResponse,
+    ScanSummary,
     SocialFinding,
 )
 
@@ -172,10 +174,22 @@ async def _scan_single_target(
 
     finished = datetime.now(timezone.utc).isoformat()
 
+    domain_summary = DomainSummary(
+        pages_scanned=len(pages),
+        emails_found=len(email_findings),
+        phone_numbers_found=len(phone_findings),
+        social_profiles_found=len(social_findings),
+        internal_links_found=len(internal_links),
+        external_links_found=len(ext_link_findings),
+        secrets_found=len(all_secrets),
+        breaches_found=len(breaches),
+    )
+
     return DomainResult(
         target=target,
         scan_started_at=started,
         scan_finished_at=finished,
+        summary=domain_summary,
         pages_scanned=len(pages),
         pages=pages,
         contacts=flat_contacts,
@@ -217,9 +231,21 @@ async def scan(request: ScanRequest) -> ScanResponse:
 
     finished = datetime.now(timezone.utc).isoformat()
 
-    total_pages = sum(r.pages_scanned for r in domain_results)
-    total_secrets = sum(len(r.secrets) for r in domain_results)
-    total_breaches = sum(len(r.breaches) for r in domain_results)
+    total_pages = sum(r.summary.pages_scanned for r in domain_results)
+    total_secrets = sum(r.summary.secrets_found for r in domain_results)
+    total_breaches = sum(r.summary.breaches_found for r in domain_results)
+
+    top_summary = ScanSummary(
+        targets=len(targets),
+        pages_scanned=total_pages,
+        emails_found=sum(r.summary.emails_found for r in domain_results),
+        phone_numbers_found=sum(r.summary.phone_numbers_found for r in domain_results),
+        social_profiles_found=sum(r.summary.social_profiles_found for r in domain_results),
+        internal_links_found=sum(r.summary.internal_links_found for r in domain_results),
+        external_links_found=sum(r.summary.external_links_found for r in domain_results),
+        secrets_found=total_secrets,
+        breaches_found=total_breaches,
+    )
 
     # Determine overall status
     errors = [r for r in domain_results if r.error]
@@ -235,6 +261,7 @@ async def scan(request: ScanRequest) -> ScanResponse:
         status=status,
         started_at=started,
         finished_at=finished,
+        summary=top_summary,
         total_targets=len(targets),
         total_pages_scanned=total_pages,
         total_secrets_found=total_secrets,
