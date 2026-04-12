@@ -65,6 +65,44 @@ class ContactInfo(BaseModel):
     social_profiles: list[str] = Field(default_factory=list)
 
 
+# ---------------------------------------------------------------------------
+# Aggregated findings with source-page provenance
+# ---------------------------------------------------------------------------
+
+class EmailFinding(BaseModel):
+    email: str
+    found_on: list[str] = Field(
+        default_factory=list,
+        description="Page URLs where this email was found.",
+    )
+
+
+class PhoneFinding(BaseModel):
+    phone: str
+    found_on: list[str] = Field(
+        default_factory=list,
+        description="Page URLs where this phone number was found.",
+    )
+
+
+class SocialFinding(BaseModel):
+    url: str
+    platform: str = Field(default="", description="Detected platform name.")
+    found_on: list[str] = Field(
+        default_factory=list,
+        description="Page URLs where this social profile was found.",
+    )
+
+
+class ExternalLinkFinding(BaseModel):
+    url: str
+    anchor_text: str = ""
+    found_on: list[str] = Field(
+        default_factory=list,
+        description="Page URLs where this external link was found.",
+    )
+
+
 class SecretFinding(BaseModel):
     """A single exposed secret detected in the page source."""
 
@@ -128,10 +166,25 @@ class DomainResult(BaseModel):
     pages: list[PageResult] = Field(default_factory=list)
     contacts: ContactInfo = Field(
         default_factory=ContactInfo,
-        description="Aggregated contacts across all pages.",
+        description="Aggregated contacts across all pages (flat list, backwards-compat).",
+    )
+    emails: list[EmailFinding] = Field(
+        default_factory=list,
+        description="Emails with the page URLs where each was found.",
+    )
+    phone_numbers: list[PhoneFinding] = Field(
+        default_factory=list,
+        description="Phone numbers with the page URLs where each was found.",
+    )
+    social_profiles: list[SocialFinding] = Field(
+        default_factory=list,
+        description="Social profiles with the page URLs where each was found.",
     )
     internal_links: list[str] = Field(default_factory=list)
-    external_links: list[str] = Field(default_factory=list)
+    external_links: list[ExternalLinkFinding] = Field(
+        default_factory=list,
+        description="External links with the page URLs where each was found.",
+    )
     secrets: list[SecretFinding] = Field(
         default_factory=list,
         description="Aggregated secrets across all pages.",

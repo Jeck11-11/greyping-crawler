@@ -17,8 +17,12 @@ from .crawler import crawl_domain
 from .models import (
     ContactInfo,
     DomainResult,
+    EmailFinding,
+    ExternalLinkFinding,
+    PhoneFinding,
     ScanRequest,
     ScanResponse,
+    SocialFinding,
 )
 
 logger = logging.getLogger("osint_api")
@@ -43,6 +47,26 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+_SOCIAL_PLATFORM_MAP = {
+    "twitter.com": "Twitter", "x.com": "Twitter/X",
+    "facebook.com": "Facebook", "fb.com": "Facebook",
+    "linkedin.com": "LinkedIn", "instagram.com": "Instagram",
+    "github.com": "GitHub", "youtube.com": "YouTube",
+    "tiktok.com": "TikTok", "pinterest.com": "Pinterest",
+    "reddit.com": "Reddit", "t.me": "Telegram",
+    "mastodon.social": "Mastodon",
+}
+
+
+def _detect_platform(url: str) -> str:
+    """Return the platform name for a social URL, or empty string."""
+    try:
+        host = (urlparse(url).hostname or "").lower().lstrip("www.")
+        return _SOCIAL_PLATFORM_MAP.get(host, "")
+    except Exception:
+        return ""
 
 
 def _extract_domain(url: str) -> str:
@@ -84,30 +108,65 @@ async def _scan_single_target(
             error=str(exc),
         )
 
-    # Aggregate contacts, links, and secrets across all pages
-    all_emails: set[str] = set()
-    all_phones: set[str] = set()
-    all_socials: set[str] = set()
+    # Aggregate contacts, links, and secrets across all pages,
+    # tracking which page URL each finding came from.
+    email_sources: dict[str, list[str]] = {}
+    phone_sources: dict[str, list[str]] = {}
+    social_sources: dict[str, list[str]] = {}
     internal_links: set[str] = set()
-    external_links: set[str] = set()
+    ext_link_sources: dict[str, dict] = {}   # url -> {anchor_text, found_on}
     all_secrets = []
 
     for page in pages:
-        all_emails.update(page.contacts.emails)
-        all_phones.update(page.contacts.phone_numbers)
-        all_socials.update(page.contacts.social_profiles)
+        page_url = page.url
+        for email in page.contacts.emails:
+            email_sources.setdefault(email, []).append(page_url)
+        for phone in page.contacts.phone_numbers:
+            phone_sources.setdefault(phone, []).append(page_url)
+        for social in page.contacts.social_profiles:
+            social_sources.setdefault(social, []).append(page_url)
         for link in page.links:
             if link.link_type == "internal":
                 internal_links.add(link.url)
             else:
-                external_links.add(link.url)
+                entry = ext_link_sources.setdefault(
+                    link.url, {"anchor_text": link.anchor_text, "found_on": []}
+                )
+                entry["found_on"].append(page_url)
         all_secrets.extend(page.secrets)
+
+    # Build provenance-tracked lists
+    email_findings = [
+        EmailFinding(email=e, found_on=sorted(set(urls)))
+        for e, urls in sorted(email_sources.items())
+    ]
+    phone_findings = [
+        PhoneFinding(phone=p, found_on=sorted(set(urls)))
+        for p, urls in sorted(phone_sources.items())
+    ]
+    social_findings = [
+        SocialFinding(url=s, platform=_detect_platform(s), found_on=sorted(set(urls)))
+        for s, urls in sorted(social_sources.items())
+    ]
+    ext_link_findings = [
+        ExternalLinkFinding(
+            url=u, anchor_text=d["anchor_text"], found_on=sorted(set(d["found_on"])),
+        )
+        for u, d in sorted(ext_link_sources.items())
+    ]
+
+    # Flat contact list (backwards-compatible)
+    flat_contacts = ContactInfo(
+        emails=sorted(email_sources),
+        phone_numbers=sorted(phone_sources),
+        social_profiles=sorted(social_sources),
+    )
 
     # Breach checks
     breaches = []
     if request.check_breaches:
         try:
-            breaches = await check_breaches(domain, list(all_emails))
+            breaches = await check_breaches(domain, list(email_sources))
         except Exception as exc:
             logger.warning("Breach check failed for %s: %s", domain, exc)
 
@@ -119,13 +178,12 @@ async def _scan_single_target(
         scan_finished_at=finished,
         pages_scanned=len(pages),
         pages=pages,
-        contacts=ContactInfo(
-            emails=sorted(all_emails),
-            phone_numbers=sorted(all_phones),
-            social_profiles=sorted(all_socials),
-        ),
+        contacts=flat_contacts,
+        emails=email_findings,
+        phone_numbers=phone_findings,
+        social_profiles=social_findings,
         internal_links=sorted(internal_links),
-        external_links=sorted(external_links),
+        external_links=ext_link_findings,
         secrets=all_secrets,
         breaches=breaches,
         metadata={
