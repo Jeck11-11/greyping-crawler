@@ -1,9 +1,6 @@
 # Default configuration for passive nuclei scans.
-# Adjust the rate limits and template selection based on your environment.
-templates:
-  - passive/
-  - dns/
-  - network/
+# Template selection is handled by the -passive flag in the entrypoint,
+# which automatically filters for passive-capable templates.
 
 # Tune concurrency so that it fits within the 2 vCPU / 8 GB Hetzner instance.
 bulk-size: 25
