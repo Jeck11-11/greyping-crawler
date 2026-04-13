@@ -81,3 +81,30 @@ class TestScanSensitivePaths:
 
         assert len(findings) == 1
         assert findings[0].severity == "medium"  # downgraded from critical
+
+    @pytest.mark.asyncio
+    async def test_ignores_301_redirects(self):
+        """301 redirects should NOT be reported as exposed paths."""
+        original_paths = [
+            ("/.env", "Environment file may contain secrets.", "critical"),
+            ("/admin/", "Admin panel path is publicly reachable.", "low"),
+        ]
+
+        async def mock_head(url, **kwargs):
+            if "/.env" in url:
+                return _FakeResponse(301)
+            if "/admin/" in url:
+                return _FakeResponse(302)
+            return _FakeResponse(404)
+
+        with patch("src.path_scanner._SENSITIVE_PATHS", original_paths), \
+             patch("src.path_scanner.httpx.AsyncClient") as MockClient:
+            instance = AsyncMock()
+            instance.head = mock_head
+            instance.__aenter__ = AsyncMock(return_value=instance)
+            instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = instance
+
+            findings = await scan_sensitive_paths("https://example.com", timeout=5)
+
+        assert len(findings) == 0

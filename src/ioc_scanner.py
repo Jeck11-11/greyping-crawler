@@ -73,6 +73,37 @@ _HIDDEN_STYLE_RE = re.compile(
     r"display\s*:\s*none|visibility\s*:\s*hidden", re.I,
 )
 
+# Known analytics / tracking / advertising platforms that legitimately use
+# hidden iframes.  These are NOT indicators of compromise.
+_TRUSTED_IFRAME_DOMAINS: set[str] = {
+    "googletagmanager.com", "google-analytics.com", "analytics.google.com",
+    "www.googletagmanager.com", "www.google-analytics.com",
+    "doubleclick.net", "googlesyndication.com", "googleadservices.com",
+    "google.com",
+    "connect.facebook.net", "facebook.com", "staticxx.facebook.com",
+    "platform.twitter.com", "syndication.twitter.com",
+    "snap.licdn.com", "platform.linkedin.com",
+    "bat.bing.com", "clarity.ms",
+    "analytics.tiktok.com",
+    "cdn.segment.com",
+    "js.hs-analytics.net", "js.hubspot.com",
+    "static.hotjar.com", "vars.hotjar.com",
+    "widget.intercom.io",
+    "player.vimeo.com", "youtube.com", "youtube-nocookie.com",
+    "recaptcha.net", "google.com",
+}
+
+
+def _is_trusted_iframe(host: str) -> bool:
+    """Return True if *host* belongs to a known analytics/tracking platform."""
+    if host in _TRUSTED_IFRAME_DOMAINS:
+        return True
+    # Also match subdomains of trusted roots (e.g. ns.googletagmanager.com)
+    for trusted in _TRUSTED_IFRAME_DOMAINS:
+        if host.endswith("." + trusted):
+            return True
+    return False
+
 
 def _check_hidden_iframes(soup: BeautifulSoup, page_domain: str) -> list[IoCFinding]:
     findings: list[IoCFinding] = []
@@ -90,6 +121,10 @@ def _check_hidden_iframes(soup: BeautifulSoup, page_domain: str) -> list[IoCFind
         if iframe_host == page_domain:
             continue
 
+        # Skip known analytics / tracking platforms
+        if _is_trusted_iframe(iframe_host):
+            continue
+
         is_hidden = False
         # Check dimensional attributes
         width = iframe.get("width", "")
@@ -105,7 +140,7 @@ def _check_hidden_iframes(soup: BeautifulSoup, page_domain: str) -> list[IoCFind
         if is_hidden:
             findings.append(IoCFinding(
                 ioc_type="hidden_iframe",
-                description="Hidden iframe loading external content",
+                description="Hidden iframe loading unknown external content",
                 evidence=f"{src[:150]} (width={width}, height={height})",
                 location="iframe",
                 severity="high",

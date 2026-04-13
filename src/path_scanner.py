@@ -55,8 +55,10 @@ _SENSITIVE_PATHS: list[tuple[str, str, str]] = [
 # interesting status codes.
 _INFO_PATHS = {"/robots.txt", "/sitemap.xml", "/.well-known/security.txt"}
 
-# Status codes that indicate the path exists and is accessible
-_INTERESTING_CODES = {200, 301, 302, 403}
+# Status codes that indicate the path exists and is accessible.
+# 301/302 are excluded — redirects (common on Wix, CDNs, etc.) do NOT
+# mean the sensitive file is exposed.
+_INTERESTING_CODES = {200, 403}
 
 
 async def scan_sensitive_paths(

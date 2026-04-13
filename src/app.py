@@ -174,6 +174,7 @@ async def _scan_single_target(
     internal_links: set[str] = set()
     ext_link_sources: dict[str, dict] = {}   # url -> {anchor_text, found_on}
     all_secrets = []
+    ioc_seen: set[tuple[str, str]] = set()  # (ioc_type, evidence) for dedup
     all_iocs = []
 
     for page in pages:
@@ -193,7 +194,11 @@ async def _scan_single_target(
                 )
                 entry["found_on"].append(page_url)
         all_secrets.extend(page.secrets)
-        all_iocs.extend(page.ioc_findings)
+        for ioc in page.ioc_findings:
+            key = (ioc.ioc_type, ioc.evidence)
+            if key not in ioc_seen:
+                ioc_seen.add(key)
+                all_iocs.append(ioc)
 
     # Build provenance-tracked lists
     email_findings = [

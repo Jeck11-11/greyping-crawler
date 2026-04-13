@@ -46,6 +46,26 @@ class TestHiddenIframeDetection:
         findings = scan_ioc(html, "https://example.com")
         assert not any(f.ioc_type == "hidden_iframe" for f in findings)
 
+    def test_ignores_hidden_gtm_iframe(self):
+        html = '<iframe src="https://www.googletagmanager.com/ns.html?id=GTM-XXXX" height="0" width="0" style="display:none;visibility:hidden"></iframe>'
+        findings = scan_ioc(html, "https://example.com")
+        assert not any(f.ioc_type == "hidden_iframe" for f in findings)
+
+    def test_ignores_hidden_facebook_iframe(self):
+        html = '<iframe src="https://connect.facebook.net/en_US/sdk.html" height="0" width="0" style="display:none"></iframe>'
+        findings = scan_ioc(html, "https://example.com")
+        assert not any(f.ioc_type == "hidden_iframe" for f in findings)
+
+    def test_ignores_hidden_analytics_subdomain(self):
+        html = '<iframe src="https://ns.googletagmanager.com/something" width="0" height="0"></iframe>'
+        findings = scan_ioc(html, "https://example.com")
+        assert not any(f.ioc_type == "hidden_iframe" for f in findings)
+
+    def test_flags_hidden_unknown_domain(self):
+        html = '<iframe src="https://malicious-tracker.xyz/pixel" width="0" height="0"></iframe>'
+        findings = scan_ioc(html, "https://example.com")
+        assert any(f.ioc_type == "hidden_iframe" for f in findings)
+
 
 class TestObfuscatedJsDetection:
     def test_detects_eval_atob(self):
