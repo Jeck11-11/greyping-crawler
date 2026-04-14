@@ -9,20 +9,24 @@ import uuid
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
+from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 import httpx
 
+from ._http_utils import fetch_landing_page, fetch_landing_page_full, normalise_target
 from .breach_checker import check_breaches
 from .cookie_checker import analyze_cookies
 from .crawler import crawl_domain
+from .js_miner import mine_javascript
 from .models import (
     ContactInfo,
     DomainResult,
     DomainSummary,
     EmailFinding,
     ExternalLinkFinding,
+    JSIntelResult,
     PhoneFinding,
     ScanRequest,
     ScanResponse,
@@ -32,8 +36,13 @@ from .models import (
     SSLCertResult,
 )
 from .path_scanner import scan_sensitive_paths
+from .routers import content as content_router
+from .routers import discovery as discovery_router
+from .routers import intel as intel_router
+from .routers import network as network_router
 from .security_headers import analyze_headers
 from .ssl_checker import check_ssl
+from .tech_fingerprint import fingerprint_tech
 
 logger = logging.getLogger("osint_api")
 logging.basicConfig(
@@ -57,6 +66,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(network_router.router)
+app.include_router(content_router.router)
+app.include_router(discovery_router.router)
+app.include_router(intel_router.router)
 
 
 _SOCIAL_PLATFORM_MAP = {
@@ -85,27 +99,9 @@ def _extract_domain(url: str) -> str:
     return (parsed.hostname or url).lower().lstrip("www.")
 
 
-def _normalise_target(raw: str) -> str:
-    """Ensure the target has a scheme so urlparse works correctly."""
-    raw = raw.strip()
-    if not raw.startswith(("http://", "https://")):
-        raw = f"https://{raw}"
-    return raw
-
-
-async def _fetch_landing_page(target: str, timeout: int = 15) -> tuple[dict[str, str], httpx.Cookies]:
-    """GET the landing page and return (response_headers, cookies)."""
-    try:
-        async with httpx.AsyncClient(
-            follow_redirects=True,
-            timeout=httpx.Timeout(timeout),
-            verify=False,
-        ) as client:
-            resp = await client.get(target, headers={"User-Agent": "GreypingCrawler/1.0"})
-            return dict(resp.headers), resp.cookies
-    except Exception as exc:
-        logger.warning("Landing page fetch for header/cookie audit failed: %s", exc)
-        return {}, httpx.Cookies()
+# Backwards-compatible aliases — existing callers / tests may import these.
+_normalise_target = normalise_target
+_fetch_landing_page = fetch_landing_page
 
 
 async def _scan_single_target(
@@ -116,7 +112,7 @@ async def _scan_single_target(
     domain = _extract_domain(target)
     started = datetime.now(timezone.utc).isoformat()
 
-    # Run crawl, SSL check, landing-page fetch (for headers/cookies),
+    # Run crawl, SSL check, landing-page fetch (for headers/cookies/HTML),
     # and sensitive-path scan concurrently.
     crawl_task = crawl_domain(
         target,
@@ -126,7 +122,7 @@ async def _scan_single_target(
         timeout=request.timeout,
     )
     ssl_task = check_ssl(target, timeout=request.timeout)
-    landing_task = _fetch_landing_page(target, timeout=request.timeout)
+    landing_task = fetch_landing_page_full(target, timeout=request.timeout)
     paths_task = scan_sensitive_paths(target, timeout=request.timeout)
 
     crawl_result, ssl_result, landing_result, paths_result = await asyncio.gather(
@@ -151,15 +147,44 @@ async def _scan_single_target(
         logger.warning("SSL check failed for %s: %s", target, ssl_result)
         ssl_result = SSLCertResult(is_valid=False, issues=[f"Check failed: {ssl_result}"])
 
-    # Process headers + cookies
+    # Process headers + cookies + HTML body
     if isinstance(landing_result, Exception):
         logger.warning("Landing page fetch failed for %s: %s", target, landing_result)
-        resp_headers, resp_cookies = {}, httpx.Cookies()
+        resp_headers, resp_cookies, landing_html = {}, httpx.Cookies(), ""
     else:
-        resp_headers, resp_cookies = landing_result
+        resp_headers, resp_cookies, landing_html = landing_result
 
     headers_result = analyze_headers(resp_headers)
     cookie_findings = analyze_cookies(resp_cookies)
+
+    # Tech fingerprint + JS bundle mining (both derive from the landing HTML).
+    tech_findings: list = []
+    js_intel_result = None
+    try:
+        soup = BeautifulSoup(landing_html or "", "html.parser")
+        meta: dict[str, str] = {}
+        for tag in soup.find_all("meta"):
+            name = (tag.get("name") or tag.get("property") or "").lower()
+            content = tag.get("content") or ""
+            if name and content:
+                meta[name] = content
+        script_urls = [t.get("src", "") for t in soup.find_all("script", src=True)]
+        tech_findings = fingerprint_tech(
+            html=landing_html,
+            headers=resp_headers,
+            cookies=resp_cookies,
+            script_urls=script_urls,
+            meta=meta,
+        )
+    except Exception as exc:
+        logger.warning("Tech fingerprint failed for %s: %s", target, exc)
+
+    try:
+        js_intel_result = await mine_javascript(
+            target, landing_html, timeout=request.timeout,
+        )
+    except Exception as exc:
+        logger.warning("JS mining failed for %s: %s", target, exc)
 
     # Process sensitive paths
     if isinstance(paths_result, Exception):
@@ -239,6 +264,10 @@ async def _scan_single_target(
 
     cookie_issues_count = sum(1 for c in cookie_findings if c.issues)
 
+    js_endpoints_count = (
+        len(js_intel_result.api_endpoints) if js_intel_result else 0
+    )
+
     domain_summary = DomainSummary(
         pages_scanned=len(pages),
         emails_found=len(email_findings),
@@ -253,6 +282,8 @@ async def _scan_single_target(
         cookie_issues=cookie_issues_count,
         sensitive_paths_found=len(paths_result),
         ioc_findings=len(all_iocs),
+        technologies_found=len(tech_findings),
+        js_endpoints_found=js_endpoints_count,
     )
 
     return DomainResult(
@@ -275,6 +306,8 @@ async def _scan_single_target(
         cookies=cookie_findings,
         sensitive_paths=paths_result,
         ioc_findings=all_iocs,
+        technologies=tech_findings,
+        js_intel=js_intel_result,
         metadata={
             "domain": domain,
             "render_js": request.render_js,

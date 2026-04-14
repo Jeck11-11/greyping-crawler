@@ -47,6 +47,51 @@ class ScanRequest(BaseModel):
     )
 
 
+class ReconRequest(BaseModel):
+    """Base payload for per-capability /recon/* endpoints."""
+
+    targets: list[str] = Field(
+        ...,
+        min_length=1,
+        max_length=20,
+        description="One or more domain URLs to probe.",
+    )
+    timeout: int = Field(
+        default=30,
+        ge=5,
+        le=120,
+        description="Per-request timeout in seconds.",
+    )
+
+
+class CrawlReconRequest(ReconRequest):
+    """Payload for endpoints that need crawled HTML."""
+
+    render_js: bool = Field(
+        default=False,
+        description="Render JavaScript-heavy pages via a headless browser.",
+    )
+    follow_redirects: bool = Field(
+        default=True,
+        description="Whether the crawler should follow HTTP redirects.",
+    )
+    max_depth: int = Field(
+        default=0,
+        ge=0,
+        le=5,
+        description="Link-follow depth (0 = landing page only).",
+    )
+
+
+class BreachReconRequest(ReconRequest):
+    """Payload for /recon/breaches."""
+
+    emails: list[str] = Field(
+        default_factory=list,
+        description="Optional seed emails to look up in addition to the domain.",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Sub-models used inside the scan result
 # ---------------------------------------------------------------------------
@@ -222,6 +267,37 @@ class IoCFinding(BaseModel):
     severity: str = Field(default="high", description="critical, high, medium, low.")
 
 
+# ---------------------------------------------------------------------------
+# Tech fingerprint + JavaScript deep-mining models (used by /recon/* and /scan)
+# ---------------------------------------------------------------------------
+
+class TechFinding(BaseModel):
+    name: str
+    categories: list[str] = Field(default_factory=list)
+    version: str | None = None
+    confidence: str = Field(default="medium", description="high, medium, or low.")
+    evidence: list[str] = Field(
+        default_factory=list,
+        description="List of signal sources, e.g. 'header:server', 'html:meta:generator'.",
+    )
+
+
+class TechIntelResult(BaseModel):
+    target: str
+    technologies: list[TechFinding] = Field(default_factory=list)
+    error: str | None = None
+
+
+class JSIntelResult(BaseModel):
+    target: str
+    scripts_scanned: int = 0
+    api_endpoints: list[str] = Field(default_factory=list)
+    internal_hosts: list[str] = Field(default_factory=list)
+    sourcemaps_found: list[str] = Field(default_factory=list)
+    recovered_source_files: list[str] = Field(default_factory=list)
+    error: str | None = None
+
+
 class PageResult(BaseModel):
     """Scan results for a single crawled page."""
 
@@ -259,6 +335,8 @@ class DomainSummary(BaseModel):
     cookie_issues: int = Field(default=0, description="Number of cookies with security issues.")
     sensitive_paths_found: int = Field(default=0, description="Number of exposed sensitive paths.")
     ioc_findings: int = Field(default=0, description="Number of indicators of compromise detected.")
+    technologies_found: int = Field(default=0, description="Number of technologies identified.")
+    js_endpoints_found: int = Field(default=0, description="Number of API endpoints discovered in JS.")
 
 
 class DomainResult(BaseModel):
@@ -319,6 +397,14 @@ class DomainResult(BaseModel):
         default_factory=list,
         description="Aggregated indicators of compromise across all pages.",
     )
+    technologies: list[TechFinding] = Field(
+        default_factory=list,
+        description="Technologies identified on the landing page.",
+    )
+    js_intel: JSIntelResult | None = Field(
+        default=None,
+        description="JavaScript bundle mining results (endpoints, sourcemaps, internal hosts).",
+    )
     metadata: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
 
@@ -363,3 +449,73 @@ class ScanResponse(BaseModel):
     total_secrets_found: int = 0
     total_breaches_found: int = 0
     results: list[DomainResult] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Per-capability (/recon/*) response models
+# ---------------------------------------------------------------------------
+
+class SSLReconResult(BaseModel):
+    target: str
+    ssl: SSLCertResult = Field(default_factory=SSLCertResult)
+    error: str | None = None
+
+
+class HeadersReconResult(BaseModel):
+    target: str
+    headers: SecurityHeadersResult = Field(default_factory=SecurityHeadersResult)
+    error: str | None = None
+
+
+class CookiesReconResult(BaseModel):
+    target: str
+    cookies: list[CookieFinding] = Field(default_factory=list)
+    error: str | None = None
+
+
+class PathsReconResult(BaseModel):
+    target: str
+    sensitive_paths: list[SensitivePathFinding] = Field(default_factory=list)
+    error: str | None = None
+
+
+class CrawlReconResult(BaseModel):
+    target: str
+    pages_scanned: int = 0
+    pages: list[PageResult] = Field(default_factory=list)
+    error: str | None = None
+
+
+class ContactReconResult(BaseModel):
+    target: str
+    emails: list[EmailFinding] = Field(default_factory=list)
+    phone_numbers: list[PhoneFinding] = Field(default_factory=list)
+    social_profiles: list[SocialFinding] = Field(default_factory=list)
+    error: str | None = None
+
+
+class LinkReconResult(BaseModel):
+    target: str
+    internal_links: list[str] = Field(default_factory=list)
+    external_links: list[ExternalLinkFinding] = Field(default_factory=list)
+    error: str | None = None
+
+
+class SecretsReconResult(BaseModel):
+    target: str
+    secrets: list[SecretFinding] = Field(default_factory=list)
+    error: str | None = None
+
+
+class IoCReconResult(BaseModel):
+    target: str
+    ioc_findings: list[IoCFinding] = Field(default_factory=list)
+    error: str | None = None
+
+
+class BreachReconResult(BaseModel):
+    target: str
+    breaches: list[BreachRecord] = Field(default_factory=list)
+    error: str | None = None
+
+
