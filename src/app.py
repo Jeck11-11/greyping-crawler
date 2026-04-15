@@ -20,6 +20,8 @@ from .breach_checker import check_breaches
 from .cookie_checker import analyze_cookies
 from .crawler import crawl_domain
 from .js_miner import mine_javascript
+from .extractors import extract_contacts, extract_links, extract_page_metadata
+from .ioc_scanner import scan_ioc
 from .models import (
     ContactInfo,
     DomainResult,
@@ -27,7 +29,11 @@ from .models import (
     EmailFinding,
     ExternalLinkFinding,
     JSIntelResult,
+    LinkInfo,
+    PageResult,
+    PassiveIntelResult,
     PhoneFinding,
+    ReconRequest,
     ScanRequest,
     ScanResponse,
     ScanSummary,
@@ -35,11 +41,14 @@ from .models import (
     SocialFinding,
     SSLCertResult,
 )
+from .passive_intel import query_ct_logs, query_dns, query_rdap, query_wayback
 from .path_scanner import scan_sensitive_paths
 from .routers import content as content_router
 from .routers import discovery as discovery_router
 from .routers import intel as intel_router
 from .routers import network as network_router
+from .routers import passive as passive_router
+from .secret_scanner import scan_secrets
 from .security_headers import analyze_headers
 from .ssl_checker import check_ssl
 from .tech_fingerprint import fingerprint_tech
@@ -71,6 +80,7 @@ app.include_router(network_router.router)
 app.include_router(content_router.router)
 app.include_router(discovery_router.router)
 app.include_router(intel_router.router)
+app.include_router(passive_router.router)
 
 
 _SOCIAL_PLATFORM_MAP = {
@@ -388,3 +398,293 @@ async def quick_scan(request: ScanRequest) -> ScanResponse:
     request.max_depth = 0
     request.check_breaches = False
     return await scan(request)
+
+
+# ---------------------------------------------------------------------------
+# Light-touch scan — exactly one GET per target (WAF-friendly)
+# ---------------------------------------------------------------------------
+
+async def _lighttouch_single_target(target: str, timeout: int) -> DomainResult:
+    """Single-GET scan with a browser UA. No path probe, crawl, JS mine, or breach."""
+    domain = _extract_domain(target)
+    started = datetime.now(timezone.utc).isoformat()
+
+    ssl_task = check_ssl(target, timeout=timeout)
+    landing_task = fetch_landing_page_full(target, timeout=timeout, stealth=True)
+
+    ssl_result, landing_result = await asyncio.gather(
+        ssl_task, landing_task, return_exceptions=True,
+    )
+
+    if isinstance(ssl_result, Exception):
+        logger.warning("SSL check failed for %s: %s", target, ssl_result)
+        ssl_result = SSLCertResult(is_valid=False, issues=[f"Check failed: {ssl_result}"])
+
+    if isinstance(landing_result, Exception) or not landing_result:
+        logger.warning("Light-touch landing fetch failed for %s", target)
+        resp_headers, resp_cookies, html = {}, httpx.Cookies(), ""
+    else:
+        resp_headers, resp_cookies, html = landing_result
+
+    soup = BeautifulSoup(html or "", "html.parser")
+    title, meta_desc, snippet = extract_page_metadata(soup)
+    contacts = extract_contacts(soup, html)
+    links = extract_links(soup, target)
+    secrets = scan_secrets(html) if html else []
+    iocs = scan_ioc(html, target) if html else []
+
+    meta: dict[str, str] = {}
+    for tag in soup.find_all("meta"):
+        name = (tag.get("name") or tag.get("property") or "").lower()
+        content = tag.get("content") or ""
+        if name and content:
+            meta[name] = content
+    script_urls = [t.get("src", "") for t in soup.find_all("script", src=True)]
+
+    tech_findings = fingerprint_tech(
+        html=html,
+        headers=resp_headers,
+        cookies=resp_cookies,
+        script_urls=script_urls,
+        meta=meta,
+    )
+
+    headers_result = analyze_headers(resp_headers)
+    cookie_findings = analyze_cookies(resp_cookies)
+
+    internal_links = sorted({l.url for l in links if l.link_type == "internal"})
+    ext_link_findings = [
+        ExternalLinkFinding(url=l.url, anchor_text=l.anchor_text, found_on=[target])
+        for l in links if l.link_type == "external"
+    ]
+    email_findings = [
+        EmailFinding(email=e, found_on=[target]) for e in sorted(set(contacts.emails))
+    ]
+    phone_findings = [
+        PhoneFinding(phone=p, found_on=[target])
+        for p in sorted(set(contacts.phone_numbers))
+    ]
+    social_findings = [
+        SocialFinding(url=s, platform=_detect_platform(s), found_on=[target])
+        for s in sorted(set(contacts.social_profiles))
+    ]
+
+    page = PageResult(
+        url=target,
+        status_code=int(resp_headers.get(":status", 0)) or (200 if html else None),
+        title=title,
+        meta_description=meta_desc,
+        content_snippet=snippet,
+        links=links,
+        contacts=contacts,
+        secrets=secrets,
+        ioc_findings=iocs,
+    )
+
+    finished = datetime.now(timezone.utc).isoformat()
+
+    summary = DomainSummary(
+        pages_scanned=1 if html else 0,
+        emails_found=len(email_findings),
+        phone_numbers_found=len(phone_findings),
+        social_profiles_found=len(social_findings),
+        internal_links_found=len(internal_links),
+        external_links_found=len(ext_link_findings),
+        secrets_found=len(secrets),
+        breaches_found=0,
+        security_headers_grade=headers_result.grade,
+        ssl_grade=ssl_result.grade,
+        cookie_issues=sum(1 for c in cookie_findings if c.issues),
+        sensitive_paths_found=0,
+        ioc_findings=len(iocs),
+        technologies_found=len(tech_findings),
+        js_endpoints_found=0,
+    )
+
+    return DomainResult(
+        target=target,
+        scan_started_at=started,
+        scan_finished_at=finished,
+        summary=summary,
+        pages_scanned=1 if html else 0,
+        pages=[page] if html else [],
+        contacts=contacts,
+        emails=email_findings,
+        phone_numbers=phone_findings,
+        social_profiles=social_findings,
+        internal_links=internal_links,
+        external_links=ext_link_findings,
+        secrets=secrets,
+        breaches=[],
+        security_headers=headers_result,
+        ssl_certificate=ssl_result,
+        cookies=cookie_findings,
+        sensitive_paths=[],
+        ioc_findings=iocs,
+        technologies=tech_findings,
+        js_intel=None,
+        metadata={"domain": domain, "mode": "lighttouch"},
+        error=None if html else "landing page fetch failed",
+    )
+
+
+class LightTouchRequest(ReconRequest):
+    """Light-touch scan payload — inherits targets + timeout from ReconRequest."""
+
+
+@app.post("/scan/lighttouch", response_model=ScanResponse)
+async def lighttouch_scan(request: LightTouchRequest) -> ScanResponse:
+    """WAF-friendly scan. ONE GET per target with a Chrome UA + TLS handshake.
+
+    No path probing, no crawling, no headless browser, no <script src>
+    fetches, no sourcemap recovery, no breach lookup. Everything we can
+    derive from a single landing-page response is derived.
+    """
+    scan_id = uuid.uuid4().hex
+    started = datetime.now(timezone.utc).isoformat()
+
+    targets = [_normalise_target(t) for t in request.targets]
+    domain_results = await asyncio.gather(
+        *(_lighttouch_single_target(t, request.timeout) for t in targets)
+    )
+    finished = datetime.now(timezone.utc).isoformat()
+
+    total_pages = sum(r.summary.pages_scanned for r in domain_results)
+    total_secrets = sum(r.summary.secrets_found for r in domain_results)
+
+    errors = [r for r in domain_results if r.error]
+    if len(errors) == len(domain_results):
+        status = "failed"
+    elif errors:
+        status = "partial"
+    else:
+        status = "completed"
+
+    return ScanResponse(
+        scan_id=scan_id,
+        status=status,
+        started_at=started,
+        finished_at=finished,
+        summary=ScanSummary(
+            targets=len(targets),
+            pages_scanned=total_pages,
+            emails_found=sum(r.summary.emails_found for r in domain_results),
+            phone_numbers_found=sum(r.summary.phone_numbers_found for r in domain_results),
+            social_profiles_found=sum(r.summary.social_profiles_found for r in domain_results),
+            internal_links_found=sum(r.summary.internal_links_found for r in domain_results),
+            external_links_found=sum(r.summary.external_links_found for r in domain_results),
+            secrets_found=total_secrets,
+            breaches_found=0,
+            total_cookie_issues=sum(r.summary.cookie_issues for r in domain_results),
+            total_sensitive_paths=0,
+            total_ioc_findings=sum(r.summary.ioc_findings for r in domain_results),
+        ),
+        total_targets=len(targets),
+        total_pages_scanned=total_pages,
+        total_secrets_found=total_secrets,
+        total_breaches_found=0,
+        results=domain_results,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Passive scan — zero traffic to the target (third-party sources only)
+# ---------------------------------------------------------------------------
+
+class PassiveRequest(ReconRequest):
+    """Passive scan payload — optional seed emails to also check against HIBP."""
+
+    emails: list = []  # list[str]; keep weak-typed so an empty JSON array is OK
+
+
+async def _passive_single_target(
+    target: str, emails: list[str], timeout: int,
+) -> DomainResult:
+    domain = _extract_domain(target)
+    started = datetime.now(timezone.utc).isoformat()
+
+    dns_task = query_dns(domain, timeout=timeout)
+    ct_task = query_ct_logs(domain, timeout=timeout)
+    rdap_task = query_rdap(domain, timeout=timeout)
+    wayback_task = query_wayback(domain, timeout=timeout)
+    breach_task = check_breaches(domain, emails or [])
+
+    dns, ct, rdap, wayback, breaches = await asyncio.gather(
+        dns_task, ct_task, rdap_task, wayback_task, breach_task,
+        return_exceptions=True,
+    )
+
+    def _or_none(x):
+        return None if isinstance(x, Exception) else x
+
+    dns = _or_none(dns)
+    ct = _or_none(ct)
+    rdap = _or_none(rdap)
+    wayback = _or_none(wayback)
+    if isinstance(breaches, Exception):
+        logger.warning("Passive breach lookup failed for %s: %s", domain, breaches)
+        breaches = []
+
+    passive = PassiveIntelResult(
+        dns=dns, ct=ct, rdap=rdap, wayback=wayback, breaches=breaches,
+    )
+
+    subdomains_found = len(ct.subdomains) if ct else 0
+    wayback_snapshots = wayback.snapshot_count if wayback else 0
+
+    summary = DomainSummary(
+        pages_scanned=0,
+        breaches_found=len(breaches),
+        subdomains_found=subdomains_found,
+        wayback_snapshots=wayback_snapshots,
+    )
+
+    return DomainResult(
+        target=target,
+        scan_started_at=started,
+        scan_finished_at=datetime.now(timezone.utc).isoformat(),
+        summary=summary,
+        pages_scanned=0,
+        pages=[],
+        breaches=breaches,
+        passive_intel=passive,
+        metadata={"domain": domain, "mode": "passive"},
+    )
+
+
+@app.post("/scan/passive", response_model=ScanResponse)
+async def passive_scan(request: PassiveRequest) -> ScanResponse:
+    """Fully passive scan. Touches **only** third-party sources.
+
+    Sources: system DNS resolver, crt.sh (CT logs), rdap.org, archive.org,
+    and HIBP (if HIBP_API_KEY is set). The target domain receives zero
+    packets from this server.
+    """
+    scan_id = uuid.uuid4().hex
+    started = datetime.now(timezone.utc).isoformat()
+
+    targets = [_normalise_target(t) for t in request.targets]
+    domain_results = await asyncio.gather(*(
+        _passive_single_target(t, list(request.emails or []), request.timeout)
+        for t in targets
+    ))
+    finished = datetime.now(timezone.utc).isoformat()
+
+    total_breaches = sum(r.summary.breaches_found for r in domain_results)
+
+    return ScanResponse(
+        scan_id=scan_id,
+        status="completed",
+        started_at=started,
+        finished_at=finished,
+        summary=ScanSummary(
+            targets=len(targets),
+            pages_scanned=0,
+            breaches_found=total_breaches,
+        ),
+        total_targets=len(targets),
+        total_pages_scanned=0,
+        total_secrets_found=0,
+        total_breaches_found=total_breaches,
+        results=domain_results,
+    )

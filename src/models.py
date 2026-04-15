@@ -298,6 +298,57 @@ class JSIntelResult(BaseModel):
     error: str | None = None
 
 
+# ---------------------------------------------------------------------------
+# Passive intel models (DNS, CT logs, RDAP, Wayback)
+# ---------------------------------------------------------------------------
+
+class DNSResult(BaseModel):
+    domain: str
+    a_records: list[str] = Field(default_factory=list)
+    aaaa_records: list[str] = Field(default_factory=list)
+    error: str | None = None
+
+
+class CTResult(BaseModel):
+    domain: str
+    subdomains: list[str] = Field(
+        default_factory=list,
+        description="Deduped subdomains observed in CT log issuances.",
+    )
+    issuers: list[str] = Field(default_factory=list)
+    certificates_seen: int = 0
+    error: str | None = None
+
+
+class RDAPResult(BaseModel):
+    domain: str
+    registrar: str = ""
+    created: str = ""
+    expires: str = ""
+    name_servers: list[str] = Field(default_factory=list)
+    status: list[str] = Field(default_factory=list)
+    error: str | None = None
+
+
+class WaybackResult(BaseModel):
+    domain: str
+    first_seen: str = ""
+    last_seen: str = ""
+    snapshot_count: int = 0
+    recent_snapshots: list[str] = Field(default_factory=list)
+    error: str | None = None
+
+
+class PassiveIntelResult(BaseModel):
+    """Aggregated passive intel for a single target (no traffic to target)."""
+
+    dns: DNSResult | None = None
+    ct: CTResult | None = None
+    rdap: RDAPResult | None = None
+    wayback: WaybackResult | None = None
+    breaches: list[BreachRecord] = Field(default_factory=list)
+
+
 class PageResult(BaseModel):
     """Scan results for a single crawled page."""
 
@@ -337,6 +388,8 @@ class DomainSummary(BaseModel):
     ioc_findings: int = Field(default=0, description="Number of indicators of compromise detected.")
     technologies_found: int = Field(default=0, description="Number of technologies identified.")
     js_endpoints_found: int = Field(default=0, description="Number of API endpoints discovered in JS.")
+    subdomains_found: int = Field(default=0, description="Subdomains observed via CT logs (passive).")
+    wayback_snapshots: int = Field(default=0, description="Archive.org snapshots recorded (passive).")
 
 
 class DomainResult(BaseModel):
@@ -404,6 +457,10 @@ class DomainResult(BaseModel):
     js_intel: JSIntelResult | None = Field(
         default=None,
         description="JavaScript bundle mining results (endpoints, sourcemaps, internal hosts).",
+    )
+    passive_intel: PassiveIntelResult | None = Field(
+        default=None,
+        description="Third-party-sourced intel (DNS, CT logs, RDAP, Wayback, breaches).",
     )
     metadata: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
