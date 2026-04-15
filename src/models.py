@@ -349,6 +349,99 @@ class PassiveIntelResult(BaseModel):
     breaches: list[BreachRecord] = Field(default_factory=list)
 
 
+# ---------------------------------------------------------------------------
+# FAIR (Factor Analysis of Information Risk) signals
+# ---------------------------------------------------------------------------
+# Maps the evidence collected by the scanner onto the FAIR risk model so a
+# downstream system (e.g. Xano) can assemble a consistent risk profile.
+#
+# FAIR core relationships:
+#   Risk               = Loss Event Frequency × Loss Magnitude
+#   Loss Event Freq.   = Threat Event Freq. × Vulnerability
+#   Vulnerability      = Threat Capability vs. Resistance (Control) Strength
+#
+# Every score is normalised 0-100 (higher = more of that factor), regardless
+# of whether the factor is "bad" (TEF, Vulnerability, Loss Magnitude) or
+# "good" (Control Strength). Loss Event Frequency and the composite
+# overall_risk are derived from the factor scores.
+
+
+class FAIRSignal(BaseModel):
+    """A single piece of evidence mapped onto a FAIR factor."""
+
+    name: str = Field(..., description="Short machine-readable identifier, e.g. 'exposed_secrets'.")
+    score: int = Field(
+        ..., ge=0, le=100,
+        description="Normalised 0-100 score for this signal within its factor.",
+    )
+    weight: float = Field(
+        default=1.0, ge=0.0,
+        description="Relative weight of this signal when aggregating the factor.",
+    )
+    evidence: list[str] = Field(
+        default_factory=list,
+        description="Human-readable evidence strings that drove the score.",
+    )
+
+
+class FAIRFactor(BaseModel):
+    """A single FAIR factor: its aggregated score and the underlying signals."""
+
+    score: int = Field(
+        default=0, ge=0, le=100,
+        description="Weighted average of the signal scores below.",
+    )
+    signals: list[FAIRSignal] = Field(default_factory=list)
+    notes: str = Field(
+        default="",
+        description="Free-form commentary about how this factor was derived.",
+    )
+
+
+class FAIRSignals(BaseModel):
+    """FAIR-aligned risk signals derived from a single DomainResult."""
+
+    threat_event_frequency: FAIRFactor = Field(
+        default_factory=FAIRFactor,
+        description="How often threat actors are likely to engage with this target.",
+    )
+    vulnerability: FAIRFactor = Field(
+        default_factory=FAIRFactor,
+        description="Probability that a threat engagement becomes a loss event.",
+    )
+    control_strength: FAIRFactor = Field(
+        default_factory=FAIRFactor,
+        description="Strength of observed defences (WAF, TLS, headers, cookies…).",
+    )
+    loss_magnitude: FAIRFactor = Field(
+        default_factory=FAIRFactor,
+        description="Potential impact of a loss event based on observed exposure.",
+    )
+    loss_event_frequency: int = Field(
+        default=0, ge=0, le=100,
+        description="Derived: TEF × Vulnerability, attenuated by Control Strength.",
+    )
+    overall_risk: int = Field(
+        default=0, ge=0, le=100,
+        description="Derived composite: LEF × Loss Magnitude (both normalised).",
+    )
+    risk_tier: str = Field(
+        default="low",
+        description="Banded tier: low (0-24), medium (25-49), high (50-74), critical (75-100).",
+    )
+    confidence: str = Field(
+        default="low",
+        description=(
+            "How much evidence was available when scoring. 'low' for passive, "
+            "'medium' for light-touch, 'high' for standard/full scans."
+        ),
+    )
+    scan_mode: str = Field(
+        default="",
+        description="Which orchestrator produced these signals: passive, lighttouch, standard, full.",
+    )
+
+
 class PageResult(BaseModel):
     """Scan results for a single crawled page."""
 
@@ -461,6 +554,14 @@ class DomainResult(BaseModel):
     passive_intel: PassiveIntelResult | None = Field(
         default=None,
         description="Third-party-sourced intel (DNS, CT logs, RDAP, Wayback, breaches).",
+    )
+    fair_signals: FAIRSignals | None = Field(
+        default=None,
+        description=(
+            "FAIR-aligned risk signals (TEF, Vulnerability, Control Strength, "
+            "Loss Magnitude) derived from the evidence in this result. Use "
+            "these signals to build a risk profile in a downstream system."
+        ),
     )
     metadata: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
