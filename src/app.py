@@ -25,6 +25,8 @@ from .extractors import extract_contacts, extract_links, extract_page_metadata
 from .ioc_scanner import scan_ioc
 from .models import (
     ContactInfo,
+    CTResult,
+    DNSResult,
     DomainResult,
     DomainSummary,
     EmailFinding,
@@ -34,6 +36,7 @@ from .models import (
     PageResult,
     PassiveIntelResult,
     PhoneFinding,
+    RDAPResult,
     ReconRequest,
     ScanRequest,
     ScanResponse,
@@ -41,6 +44,7 @@ from .models import (
     SecurityHeadersResult,
     SocialFinding,
     SSLCertResult,
+    WaybackResult,
 )
 from .passive_intel import query_ct_logs, query_dns, query_rdap, query_wayback
 from .path_scanner import scan_sensitive_paths
@@ -621,13 +625,22 @@ async def _passive_single_target(
         return_exceptions=True,
     )
 
-    def _or_none(x):
-        return None if isinstance(x, Exception) else x
+    def _to_result(x, kind):
+        """Coerce either a successful result or a raised exception into a
+        typed result object with ``.error`` populated on failure. Keeps the
+        response shape stable for Xano et al., and lets operators see why
+        a passive scan produced no data. Falls back to the exception class
+        name when ``str(exc)`` is empty so we never emit ``error=""``."""
+        if isinstance(x, Exception):
+            msg = str(x) or x.__class__.__name__
+            logger.warning("Passive %s lookup failed for %s: %s", kind.__name__, domain, msg)
+            return kind(domain=domain, error=msg)
+        return x
 
-    dns = _or_none(dns)
-    ct = _or_none(ct)
-    rdap = _or_none(rdap)
-    wayback = _or_none(wayback)
+    dns = _to_result(dns, DNSResult)
+    ct = _to_result(ct, CTResult)
+    rdap = _to_result(rdap, RDAPResult)
+    wayback = _to_result(wayback, WaybackResult)
     if isinstance(breaches, Exception):
         logger.warning("Passive breach lookup failed for %s: %s", domain, breaches)
         breaches = []
@@ -636,14 +649,23 @@ async def _passive_single_target(
         dns=dns, ct=ct, rdap=rdap, wayback=wayback, breaches=breaches,
     )
 
-    subdomains_found = len(ct.subdomains) if ct else 0
-    wayback_snapshots = wayback.snapshot_count if wayback else 0
+    # If every upstream source reported an error, surface that on
+    # DomainResult.error so the caller doesn't mistake an egress-blocked
+    # VPS for a blank target.
+    if all(x.error for x in (dns, ct, rdap, wayback)):
+        passive_error = (
+            f"All passive sources failed for {domain}: "
+            f"dns={dns.error}; ct={ct.error}; rdap={rdap.error}; "
+            f"wayback={wayback.error}"
+        )
+    else:
+        passive_error = None
 
     summary = DomainSummary(
         pages_scanned=0,
         breaches_found=len(breaches),
-        subdomains_found=subdomains_found,
-        wayback_snapshots=wayback_snapshots,
+        subdomains_found=len(ct.subdomains),
+        wayback_snapshots=wayback.snapshot_count,
     )
 
     result = DomainResult(
@@ -656,6 +678,7 @@ async def _passive_single_target(
         breaches=breaches,
         passive_intel=passive,
         metadata={"domain": domain, "mode": "passive"},
+        error=passive_error,
     )
     result.fair_signals = compute_fair_signals(result, scan_mode="passive")
     return result

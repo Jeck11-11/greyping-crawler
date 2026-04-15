@@ -157,6 +157,69 @@ class TestPassiveScan:
         )
         assert resp.status_code == 200
         r = resp.json()["results"][0]
-        # Failed source becomes None; other sources still present
-        assert r["passive_intel"]["ct"] is None
+        # Failed source is now a typed result with .error set, not None —
+        # so callers don't need to null-check every sub-field.
+        assert r["passive_intel"]["ct"] is not None
+        assert "crt.sh down" in r["passive_intel"]["ct"]["error"]
         assert r["passive_intel"]["dns"] is not None
+        assert r["passive_intel"]["dns"]["error"] is None
+        # Only a subset failed → the top-level result.error stays clean.
+        assert r["error"] is None
+
+    @patch("src.app.check_breaches", new_callable=AsyncMock)
+    @patch("src.app.query_wayback", new_callable=AsyncMock)
+    @patch("src.app.query_rdap", new_callable=AsyncMock)
+    @patch("src.app.query_ct_logs", new_callable=AsyncMock)
+    @patch("src.app.query_dns", new_callable=AsyncMock)
+    def test_passive_falls_back_to_exception_class_when_message_empty(
+        self, mock_dns, mock_ct, mock_rdap, mock_wb, mock_breaches,
+    ):
+        """Some httpx failures raise with empty args → str(exc) == ''.
+        We should surface the exception class name rather than an empty
+        string so operators never see a spookily-blank error field."""
+        mock_dns.return_value = DNSResult(
+            domain="example.com", a_records=["1.2.3.4"],
+        )
+        mock_ct.side_effect = RuntimeError()  # no message
+        mock_rdap.return_value = RDAPResult(domain="example.com")
+        mock_wb.return_value = WaybackResult(domain="example.com")
+        mock_breaches.return_value = []
+
+        resp = client.post(
+            "/scan/passive",
+            json={"targets": ["https://example.com"]},
+        )
+        assert resp.status_code == 200
+        r = resp.json()["results"][0]
+        assert r["passive_intel"]["ct"]["error"] == "RuntimeError"
+
+    @patch("src.app.check_breaches", new_callable=AsyncMock)
+    @patch("src.app.query_wayback", new_callable=AsyncMock)
+    @patch("src.app.query_rdap", new_callable=AsyncMock)
+    @patch("src.app.query_ct_logs", new_callable=AsyncMock)
+    @patch("src.app.query_dns", new_callable=AsyncMock)
+    def test_passive_surfaces_summary_error_when_every_source_fails(
+        self, mock_dns, mock_ct, mock_rdap, mock_wb, mock_breaches,
+    ):
+        """Egress-blocked VPS should NOT look like a blank target."""
+        mock_dns.side_effect = RuntimeError("DNS resolution timed out")
+        mock_ct.side_effect = RuntimeError("crt.sh unreachable")
+        mock_rdap.side_effect = RuntimeError("rdap.org unreachable")
+        mock_wb.side_effect = RuntimeError("archive.org unreachable")
+        mock_breaches.return_value = []
+
+        resp = client.post(
+            "/scan/passive",
+            json={"targets": ["https://ibisconstruction.ie"]},
+        )
+        # Still 200 so batched scans aren't aborted by a broken target.
+        assert resp.status_code == 200
+        r = resp.json()["results"][0]
+        # Every sub-source carries its own error.
+        assert "DNS resolution timed out" in r["passive_intel"]["dns"]["error"]
+        assert "crt.sh unreachable" in r["passive_intel"]["ct"]["error"]
+        assert "rdap.org unreachable" in r["passive_intel"]["rdap"]["error"]
+        assert "archive.org unreachable" in r["passive_intel"]["wayback"]["error"]
+        # And the top-level result.error summarises the situation.
+        assert r["error"] is not None
+        assert "All passive sources failed" in r["error"]
