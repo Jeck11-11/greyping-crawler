@@ -302,10 +302,59 @@ class JSIntelResult(BaseModel):
 # Passive intel models (DNS, CT logs, RDAP, Wayback)
 # ---------------------------------------------------------------------------
 
+class MXRecord(BaseModel):
+    priority: int
+    host: str
+
+
 class DNSResult(BaseModel):
     domain: str
     a_records: list[str] = Field(default_factory=list)
     aaaa_records: list[str] = Field(default_factory=list)
+    mx_records: list[MXRecord] = Field(default_factory=list)
+    ns_records: list[str] = Field(default_factory=list)
+    txt_records: list[str] = Field(default_factory=list)
+    cname_records: list[str] = Field(default_factory=list)
+    error: str | None = None
+
+
+class SPFResult(BaseModel):
+    raw: str | None = None
+    exists: bool = False
+    all_qualifier: str | None = Field(
+        default=None,
+        description="Terminal mechanism: '-all' (fail), '~all' (softfail), '+all' (pass), '?all' (neutral).",
+    )
+    includes: list[str] = Field(default_factory=list, description="SPF include: targets.")
+    issues: list[str] = Field(default_factory=list)
+
+
+class DMARCResult(BaseModel):
+    raw: str | None = None
+    exists: bool = False
+    policy: str | None = Field(default=None, description="p= tag: none, quarantine, reject.")
+    subdomain_policy: str | None = Field(default=None, description="sp= tag.")
+    pct: int = Field(default=100, description="Percentage of messages subject to policy.")
+    rua: list[str] = Field(default_factory=list, description="Aggregate report URIs.")
+    issues: list[str] = Field(default_factory=list)
+
+
+class DKIMResult(BaseModel):
+    selectors_checked: list[str] = Field(default_factory=list)
+    selectors_found: list[str] = Field(default_factory=list)
+    issues: list[str] = Field(default_factory=list)
+
+
+class EmailSecurityResult(BaseModel):
+    domain: str
+    spf: SPFResult = Field(default_factory=SPFResult)
+    dmarc: DMARCResult = Field(default_factory=DMARCResult)
+    dkim: DKIMResult = Field(default_factory=DKIMResult)
+    mail_providers: list[str] = Field(
+        default_factory=list,
+        description="Inferred mail providers from MX records (e.g. 'Google Workspace', 'Microsoft 365').",
+    )
+    grade: str = Field(default="", description="A-F email security grade.")
     error: str | None = None
 
 
@@ -346,6 +395,7 @@ class PassiveIntelResult(BaseModel):
     ct: CTResult | None = None
     rdap: RDAPResult | None = None
     wayback: WaybackResult | None = None
+    email_security: EmailSecurityResult | None = None
     breaches: list[BreachRecord] = Field(default_factory=list)
 
 

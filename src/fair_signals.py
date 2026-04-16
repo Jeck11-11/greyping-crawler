@@ -279,6 +279,37 @@ def _build_vulnerability(result: DomainResult) -> FAIRFactor:
             evidence=[f"{c.name}: {', '.join(c.issues)}" for c in bad_cookies[:3]],
         ))
 
+    # Email authentication gaps — missing SPF/DMARC is a phishing vector.
+    email_sec = (
+        result.passive_intel.email_security
+        if result.passive_intel else None
+    )
+    if email_sec and not email_sec.error:
+        issues: list[str] = []
+        score = 0
+        if not email_sec.spf.exists:
+            issues.append("No SPF record")
+            score += 40
+        elif email_sec.spf.all_qualifier in ("+all", "?all"):
+            issues.append(f"SPF uses {email_sec.spf.all_qualifier} (weak)")
+            score += 25
+        if not email_sec.dmarc.exists:
+            issues.append("No DMARC record — domain spoofing is trivial")
+            score += 40
+        elif email_sec.dmarc.policy == "none":
+            issues.append("DMARC p=none — monitoring only, no enforcement")
+            score += 20
+        if not email_sec.dkim.selectors_found:
+            issues.append("No DKIM selectors found")
+            score += 20
+        if issues:
+            signals.append(FAIRSignal(
+                name="email_auth_missing",
+                score=min(100, score),
+                weight=1.2,
+                evidence=issues,
+            ))
+
     return _factor_from_signals(
         signals,
         notes="Higher Vulnerability means a threat engagement is more likely to succeed.",
@@ -344,9 +375,27 @@ def _build_control_strength(result: DomainResult) -> FAIRFactor:
             evidence=[f"{clean}/{len(result.cookies)} cookies have no issues"],
         ))
 
+    # Email authentication posture — SPF + DMARC + DKIM = strong phishing defence.
+    email_sec = (
+        result.passive_intel.email_security
+        if result.passive_intel else None
+    )
+    if email_sec and not email_sec.error and email_sec.grade:
+        signals.append(FAIRSignal(
+            name="email_security_posture",
+            score=_grade_score(email_sec.grade),
+            weight=1.0,
+            evidence=[
+                f"email security grade={email_sec.grade}",
+                f"SPF={'yes' if email_sec.spf.exists else 'no'}",
+                f"DMARC={email_sec.dmarc.policy or 'missing'}",
+                f"DKIM={len(email_sec.dkim.selectors_found)} selector(s) found",
+            ],
+        ))
+
     return _factor_from_signals(
         signals,
-        notes="Higher Control Strength means stronger observed defences (WAF, TLS, headers, cookies).",
+        notes="Higher Control Strength means stronger observed defences (WAF, TLS, headers, cookies, email auth).",
     )
 
 

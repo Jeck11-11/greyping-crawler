@@ -29,6 +29,7 @@ from .models import (
     DNSResult,
     DomainResult,
     DomainSummary,
+    EmailSecurityResult,
     EmailFinding,
     ExternalLinkFinding,
     JSIntelResult,
@@ -46,7 +47,13 @@ from .models import (
     SSLCertResult,
     WaybackResult,
 )
-from .passive_intel import query_ct_logs, query_dns, query_rdap, query_wayback
+from .passive_intel import (
+    query_ct_logs,
+    query_dns,
+    query_email_security,
+    query_rdap,
+    query_wayback,
+)
 from .path_scanner import scan_sensitive_paths
 from .routers import content as content_router
 from .routers import discovery as discovery_router
@@ -645,8 +652,19 @@ async def _passive_single_target(
         logger.warning("Passive breach lookup failed for %s: %s", domain, breaches)
         breaches = []
 
+    # Email security runs after DNS so it can reuse MX records.
+    mx_records = dns.mx_records if not dns.error else []
+    try:
+        email_sec = await asyncio.wait_for(
+            query_email_security(domain, mx_records, timeout=timeout),
+            timeout=timeout,
+        )
+    except Exception as exc:
+        email_sec = EmailSecurityResult(domain=domain, error=str(exc))
+
     passive = PassiveIntelResult(
-        dns=dns, ct=ct, rdap=rdap, wayback=wayback, breaches=breaches,
+        dns=dns, ct=ct, rdap=rdap, wayback=wayback,
+        email_security=email_sec, breaches=breaches,
     )
 
     # If every upstream source reported an error, surface that on
