@@ -118,6 +118,77 @@ def test_laravel_cookie_match_is_anchored():
     assert "Laravel" not in names
 
 
+def test_sessionid_cookie_alone_does_not_flag_django():
+    """'sessionid' is used by Flask, generic Python, and many other
+    frameworks — it should NOT be enough to fingerprint Django."""
+
+    class _Cookie:
+        def __init__(self, name):
+            self.name = name
+
+    findings = fingerprint_tech(
+        html="", headers={},
+        cookies=[_Cookie("sessionid")],
+        script_urls=[], meta={},
+    )
+    names = {f.name for f in findings}
+    assert "Django" not in names
+
+
+def test_django_detected_via_csrftoken_cookie():
+    class _Cookie:
+        def __init__(self, name):
+            self.name = name
+
+    findings = fingerprint_tech(
+        html="", headers={},
+        cookies=[_Cookie("csrftoken")],
+        script_urls=[], meta={},
+    )
+    names = {f.name for f in findings}
+    assert "Django" in names
+
+
+def test_session_id_cookie_alone_does_not_flag_rails():
+    """'_session_id' is generic — many frameworks use it."""
+
+    class _Cookie:
+        def __init__(self, name):
+            self.name = name
+
+    findings = fingerprint_tech(
+        html="", headers={},
+        cookies=[_Cookie("_session_id")],
+        script_urls=[], meta={},
+    )
+    names = {f.name for f in findings}
+    assert "Ruby on Rails" not in names
+
+
+def test_rails_detected_via_rails_session_cookie():
+    class _Cookie:
+        def __init__(self, name):
+            self.name = name
+
+    findings = fingerprint_tech(
+        html="", headers={},
+        cookies=[_Cookie("_rails_session")],
+        script_urls=[], meta={},
+    )
+    names = {f.name for f in findings}
+    assert "Ruby on Rails" in names
+
+
+def test_rails_detected_via_phusion_passenger_header():
+    findings = fingerprint_tech(
+        html="",
+        headers={"x-powered-by": "Phusion Passenger"},
+        script_urls=[], meta={},
+    )
+    names = {f.name for f in findings}
+    assert "Ruby on Rails" in names
+
+
 def test_no_signals_returns_empty():
     findings = fingerprint_tech(
         html="<html><body>hello</body></html>",

@@ -108,11 +108,11 @@ SIGNATURES: dict[str, dict[str, Any]] = {
     },
     "Django": {
         "categories": ["backend_framework"],
-        "cookies": [r"csrftoken", r"sessionid"],
+        "cookies": [r"^csrftoken$"],
     },
     "Ruby on Rails": {
         "categories": ["backend_framework"],
-        "cookies": [r"_rails_session", r"_session_id"],
+        "cookies": [r"^_rails_session$"],
         "headers": {"x-powered-by": r"Phusion Passenger"},
     },
     "Express": {
