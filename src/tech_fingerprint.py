@@ -104,7 +104,7 @@ SIGNATURES: dict[str, dict[str, Any]] = {
     # --- Backend languages / frameworks ---------------------------------------
     "Laravel": {
         "categories": ["backend_framework"],
-        "cookies": [r"laravel_session", r"XSRF-TOKEN"],
+        "cookies": [r"^laravel_session$"],
     },
     "Django": {
         "categories": ["backend_framework"],

@@ -63,6 +63,61 @@ def test_cloudflare_via_header_and_cookie_names():
     assert cf.confidence == "medium"
 
 
+def test_xsrf_token_cookie_alone_does_not_flag_laravel():
+    """XSRF-TOKEN is a generic CSRF cookie (Angular, Axios, Wix, Spring)
+    and should NOT trigger a Laravel detection by itself."""
+
+    class _Cookie:
+        def __init__(self, name):
+            self.name = name
+
+    findings = fingerprint_tech(
+        html="",
+        headers={},
+        cookies=[_Cookie("XSRF-TOKEN")],
+        script_urls=[],
+        meta={},
+    )
+    names = {f.name for f in findings}
+    assert "Laravel" not in names
+
+
+def test_laravel_detected_via_laravel_session_cookie():
+    """The laravel_session cookie IS Laravel-specific."""
+
+    class _Cookie:
+        def __init__(self, name):
+            self.name = name
+
+    findings = fingerprint_tech(
+        html="",
+        headers={},
+        cookies=[_Cookie("laravel_session")],
+        script_urls=[],
+        meta={},
+    )
+    names = {f.name for f in findings}
+    assert "Laravel" in names
+
+
+def test_laravel_cookie_match_is_anchored():
+    """A cookie named 'my_laravel_session_extra' should not trigger Laravel."""
+
+    class _Cookie:
+        def __init__(self, name):
+            self.name = name
+
+    findings = fingerprint_tech(
+        html="",
+        headers={},
+        cookies=[_Cookie("my_laravel_session_extra")],
+        script_urls=[],
+        meta={},
+    )
+    names = {f.name for f in findings}
+    assert "Laravel" not in names
+
+
 def test_no_signals_returns_empty():
     findings = fingerprint_tech(
         html="<html><body>hello</body></html>",
