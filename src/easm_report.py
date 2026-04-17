@@ -462,6 +462,65 @@ def _classify_email_security(result: DomainResult) -> list[PrioritizedFinding]:
     return findings
 
 
+def _classify_dns_findings(result: DomainResult) -> list[PrioritizedFinding]:
+    findings: list[PrioritizedFinding] = []
+    if not result.passive_intel or not result.passive_intel.dns:
+        return findings
+    dns = result.passive_intel.dns
+    if dns.error:
+        return findings
+
+    if dns.dnssec is False:
+        findings.append(PrioritizedFinding(
+            id="dns_no_dnssec",
+            title="DNSSEC not enabled",
+            category="dns",
+            severity="low",
+            classification=FindingClassification.informational,
+            confidence="high",
+            owner=FindingOwner.customer,
+            why_it_matters="Without DNSSEC, DNS responses can be spoofed via cache poisoning.",
+            business_impact="DNS hijacking risk (requires targeted attack)",
+            evidence=["No DNSKEY record found for domain"],
+            recommended_action="Enable DNSSEC with your DNS provider / registrar.",
+            source_field="passive_intel.dns",
+        ))
+
+    if not dns.caa_records:
+        findings.append(PrioritizedFinding(
+            id="dns_no_caa",
+            title="No CAA records — any CA can issue certificates",
+            category="dns",
+            severity="low",
+            classification=FindingClassification.informational,
+            confidence="high",
+            owner=FindingOwner.customer,
+            why_it_matters="Without CAA, any Certificate Authority can issue certs for this domain.",
+            business_impact="Reduces defense against mis-issuance",
+            evidence=["No CAA DNS record found"],
+            recommended_action="Add CAA records to restrict certificate issuance to your preferred CA.",
+            source_field="passive_intel.dns",
+        ))
+
+    if not dns.aaaa_records:
+        findings.append(PrioritizedFinding(
+            id="dns_no_ipv6",
+            title="No IPv6 (AAAA) records",
+            category="dns",
+            severity="info",
+            classification=FindingClassification.informational,
+            confidence="high",
+            owner=FindingOwner.customer,
+            why_it_matters="IPv6 connectivity is increasingly expected for modern web presence.",
+            business_impact="Accessibility gap for IPv6-only networks",
+            evidence=["No AAAA records resolved"],
+            recommended_action="Consider adding AAAA records if your hosting supports IPv6.",
+            source_field="passive_intel.dns",
+        ))
+
+    return findings
+
+
 def _classify_breach_findings(result: DomainResult) -> list[PrioritizedFinding]:
     findings: list[PrioritizedFinding] = []
     for b in result.breaches:
@@ -697,6 +756,20 @@ def _build_dns_posture(result: DomainResult) -> DNSPostureSummary | None:
         summary.a_record_count = len(dns.a_records)
         summary.has_ipv6 = bool(dns.aaaa_records)
         summary.nameservers = dns.ns_records[:5]
+
+        if dns.soa_record:
+            summary.soa_primary_ns = dns.soa_record.primary_ns
+            summary.soa_admin_email = dns.soa_record.admin_email
+
+        if dns.srv_records:
+            summary.srv_services = sorted({r.service for r in dns.srv_records})
+
+        if dns.caa_records:
+            summary.caa_records = dns.caa_records
+            summary.caa_restricted = any("issue" in c.lower() for c in dns.caa_records)
+
+        summary.ptr_records = dns.ptr_records[:10]
+        summary.dnssec_enabled = dns.dnssec
 
     if es and not es.error:
         summary.email_grade = es.grade
@@ -998,6 +1071,7 @@ def build_easm_report(
         all_findings.extend(_classify_path_findings(result))
         all_findings.extend(_classify_ioc_findings(result))
         all_findings.extend(_classify_email_security(result))
+        all_findings.extend(_classify_dns_findings(result))
         all_findings.extend(_classify_breach_findings(result))
         js_findings, js_summary = _classify_js_intel(result)
         all_findings.extend(js_findings)

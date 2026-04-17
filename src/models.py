@@ -307,6 +307,24 @@ class MXRecord(BaseModel):
     host: str
 
 
+class SOARecord(BaseModel):
+    primary_ns: str = ""
+    admin_email: str = ""
+    serial: int = 0
+    refresh: int = 0
+    retry: int = 0
+    expire: int = 0
+    minimum_ttl: int = 0
+
+
+class SRVRecord(BaseModel):
+    service: str = ""
+    priority: int = 0
+    weight: int = 0
+    port: int = 0
+    target: str = ""
+
+
 class DNSResult(BaseModel):
     domain: str
     a_records: list[str] = Field(default_factory=list)
@@ -315,6 +333,11 @@ class DNSResult(BaseModel):
     ns_records: list[str] = Field(default_factory=list)
     txt_records: list[str] = Field(default_factory=list)
     cname_records: list[str] = Field(default_factory=list)
+    soa_record: SOARecord | None = None
+    srv_records: list[SRVRecord] = Field(default_factory=list)
+    caa_records: list[str] = Field(default_factory=list, description="CAA records — which CAs may issue certs.")
+    ptr_records: list[str] = Field(default_factory=list, description="Reverse DNS for A records.")
+    dnssec: bool | None = Field(default=None, description="True if DNSSEC is enabled (DNSKEY found).")
     error: str | None = None
 
 
@@ -599,6 +622,13 @@ class DNSPostureSummary(BaseModel):
     dmarc_status: str = Field(default="", description="'enforce', 'monitor', 'missing'.")
     dkim_status: str = Field(default="", description="'found', 'not_found'.")
     email_grade: str = ""
+    soa_primary_ns: str = ""
+    soa_admin_email: str = ""
+    srv_services: list[str] = Field(default_factory=list, description="Discovered SRV service names.")
+    caa_records: list[str] = Field(default_factory=list, description="CAA policy records.")
+    caa_restricted: bool = Field(default=False, description="True if CAA restricts certificate issuance.")
+    ptr_records: list[str] = Field(default_factory=list, description="Reverse DNS for A records.")
+    dnssec_enabled: bool | None = Field(default=None, description="True if DNSSEC is enabled.")
 
 
 class CertificateSummary(BaseModel):

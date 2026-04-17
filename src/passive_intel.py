@@ -37,7 +37,9 @@ from .models import (
     IPEnrichmentResult,
     MXRecord,
     RDAPResult,
+    SOARecord,
     SPFResult,
+    SRVRecord,
     WaybackResult,
 )
 
@@ -62,11 +64,81 @@ def _dns_resolve(domain: str, rdtype: str) -> list[Any]:
         return []
 
 
-async def query_dns(domain: str, *, timeout: int = 10) -> DNSResult:
-    """Resolve A, AAAA, MX, NS, TXT, and CNAME records.
+_SRV_SERVICES = [
+    "_sip._tcp", "_sip._udp", "_xmpp-server._tcp", "_xmpp-client._tcp",
+    "_http._tcp", "_https._tcp", "_imap._tcp", "_imaps._tcp",
+    "_submission._tcp", "_caldav._tcp", "_carddav._tcp",
+    "_autodiscover._tcp", "_matrix._tcp",
+]
+
+
+def _resolve_soa(domain: str) -> SOARecord | None:
+    try:
+        answers = dns.resolver.resolve(domain, "SOA", lifetime=8)
+        rr = answers[0]
+        return SOARecord(
+            primary_ns=str(rr.mname).rstrip("."),
+            admin_email=str(rr.rname).rstrip(".").replace(".", "@", 1),
+            serial=rr.serial,
+            refresh=rr.refresh,
+            retry=rr.retry,
+            expire=rr.expire,
+            minimum_ttl=rr.minimum,
+        )
+    except Exception:
+        return None
+
+
+def _resolve_srv(domain: str) -> list[SRVRecord]:
+    records: list[SRVRecord] = []
+    for svc in _SRV_SERVICES:
+        try:
+            answers = dns.resolver.resolve(f"{svc}.{domain}", "SRV", lifetime=5)
+            for rr in answers:
+                records.append(SRVRecord(
+                    service=svc,
+                    priority=rr.priority,
+                    weight=rr.weight,
+                    port=rr.port,
+                    target=str(rr.target).rstrip("."),
+                ))
+        except Exception:
+            continue
+    return records
+
+
+def _resolve_caa(domain: str) -> list[str]:
+    try:
+        answers = dns.resolver.resolve(domain, "CAA", lifetime=8)
+        return [f'{rr.flags} {rr.tag} "{rr.value}"' for rr in answers]
+    except Exception:
+        return []
+
+
+def _resolve_ptr(ip: str) -> str | None:
+    try:
+        rev = dns.reversename.from_address(ip)
+        answers = dns.resolver.resolve(rev, "PTR", lifetime=8)
+        return str(answers[0]).rstrip(".")
+    except Exception:
+        return None
+
+
+def _check_dnssec(domain: str) -> bool | None:
+    try:
+        dns.resolver.resolve(domain, "DNSKEY", lifetime=8)
+        return True
+    except dns.resolver.NoAnswer:
+        return False
+    except Exception:
+        return None
+
+
+async def query_dns(domain: str, *, timeout: int = 15) -> DNSResult:
+    """Resolve A, AAAA, MX, NS, TXT, CNAME, SOA, SRV, CAA, PTR, and DNSSEC.
 
     A/AAAA use the system resolver (stdlib socket) for maximum compat.
-    MX/NS/TXT/CNAME use dnspython for richer record-type support.
+    All other types use dnspython.
     """
     loop = asyncio.get_running_loop()
 
@@ -78,22 +150,26 @@ async def query_dns(domain: str, *, timeout: int = 10) -> DNSResult:
             return []
 
     try:
-        # A / AAAA via stdlib (proven, respects /etc/hosts)
         a_task = loop.run_in_executor(None, _resolve, socket.AF_INET)
         aaaa_task = loop.run_in_executor(None, _resolve, socket.AF_INET6)
-        # MX / NS / TXT / CNAME via dnspython
         mx_task = loop.run_in_executor(None, _dns_resolve, domain, "MX")
         ns_task = loop.run_in_executor(None, _dns_resolve, domain, "NS")
         txt_task = loop.run_in_executor(None, _dns_resolve, domain, "TXT")
         cname_task = loop.run_in_executor(None, _dns_resolve, domain, "CNAME")
+        soa_task = loop.run_in_executor(None, _resolve_soa, domain)
+        srv_task = loop.run_in_executor(None, _resolve_srv, domain)
+        caa_task = loop.run_in_executor(None, _resolve_caa, domain)
+        dnssec_task = loop.run_in_executor(None, _check_dnssec, domain)
 
-        a_records, aaaa_records, mx_raw, ns_raw, txt_raw, cname_raw = (
-            await asyncio.wait_for(
-                asyncio.gather(
-                    a_task, aaaa_task, mx_task, ns_task, txt_task, cname_task,
-                ),
-                timeout=timeout,
-            )
+        (
+            a_records, aaaa_records, mx_raw, ns_raw, txt_raw, cname_raw,
+            soa_record, srv_records, caa_records, dnssec,
+        ) = await asyncio.wait_for(
+            asyncio.gather(
+                a_task, aaaa_task, mx_task, ns_task, txt_task, cname_task,
+                soa_task, srv_task, caa_task, dnssec_task,
+            ),
+            timeout=timeout,
         )
 
         mx_records = sorted(
@@ -108,6 +184,14 @@ async def query_dns(domain: str, *, timeout: int = 10) -> DNSResult:
         ]
         cname_records = sorted(str(r).rstrip(".").lower() for r in cname_raw)
 
+        # Reverse PTR lookups for each A record (concurrent)
+        ptr_tasks = [loop.run_in_executor(None, _resolve_ptr, ip) for ip in a_records]
+        ptr_results = await asyncio.wait_for(
+            asyncio.gather(*ptr_tasks, return_exceptions=True),
+            timeout=10,
+        ) if ptr_tasks else []
+        ptr_records = [r for r in ptr_results if isinstance(r, str) and r]
+
         return DNSResult(
             domain=domain,
             a_records=a_records,
@@ -116,6 +200,11 @@ async def query_dns(domain: str, *, timeout: int = 10) -> DNSResult:
             ns_records=ns_records,
             txt_records=txt_records,
             cname_records=cname_records,
+            soa_record=soa_record,
+            srv_records=srv_records,
+            caa_records=caa_records,
+            ptr_records=ptr_records,
+            dnssec=dnssec,
         )
     except asyncio.TimeoutError:
         return DNSResult(domain=domain, error="DNS resolution timed out")
