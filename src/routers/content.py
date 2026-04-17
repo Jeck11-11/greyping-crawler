@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from urllib.parse import urlparse
 
 from fastapi import APIRouter
 
-from .._http_utils import normalise_target
+from .._http_utils import validate_target
+from .._social_utils import detect_platform
 from ..crawler import crawl_domain
 from ..postprocess import fill_not_found
 from ..models import (
@@ -29,25 +29,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/recon", tags=["content"])
 
 
-_SOCIAL_PLATFORM_MAP = {
-    "twitter.com": "Twitter", "x.com": "Twitter/X",
-    "facebook.com": "Facebook", "fb.com": "Facebook",
-    "linkedin.com": "LinkedIn", "instagram.com": "Instagram",
-    "github.com": "GitHub", "youtube.com": "YouTube",
-    "tiktok.com": "TikTok", "pinterest.com": "Pinterest",
-    "reddit.com": "Reddit", "t.me": "Telegram",
-    "mastodon.social": "Mastodon",
-}
-
-
-def _detect_platform(url: str) -> str:
-    try:
-        host = (urlparse(url).hostname or "").lower().lstrip("www.")
-        return _SOCIAL_PLATFORM_MAP.get(host, "")
-    except Exception:
-        return ""
-
-
 async def _crawl(target: str, request: CrawlReconRequest):
     return await crawl_domain(
         target,
@@ -61,7 +42,7 @@ async def _crawl(target: str, request: CrawlReconRequest):
 @router.post("/crawl", response_model=list[CrawlReconResult])
 async def recon_crawl(request: CrawlReconRequest) -> list[CrawlReconResult]:
     """Crawl each target and return raw per-page results."""
-    targets = [normalise_target(t) for t in request.targets]
+    targets = [validate_target(t) for t in request.targets]
 
     async def _one(target: str) -> CrawlReconResult:
         try:
@@ -82,7 +63,7 @@ async def recon_crawl(request: CrawlReconRequest) -> list[CrawlReconResult]:
 @router.post("/contacts", response_model=list[ContactReconResult])
 async def recon_contacts(request: CrawlReconRequest) -> list[ContactReconResult]:
     """Crawl each target and aggregate contact data with per-page provenance."""
-    targets = [normalise_target(t) for t in request.targets]
+    targets = [validate_target(t) for t in request.targets]
 
     async def _one(target: str) -> ContactReconResult:
         try:
@@ -111,7 +92,7 @@ async def recon_contacts(request: CrawlReconRequest) -> list[ContactReconResult]
                 social_profiles=[
                     SocialFinding(
                         url=s,
-                        platform=_detect_platform(s),
+                        platform=detect_platform(s),
                         found_on=sorted(set(urls)),
                     )
                     for s, urls in sorted(social_sources.items())
@@ -130,7 +111,7 @@ async def recon_contacts(request: CrawlReconRequest) -> list[ContactReconResult]
 @router.post("/links", response_model=list[LinkReconResult])
 async def recon_links(request: CrawlReconRequest) -> list[LinkReconResult]:
     """Crawl each target and return internal + external link lists."""
-    targets = [normalise_target(t) for t in request.targets]
+    targets = [validate_target(t) for t in request.targets]
 
     async def _one(target: str) -> LinkReconResult:
         try:
@@ -173,13 +154,15 @@ async def recon_links(request: CrawlReconRequest) -> list[LinkReconResult]:
 @router.post("/secrets", response_model=list[SecretsReconResult])
 async def recon_secrets(request: CrawlReconRequest) -> list[SecretsReconResult]:
     """Crawl each target and return exposed secrets across all pages."""
-    targets = [normalise_target(t) for t in request.targets]
+    targets = [validate_target(t) for t in request.targets]
 
     async def _one(target: str) -> SecretsReconResult:
         try:
             pages = await _crawl(target, request)
             secrets = []
             for page in pages:
+                for sec in page.secrets:
+                    sec.found_on = page.url
                 secrets.extend(page.secrets)
             return SecretsReconResult(target=target, secrets=secrets)
         except Exception as exc:
@@ -195,7 +178,7 @@ async def recon_secrets(request: CrawlReconRequest) -> list[SecretsReconResult]:
 @router.post("/ioc", response_model=list[IoCReconResult])
 async def recon_ioc(request: CrawlReconRequest) -> list[IoCReconResult]:
     """Crawl each target and return deduplicated indicator-of-compromise findings."""
-    targets = [normalise_target(t) for t in request.targets]
+    targets = [validate_target(t) for t in request.targets]
 
     async def _one(target: str) -> IoCReconResult:
         try:

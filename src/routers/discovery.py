@@ -8,7 +8,7 @@ import logging
 from bs4 import BeautifulSoup
 from fastapi import APIRouter
 
-from .._http_utils import fetch_landing_page_full, normalise_target
+from .._http_utils import fetch_landing_page_full, validate_target
 from ..js_miner import mine_javascript
 from ..models import (
     JSIntelResult,
@@ -28,7 +28,7 @@ router = APIRouter(prefix="/recon", tags=["discovery"])
 @router.post("/paths", response_model=list[PathsReconResult])
 async def recon_paths(request: ReconRequest) -> list[PathsReconResult]:
     """Probe each target for exposed sensitive paths (.env, .git, backups, …)."""
-    targets = [normalise_target(t) for t in request.targets]
+    targets = [validate_target(t) for t in request.targets]
 
     async def _one(target: str) -> PathsReconResult:
         try:
@@ -63,7 +63,7 @@ def _extract_script_urls_for_fingerprint(html: str) -> list[str]:
 @router.post("/tech", response_model=list[TechIntelResult])
 async def recon_tech(request: ReconRequest) -> list[TechIntelResult]:
     """Fingerprint the web stack (CMS, JS frameworks, servers, CDNs, analytics)."""
-    targets = [normalise_target(t) for t in request.targets]
+    targets = [validate_target(t) for t in request.targets]
 
     async def _one(target: str) -> TechIntelResult:
         try:
@@ -93,7 +93,7 @@ async def recon_tech(request: ReconRequest) -> list[TechIntelResult]:
 @router.post("/js-intel", response_model=list[JSIntelResult])
 async def recon_js_intel(request: ReconRequest) -> list[JSIntelResult]:
     """Mine the target's JavaScript bundles for endpoints, internal hosts, sourcemaps."""
-    targets = [normalise_target(t) for t in request.targets]
+    targets = [validate_target(t) for t in request.targets]
 
     async def _one(target: str) -> JSIntelResult:
         try:

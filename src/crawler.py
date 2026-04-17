@@ -102,11 +102,15 @@ async def crawl_page(
     """Crawl a single page and extract all OSINT data."""
     html: str = ""
     status_code: int | None = None
+    notes: str = ""
 
     try:
-        if render_js and await _check_playwright():
+        pw_available = await _check_playwright()
+        if render_js and pw_available:
             html, status_code = await _fetch_rendered(url, timeout=timeout)
         else:
+            if render_js and not pw_available:
+                notes = "Playwright unavailable; fell back to static fetch"
             html, status_code = await _fetch_static(
                 url, follow_redirects=follow_redirects, timeout=timeout,
             )
@@ -130,6 +134,7 @@ async def crawl_page(
         contacts=contacts,
         secrets=secrets,
         ioc_findings=iocs,
+        notes=notes,
     )
 
 

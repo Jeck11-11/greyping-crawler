@@ -168,6 +168,10 @@ class SecretFinding(BaseModel):
         default="high",
         description="Severity level: critical, high, medium, low.",
     )
+    found_on: str = Field(
+        default="",
+        description="Page URL where the secret was detected.",
+    )
 
 
 class BreachRecord(BaseModel):
@@ -736,6 +740,10 @@ class PageResult(BaseModel):
     ioc_findings: list[IoCFinding] = Field(
         default_factory=list,
         description="Indicators of compromise detected on this page.",
+    )
+    notes: str = Field(
+        default="",
+        description="Informational notes, e.g. Playwright fallback warning.",
     )
     error: str | None = None
 

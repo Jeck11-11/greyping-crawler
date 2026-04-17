@@ -10,18 +10,27 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 import httpx
 
-from ._http_utils import fetch_landing_page, fetch_landing_page_full, normalise_target
+from ._http_utils import (
+    TargetValidationError,
+    fetch_landing_page,
+    fetch_landing_page_full,
+    normalise_target,
+    validate_target,
+)
+from ._social_utils import detect_platform
 from .breach_checker import check_breaches
 from .cookie_checker import analyze_cookies
 from .crawler import crawl_domain
 from .easm_report import build_easm_report
 from .fair_signals import compute_fair_signals
 from .postprocess import fill_not_found
+from .middleware import APIKeyMiddleware, RateLimitMiddleware
 from .js_miner import mine_javascript
 from .extractors import extract_contacts, extract_links, extract_page_metadata
 from .ioc_scanner import scan_ioc
@@ -91,6 +100,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(RateLimitMiddleware)
+app.add_middleware(APIKeyMiddleware)
 
 app.include_router(network_router.router)
 app.include_router(content_router.router)
@@ -99,24 +110,9 @@ app.include_router(intel_router.router)
 app.include_router(passive_router.router)
 
 
-_SOCIAL_PLATFORM_MAP = {
-    "twitter.com": "Twitter", "x.com": "Twitter/X",
-    "facebook.com": "Facebook", "fb.com": "Facebook",
-    "linkedin.com": "LinkedIn", "instagram.com": "Instagram",
-    "github.com": "GitHub", "youtube.com": "YouTube",
-    "tiktok.com": "TikTok", "pinterest.com": "Pinterest",
-    "reddit.com": "Reddit", "t.me": "Telegram",
-    "mastodon.social": "Mastodon",
-}
-
-
-def _detect_platform(url: str) -> str:
-    """Return the platform name for a social URL, or empty string."""
-    try:
-        host = (urlparse(url).hostname or "").lower().lstrip("www.")
-        return _SOCIAL_PLATFORM_MAP.get(host, "")
-    except Exception:
-        return ""
+@app.exception_handler(TargetValidationError)
+async def _target_validation_handler(_request: Request, exc: TargetValidationError):
+    return JSONResponse(status_code=422, content={"detail": str(exc)})
 
 
 def _extract_domain(url: str) -> str:
@@ -248,6 +244,8 @@ async def _scan_single_target(
                     link.url, {"anchor_text": link.anchor_text, "found_on": []}
                 )
                 entry["found_on"].append(page_url)
+        for secret in page.secrets:
+            secret.found_on = page_url
         all_secrets.extend(page.secrets)
         for ioc in page.ioc_findings:
             key = (ioc.ioc_type, ioc.evidence)
@@ -265,7 +263,7 @@ async def _scan_single_target(
         for p, urls in sorted(phone_sources.items())
     ]
     social_findings = [
-        SocialFinding(url=s, platform=_detect_platform(s), found_on=sorted(set(urls)))
+        SocialFinding(url=s, platform=detect_platform(s), found_on=sorted(set(urls)))
         for s, urls in sorted(social_sources.items())
     ]
     ext_link_findings = [
@@ -365,7 +363,7 @@ async def scan(request: ScanRequest) -> ScanResponse:
     scan_id = uuid.uuid4().hex
     started = datetime.now(timezone.utc).isoformat()
 
-    targets = [_normalise_target(t) for t in request.targets]
+    targets = [validate_target(t) for t in request.targets]
 
     # Run all domain scans concurrently
     tasks = [_scan_single_target(t, request) for t in targets]
@@ -455,6 +453,8 @@ async def _lighttouch_single_target(target: str, timeout: int) -> DomainResult:
     contacts = extract_contacts(soup, html)
     links = extract_links(soup, target)
     secrets = scan_secrets(html) if html else []
+    for s in secrets:
+        s.found_on = target
     iocs = scan_ioc(html, target) if html else []
 
     meta: dict[str, str] = {}
@@ -489,7 +489,7 @@ async def _lighttouch_single_target(target: str, timeout: int) -> DomainResult:
         for p in sorted(set(contacts.phone_numbers))
     ]
     social_findings = [
-        SocialFinding(url=s, platform=_detect_platform(s), found_on=[target])
+        SocialFinding(url=s, platform=detect_platform(s), found_on=[target])
         for s in sorted(set(contacts.social_profiles))
     ]
 
@@ -571,7 +571,7 @@ async def lighttouch_scan(request: LightTouchRequest) -> ScanResponse:
     scan_id = uuid.uuid4().hex
     started = datetime.now(timezone.utc).isoformat()
 
-    targets = [_normalise_target(t) for t in request.targets]
+    targets = [validate_target(t) for t in request.targets]
     domain_results = await asyncio.gather(
         *(_lighttouch_single_target(t, request.timeout) for t in targets)
     )
@@ -735,7 +735,7 @@ async def passive_scan(request: PassiveRequest) -> ScanResponse:
     scan_id = uuid.uuid4().hex
     started = datetime.now(timezone.utc).isoformat()
 
-    targets = [_normalise_target(t) for t in request.targets]
+    targets = [validate_target(t) for t in request.targets]
     domain_results = await asyncio.gather(*(
         _passive_single_target(t, list(request.emails or []), request.timeout)
         for t in targets

@@ -7,7 +7,7 @@ import logging
 
 from fastapi import APIRouter
 
-from .._http_utils import fetch_landing_page, normalise_target
+from .._http_utils import fetch_landing_page, validate_target
 from ..cookie_checker import analyze_cookies
 from ..models import (
     CookiesReconResult,
@@ -29,7 +29,7 @@ router = APIRouter(prefix="/recon", tags=["network"])
 @router.post("/ssl", response_model=list[SSLReconResult])
 async def recon_ssl(request: ReconRequest) -> list[SSLReconResult]:
     """Grade the TLS certificate for each target."""
-    targets = [normalise_target(t) for t in request.targets]
+    targets = [validate_target(t) for t in request.targets]
 
     async def _one(target: str) -> SSLReconResult:
         try:
@@ -52,7 +52,7 @@ async def recon_ssl(request: ReconRequest) -> list[SSLReconResult]:
 @router.post("/headers", response_model=list[HeadersReconResult])
 async def recon_headers(request: ReconRequest) -> list[HeadersReconResult]:
     """Audit security response headers on the landing page of each target."""
-    targets = [normalise_target(t) for t in request.targets]
+    targets = [validate_target(t) for t in request.targets]
 
     async def _one(target: str) -> HeadersReconResult:
         try:
@@ -75,7 +75,7 @@ async def recon_headers(request: ReconRequest) -> list[HeadersReconResult]:
 @router.post("/cookies", response_model=list[CookiesReconResult])
 async def recon_cookies(request: ReconRequest) -> list[CookiesReconResult]:
     """Audit cookies set by each target's landing page."""
-    targets = [normalise_target(t) for t in request.targets]
+    targets = [validate_target(t) for t in request.targets]
 
     async def _one(target: str) -> CookiesReconResult:
         try:
