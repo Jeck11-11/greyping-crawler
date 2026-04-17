@@ -8,6 +8,7 @@ from urllib.parse import urljoin
 
 import httpx
 
+from .config import PATH_CONCURRENCY, PATH_SCAN_TIMEOUT, UA_HONEST
 from .models import SensitivePathFinding
 
 logger = logging.getLogger(__name__)
@@ -64,8 +65,8 @@ _INTERESTING_CODES = {200, 403}
 async def scan_sensitive_paths(
     base_url: str,
     *,
-    timeout: int = 10,
-    concurrency: int = 10,
+    timeout: int = PATH_SCAN_TIMEOUT,
+    concurrency: int = PATH_CONCURRENCY,
 ) -> list[SensitivePathFinding]:
     """Probe *base_url* for known sensitive paths.
 
@@ -84,7 +85,7 @@ async def scan_sensitive_paths(
                     verify=False,
                 ) as client:
                     resp = await client.head(url, headers={
-                        "User-Agent": "GreypingCrawler/1.0",
+                        "User-Agent": UA_HONEST,
                     })
                     code = resp.status_code
                     length = int(resp.headers.get("content-length", 0))

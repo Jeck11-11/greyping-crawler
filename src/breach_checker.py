@@ -12,13 +12,14 @@ import os
 
 import httpx
 
+from .config import BREACH_EMAIL_CAP, BREACH_TIMEOUT, UA_HONEST
 from .models import BreachRecord
 
 logger = logging.getLogger(__name__)
 
 HIBP_API_KEY: str = os.getenv("HIBP_API_KEY", "")
 HIBP_BASE_URL = "https://haveibeenpwned.com/api/v3"
-HIBP_TIMEOUT = 15
+HIBP_TIMEOUT = BREACH_TIMEOUT
 
 # Rate-limit: HIBP allows ~10 req / min on paid keys; we respect this with
 # a simple per-call approach (no burst).
@@ -33,7 +34,7 @@ async def _hibp_breaches_for_domain(domain: str) -> list[BreachRecord]:
     url = f"{HIBP_BASE_URL}/breaches"
     headers = {
         "hibp-api-key": HIBP_API_KEY,
-        "User-Agent": "GreypingCrawler/1.0",
+        "User-Agent": UA_HONEST,
     }
     params = {"domain": domain}
 
@@ -71,7 +72,7 @@ async def _hibp_breaches_for_email(email: str) -> list[BreachRecord]:
     url = f"{HIBP_BASE_URL}/breachedaccount/{email}"
     headers = {
         "hibp-api-key": HIBP_API_KEY,
-        "User-Agent": "GreypingCrawler/1.0",
+        "User-Agent": UA_HONEST,
     }
     params = {"truncateResponse": "false"}
 
@@ -121,7 +122,7 @@ async def check_breaches(
 
     # 2. Per-email lookups (cap to 10 emails to stay within rate limits)
     if emails:
-        for email in emails[:10]:
+        for email in emails[:BREACH_EMAIL_CAP]:
             for record in await _hibp_breaches_for_email(email):
                 key = (record.source, record.breach_name)
                 if key not in seen:

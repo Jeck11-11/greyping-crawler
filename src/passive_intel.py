@@ -43,9 +43,11 @@ from .models import (
     WaybackResult,
 )
 
+from .config import DNS_LIFETIME, PASSIVE_TIMEOUT, UA_HONEST
+
 logger = logging.getLogger(__name__)
 
-_UA = "GreypingCrawler/1.0 (passive-intel)"
+_UA = f"{UA_HONEST} (passive-intel)"
 
 
 # ---------------------------------------------------------------------------
@@ -58,7 +60,7 @@ def _dns_resolve(domain: str, rdtype: str) -> list[Any]:
     Returns a list of rdata objects, or empty list on NXDOMAIN / timeout.
     """
     try:
-        return list(dns.resolver.resolve(domain, rdtype, lifetime=8))
+        return list(dns.resolver.resolve(domain, rdtype, lifetime=DNS_LIFETIME))
     except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer,
             dns.resolver.NoNameservers, dns.resolver.LifetimeTimeout):
         return []
@@ -74,7 +76,7 @@ _SRV_SERVICES = [
 
 def _resolve_soa(domain: str) -> SOARecord | None:
     try:
-        answers = dns.resolver.resolve(domain, "SOA", lifetime=8)
+        answers = dns.resolver.resolve(domain, "SOA", lifetime=DNS_LIFETIME)
         rr = answers[0]
         return SOARecord(
             primary_ns=str(rr.mname).rstrip("."),
@@ -93,7 +95,7 @@ def _resolve_srv(domain: str) -> list[SRVRecord]:
     records: list[SRVRecord] = []
     for svc in _SRV_SERVICES:
         try:
-            answers = dns.resolver.resolve(f"{svc}.{domain}", "SRV", lifetime=5)
+            answers = dns.resolver.resolve(f"{svc}.{domain}", "SRV", lifetime=DNS_LIFETIME)
             for rr in answers:
                 records.append(SRVRecord(
                     service=svc,
@@ -109,7 +111,7 @@ def _resolve_srv(domain: str) -> list[SRVRecord]:
 
 def _resolve_caa(domain: str) -> list[str]:
     try:
-        answers = dns.resolver.resolve(domain, "CAA", lifetime=8)
+        answers = dns.resolver.resolve(domain, "CAA", lifetime=DNS_LIFETIME)
         return [f'{rr.flags} {rr.tag} "{rr.value}"' for rr in answers]
     except Exception:
         return []
@@ -118,7 +120,7 @@ def _resolve_caa(domain: str) -> list[str]:
 def _resolve_ptr(ip: str) -> str | None:
     try:
         rev = dns.reversename.from_address(ip)
-        answers = dns.resolver.resolve(rev, "PTR", lifetime=8)
+        answers = dns.resolver.resolve(rev, "PTR", lifetime=DNS_LIFETIME)
         return str(answers[0]).rstrip(".")
     except Exception:
         return None
@@ -126,7 +128,7 @@ def _resolve_ptr(ip: str) -> str | None:
 
 def _check_dnssec(domain: str) -> bool | None:
     try:
-        dns.resolver.resolve(domain, "DNSKEY", lifetime=8)
+        dns.resolver.resolve(domain, "DNSKEY", lifetime=DNS_LIFETIME)
         return True
     except dns.resolver.NoAnswer:
         return False
@@ -134,7 +136,7 @@ def _check_dnssec(domain: str) -> bool | None:
         return None
 
 
-async def query_dns(domain: str, *, timeout: int = 15) -> DNSResult:
+async def query_dns(domain: str, *, timeout: int = PASSIVE_TIMEOUT) -> DNSResult:
     """Resolve A, AAAA, MX, NS, TXT, CNAME, SOA, SRV, CAA, PTR, and DNSSEC.
 
     A/AAAA use the system resolver (stdlib socket) for maximum compat.
@@ -188,7 +190,7 @@ async def query_dns(domain: str, *, timeout: int = 15) -> DNSResult:
         ptr_tasks = [loop.run_in_executor(None, _resolve_ptr, ip) for ip in a_records]
         ptr_results = await asyncio.wait_for(
             asyncio.gather(*ptr_tasks, return_exceptions=True),
-            timeout=10,
+            timeout=DNS_LIFETIME + 2,
         ) if ptr_tasks else []
         ptr_records = [r for r in ptr_results if isinstance(r, str) and r]
 
@@ -217,7 +219,7 @@ async def query_dns(domain: str, *, timeout: int = 15) -> DNSResult:
 # Certificate Transparency (crt.sh)
 # ---------------------------------------------------------------------------
 
-async def query_ct_logs(domain: str, *, timeout: int = 15) -> CTResult:
+async def query_ct_logs(domain: str, *, timeout: int = PASSIVE_TIMEOUT) -> CTResult:
     """Query crt.sh for every cert ever issued for *domain* (incl. subdomains).
 
     Returns deduped subdomains + unique issuer names.
@@ -294,7 +296,7 @@ def _rdap_nameservers(nameservers: list[dict[str, Any]]) -> list[str]:
     return sorted(set(out))
 
 
-async def query_rdap(domain: str, *, timeout: int = 15) -> RDAPResult:
+async def query_rdap(domain: str, *, timeout: int = PASSIVE_TIMEOUT) -> RDAPResult:
     """Look up registrar metadata via rdap.org."""
     url = f"https://rdap.org/domain/{domain}"
     try:
@@ -336,7 +338,7 @@ def _format_wayback_ts(ts: str) -> str:
     return ts
 
 
-async def query_wayback(domain: str, *, timeout: int = 15) -> WaybackResult:
+async def query_wayback(domain: str, *, timeout: int = PASSIVE_TIMEOUT) -> WaybackResult:
     """Ask archive.org what it knows about *domain*."""
     cdx_url = (
         f"https://web.archive.org/cdx/search/cdx?url={domain}"
@@ -492,7 +494,7 @@ def _check_dkim(domain: str) -> DKIMResult:
     for sel in _DKIM_SELECTORS:
         name = f"{sel}._domainkey.{domain}"
         try:
-            answers = dns.resolver.resolve(name, "TXT", lifetime=5)
+            answers = dns.resolver.resolve(name, "TXT", lifetime=DNS_LIFETIME)
             txt = b"".join(answers[0].strings).decode("utf-8", errors="replace")
             if "v=dkim1" in txt.lower() or "p=" in txt:
                 found.append(sel)
@@ -566,7 +568,7 @@ def _grade_email_security(
 
 
 async def query_email_security(
-    domain: str, mx_records: list[MXRecord] | None = None, *, timeout: int = 15,
+    domain: str, mx_records: list[MXRecord] | None = None, *, timeout: int = PASSIVE_TIMEOUT,
 ) -> EmailSecurityResult:
     """Analyse SPF, DKIM, DMARC for *domain* via DNS TXT lookups.
 
@@ -659,7 +661,7 @@ def _cymru_origin_lookup(ip: str) -> str | None:
         if len(parts) != 4:
             return None
         rev = ".".join(reversed(parts))
-        answers = dns.resolver.resolve(f"{rev}.origin.asn.cymru.com", "TXT", lifetime=8)
+        answers = dns.resolver.resolve(f"{rev}.origin.asn.cymru.com", "TXT", lifetime=DNS_LIFETIME)
         return b"".join(answers[0].strings).decode("utf-8", errors="replace")
     except Exception:
         return None
@@ -668,7 +670,7 @@ def _cymru_origin_lookup(ip: str) -> str | None:
 def _cymru_asn_lookup(asn_num: int) -> str | None:
     """AS-number Cymru DNS TXT → 'ASN | CC | Registry | Date | Name, CC'."""
     try:
-        answers = dns.resolver.resolve(f"AS{asn_num}.asn.cymru.com", "TXT", lifetime=8)
+        answers = dns.resolver.resolve(f"AS{asn_num}.asn.cymru.com", "TXT", lifetime=DNS_LIFETIME)
         return b"".join(answers[0].strings).decode("utf-8", errors="replace")
     except Exception:
         return None
@@ -697,7 +699,7 @@ def _infer_provider(asn_name: str) -> str | None:
 
 
 async def query_ip_enrichment(
-    domain: str, a_records: list[str], *, timeout: int = 20,
+    domain: str, a_records: list[str], *, timeout: int = PASSIVE_TIMEOUT,
 ) -> IPEnrichmentResult:
     """Enrich A records with ASN/hosting/country info via Team Cymru DNS.
 

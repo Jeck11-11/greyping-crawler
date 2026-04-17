@@ -10,6 +10,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from .config import HTTP_TIMEOUT, UA_BROWSER, UA_HONEST
+
 logger = logging.getLogger(__name__)
 
 
@@ -96,7 +98,7 @@ def validate_target(raw: str) -> str:
 async def fetch_landing_page(
     target: str,
     *,
-    timeout: int = 15,
+    timeout: int = HTTP_TIMEOUT,
 ) -> tuple[dict[str, str], httpx.Cookies]:
     """GET the landing page and return (response_headers, cookies).
 
@@ -111,7 +113,7 @@ async def fetch_landing_page(
         ) as client:
             resp = await client.get(
                 target,
-                headers={"User-Agent": "GreypingCrawler/1.0"},
+                headers={"User-Agent": UA_HONEST},
             )
             return dict(resp.headers), resp.cookies
     except Exception as exc:
@@ -120,10 +122,7 @@ async def fetch_landing_page(
 
 
 _STEALTH_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ),
+    "User-Agent": UA_BROWSER,
     "Accept": (
         "text/html,application/xhtml+xml,application/xml;q=0.9,"
         "image/avif,image/webp,*/*;q=0.8"
@@ -141,7 +140,7 @@ _STEALTH_HEADERS = {
 async def fetch_landing_page_full(
     target: str,
     *,
-    timeout: int = 15,
+    timeout: int = HTTP_TIMEOUT,
     stealth: bool = False,
 ) -> tuple[dict[str, str], httpx.Cookies, str]:
     """Like :func:`fetch_landing_page`, but also returns the response body (HTML).
@@ -154,7 +153,7 @@ async def fetch_landing_page_full(
     light-touch orchestrator uses so a single GET looks like a real
     visitor to a WAF.
     """
-    headers = dict(_STEALTH_HEADERS) if stealth else {"User-Agent": "GreypingCrawler/1.0"}
+    headers = dict(_STEALTH_HEADERS) if stealth else {"User-Agent": UA_HONEST}
     try:
         async with httpx.AsyncClient(
             follow_redirects=True,

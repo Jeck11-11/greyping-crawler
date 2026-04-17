@@ -15,6 +15,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from bs4 import BeautifulSoup
 
+from .config import JS_MINE_TIMEOUT, MAX_SCRIPTS, UA_HONEST
 from .models import JSIntelResult
 
 logger = logging.getLogger(__name__)
@@ -47,7 +48,7 @@ _SOURCEMAP_RE = re.compile(r"(?://|/\*)[#@]\s*sourceMappingURL=([^\s*]+)")
 # HTTP helpers
 # ---------------------------------------------------------------------------
 
-_UA = "GreypingCrawler/1.0 (JS-Intel)"
+_UA = f"{UA_HONEST} (JS-Intel)"
 
 
 async def _fetch_text(client: httpx.AsyncClient, url: str) -> str:
@@ -128,8 +129,8 @@ async def mine_javascript(
     target: str,
     html: str,
     *,
-    timeout: int = 30,
-    max_scripts: int = 50,
+    timeout: int = JS_MINE_TIMEOUT,
+    max_scripts: int = MAX_SCRIPTS,
 ) -> JSIntelResult:
     """Fetch every <script src> on *target*'s landing page and mine for intel."""
     script_urls = extract_script_urls(html, target)[:max_scripts]

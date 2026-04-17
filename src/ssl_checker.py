@@ -8,6 +8,7 @@ import ssl
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
+from .config import SSL_TIMEOUT
 from .models import SSLCertResult
 
 logger = logging.getLogger(__name__)
@@ -32,7 +33,7 @@ def _grade_cert(issues: list[str]) -> str:
     return "A"
 
 
-async def check_ssl(target_url: str, timeout: int = 10) -> SSLCertResult:
+async def check_ssl(target_url: str, timeout: int = SSL_TIMEOUT) -> SSLCertResult:
     """Connect to *target_url* over TLS and inspect the certificate.
 
     Returns an :class:`SSLCertResult` with certificate details and any issues found.

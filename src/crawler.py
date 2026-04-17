@@ -9,6 +9,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from bs4 import BeautifulSoup
 
+from .config import CRAWL_TIMEOUT, MAX_PAGES, PLAYWRIGHT_EXTRA_WAIT_MS, UA_BROWSER, UA_HONEST
 from .extractors import extract_contacts, extract_links, extract_page_metadata
 from .ioc_scanner import scan_ioc
 from .models import ContactInfo, LinkInfo, PageResult
@@ -38,15 +39,11 @@ async def _fetch_static(
     url: str,
     *,
     follow_redirects: bool = True,
-    timeout: int = 30,
+    timeout: int = CRAWL_TIMEOUT,
 ) -> tuple[str, int | None]:
     """Fetch a URL with httpx and return (html, status_code)."""
     headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 "
-            "GreypingCrawler/1.0"
-        ),
+        "User-Agent": f"{UA_BROWSER} {UA_HONEST}",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
     }
@@ -62,7 +59,7 @@ async def _fetch_static(
 async def _fetch_rendered(
     url: str,
     *,
-    timeout: int = 30,
+    timeout: int = CRAWL_TIMEOUT,
 ) -> tuple[str, int | None]:
     """Fetch a URL via Playwright headless Chromium to execute JS."""
     from playwright.async_api import async_playwright
@@ -70,11 +67,7 @@ async def _fetch_rendered(
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         context = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 "
-                "GreypingCrawler/1.0"
-            ),
+            user_agent=f"{UA_BROWSER} {UA_HONEST}",
             ignore_https_errors=True,
         )
         page = await context.new_page()
@@ -84,7 +77,7 @@ async def _fetch_rendered(
             if response:
                 status_code = response.status
             # Give extra time for late-loading XHR / SPA hydration
-            await page.wait_for_timeout(2000)
+            await page.wait_for_timeout(PLAYWRIGHT_EXTRA_WAIT_MS)
             html = await page.content()
         finally:
             await context.close()
@@ -97,7 +90,7 @@ async def crawl_page(
     *,
     render_js: bool = True,
     follow_redirects: bool = True,
-    timeout: int = 30,
+    timeout: int = CRAWL_TIMEOUT,
 ) -> PageResult:
     """Crawl a single page and extract all OSINT data."""
     html: str = ""
@@ -144,7 +137,7 @@ async def crawl_domain(
     render_js: bool = True,
     follow_redirects: bool = True,
     max_depth: int = 2,
-    timeout: int = 30,
+    timeout: int = CRAWL_TIMEOUT,
 ) -> list[PageResult]:
     """Crawl *target* up to *max_depth* levels of internal links.
 
@@ -158,7 +151,7 @@ async def crawl_domain(
     queue: list[tuple[str, int]] = [(target, 0)]
 
     # Cap total pages to prevent runaway scans
-    max_pages = 50
+    max_pages = MAX_PAGES
 
     while queue and len(results) < max_pages:
         url, depth = queue.pop(0)
