@@ -755,28 +755,42 @@ def _build_dns_posture(result: DomainResult) -> DNSPostureSummary | None:
     if dns and not dns.error:
         summary.a_record_count = len(dns.a_records)
         summary.has_ipv6 = bool(dns.aaaa_records)
-        summary.nameservers = dns.ns_records[:5]
+        summary.nameservers = dns.ns_records[:5] if dns.ns_records else ["not_found"]
 
         if dns.soa_record:
             summary.soa_primary_ns = dns.soa_record.primary_ns
             summary.soa_admin_email = dns.soa_record.admin_email
+        else:
+            summary.soa_primary_ns = "not_found"
+            summary.soa_admin_email = "not_found"
 
         if dns.srv_records:
             summary.srv_services = sorted({r.service for r in dns.srv_records})
+        else:
+            summary.srv_services = ["not_found"]
 
         if dns.caa_records:
             summary.caa_records = dns.caa_records
             summary.caa_restricted = any("issue" in c.lower() for c in dns.caa_records)
+        else:
+            summary.caa_records = ["not_found"]
+            summary.caa_restricted = False
 
-        summary.ptr_records = dns.ptr_records[:10]
-        summary.dnssec_enabled = dns.dnssec
+        summary.ptr_records = dns.ptr_records[:10] if dns.ptr_records else ["not_found"]
+
+        if dns.dnssec is True:
+            summary.dnssec_enabled = True
+        elif dns.dnssec is False:
+            summary.dnssec_enabled = False
+        else:
+            summary.dnssec_enabled = None
 
     if es and not es.error:
-        summary.email_grade = es.grade
-        summary.mail_providers = es.mail_providers
+        summary.email_grade = es.grade or "not_found"
+        summary.mail_providers = es.mail_providers if es.mail_providers else ["not_found"]
 
         if not es.spf.exists:
-            summary.spf_status = "missing"
+            summary.spf_status = "not_found"
         elif es.spf.all_qualifier == "-all":
             summary.spf_status = "pass"
         elif es.spf.all_qualifier == "~all":
@@ -785,13 +799,19 @@ def _build_dns_posture(result: DomainResult) -> DNSPostureSummary | None:
             summary.spf_status = "weak"
 
         if not es.dmarc.exists:
-            summary.dmarc_status = "missing"
+            summary.dmarc_status = "not_found"
         elif es.dmarc.policy in ("reject", "quarantine"):
             summary.dmarc_status = "enforce"
         else:
             summary.dmarc_status = "monitor"
 
         summary.dkim_status = "found" if es.dkim.selectors_found else "not_found"
+    else:
+        summary.spf_status = "not_found"
+        summary.dmarc_status = "not_found"
+        summary.dkim_status = "not_found"
+        summary.email_grade = "not_found"
+        summary.mail_providers = ["not_found"]
 
     return summary
 
