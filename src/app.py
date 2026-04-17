@@ -19,6 +19,7 @@ from ._http_utils import fetch_landing_page, fetch_landing_page_full, normalise_
 from .breach_checker import check_breaches
 from .cookie_checker import analyze_cookies
 from .crawler import crawl_domain
+from .easm_report import build_easm_report
 from .fair_signals import compute_fair_signals
 from .js_miner import mine_javascript
 from .extractors import extract_contacts, extract_links, extract_page_metadata
@@ -164,6 +165,7 @@ async def _scan_single_target(
             error=str(crawl_result),
         )
         failed.fair_signals = compute_fair_signals(failed, scan_mode="full")
+        failed.easm_report = build_easm_report(failed, scan_mode="full")
         return failed
 
     pages = crawl_result
@@ -341,6 +343,7 @@ async def _scan_single_target(
         },
     )
     result.fair_signals = compute_fair_signals(result, scan_mode="full")
+    result.easm_report = build_easm_report(result, scan_mode="full")
     return result
 
 
@@ -545,6 +548,7 @@ async def _lighttouch_single_target(target: str, timeout: int) -> DomainResult:
         error=None if html else "landing page fetch failed",
     )
     result.fair_signals = compute_fair_signals(result, scan_mode="lighttouch")
+    result.easm_report = build_easm_report(result, scan_mode="lighttouch")
     return result
 
 
@@ -711,6 +715,7 @@ async def _passive_single_target(
         error=passive_error,
     )
     result.fair_signals = compute_fair_signals(result, scan_mode="passive")
+    result.easm_report = build_easm_report(result, scan_mode="passive")
     return result
 
 

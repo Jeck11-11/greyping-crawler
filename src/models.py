@@ -513,6 +513,99 @@ class FAIRSignals(BaseModel):
     )
 
 
+# ---------------------------------------------------------------------------
+# EASM report layer — business-grade classification and prioritization
+# ---------------------------------------------------------------------------
+
+
+class FindingClassification(str, Enum):
+    confirmed_issue = "confirmed_issue"
+    platform_behavior = "platform_behavior"
+    informational = "informational"
+    false_positive_likely = "false_positive_likely"
+
+
+class FindingOwner(str, Enum):
+    customer = "customer"
+    platform = "platform"
+    third_party = "third_party"
+    not_actionable = "not_actionable"
+
+
+class PrioritizedFinding(BaseModel):
+    id: str = Field(..., description="Stable identifier, e.g. 'missing_hsts', 'exposed_env'.")
+    title: str
+    category: str = Field(..., description="E.g. 'security_headers', 'ssl', 'cookies', 'secrets', 'email_security'.")
+    severity: str = Field(default="medium", description="critical / high / medium / low / info.")
+    classification: FindingClassification
+    confidence: str = Field(default="medium", description="high / medium / low.")
+    owner: FindingOwner
+    platform_name: str = Field(default="", description="If owner=platform, which platform.")
+    why_it_matters: str = Field(default="", description="One sentence explaining business impact.")
+    business_impact: str = Field(default="", description="E.g. 'Data breach risk', 'Compliance gap'.")
+    evidence: list[str] = Field(default_factory=list)
+    recommended_action: str = Field(default="", description="One-line remediation guidance.")
+    source_field: str = Field(default="", description="Which DomainResult field this came from.")
+
+
+class SourcemapSummary(BaseModel):
+    detected: bool = False
+    count: int = 0
+    ownership: str = Field(default="", description="'vendor', 'first_party', 'mixed', or 'unknown'.")
+    proprietary_exposure: str = Field(default="none", description="'none', 'low', or 'high'.")
+
+
+class JSIntelSummary(BaseModel):
+    scripts_scanned: int = 0
+    api_endpoints_count: int = 0
+    internal_hosts_count: int = 0
+    sourcemaps: SourcemapSummary = Field(default_factory=SourcemapSummary)
+    notable_endpoints: list[str] = Field(
+        default_factory=list, description="First-party /api/* endpoints, max 5.",
+    )
+
+
+class CookieSummary(BaseModel):
+    total: int = 0
+    with_issues: int = 0
+    platform_standard: int = Field(default=0, description="Cookie issues that are expected platform behavior.")
+    customer_actionable: int = 0
+    notable: list[str] = Field(default_factory=list, description="Non-platform cookies with issues, by name.")
+
+
+class TechSummary(BaseModel):
+    platform: str = Field(default="", description="Primary platform detected (Wix, Shopify, WordPress, etc.).")
+    high_confidence: list[str] = Field(default_factory=list, description="Tech names with confidence=high.")
+    other_count: int = Field(default=0, description="Count of low/medium confidence detections.")
+
+
+class ExecutiveSummary(BaseModel):
+    risk_posture: str = Field(default="", description="Low / Moderate / High / Critical.")
+    narrative: str = Field(default="", description="2-4 sentence natural-language posture assessment.")
+    key_positives: list[str] = Field(default_factory=list, description="Up to 3 strengths observed.")
+    key_concerns: list[str] = Field(default_factory=list, description="Up to 3 areas of concern.")
+    scan_coverage: str = Field(default="", description="full / lighttouch / passive.")
+
+
+class EASMReport(BaseModel):
+    """Business-grade EASM report layer. Additive overlay on raw scanner output."""
+
+    generated_at: str = ""
+    scan_mode: str = ""
+    executive_summary: ExecutiveSummary = Field(default_factory=ExecutiveSummary)
+    prioritized_findings: list[PrioritizedFinding] = Field(
+        default_factory=list, description="Sorted by severity desc, confidence desc, actionability desc.",
+    )
+    total_findings: int = 0
+    confirmed_issues: int = 0
+    platform_behaviors: int = 0
+    informational_count: int = 0
+    js_intel_summary: JSIntelSummary | None = None
+    cookie_summary: CookieSummary | None = None
+    tech_summary: TechSummary | None = None
+    platform_detected: str = Field(default="", description="Primary platform if any: 'Wix', 'Shopify', etc.")
+
+
 class PageResult(BaseModel):
     """Scan results for a single crawled page."""
 
@@ -632,6 +725,14 @@ class DomainResult(BaseModel):
             "FAIR-aligned risk signals (TEF, Vulnerability, Control Strength, "
             "Loss Magnitude) derived from the evidence in this result. Use "
             "these signals to build a risk profile in a downstream system."
+        ),
+    )
+    easm_report: EASMReport | None = Field(
+        default=None,
+        description=(
+            "Business-grade EASM report with classified findings, executive "
+            "summary, and prioritization. Generated as a post-processing "
+            "step over the raw scanner output."
         ),
     )
     metadata: dict[str, Any] = Field(default_factory=dict)
