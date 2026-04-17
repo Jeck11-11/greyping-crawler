@@ -134,8 +134,8 @@ async def _scan_single_target(
     domain = _extract_domain(target)
     started = datetime.now(timezone.utc).isoformat()
 
-    # Run crawl, SSL check, landing-page fetch (for headers/cookies/HTML),
-    # and sensitive-path scan concurrently.
+    # Run crawl, SSL check, landing-page fetch, sensitive-path scan,
+    # and passive intel (DNS, CT, RDAP, Wayback) all concurrently.
     crawl_task = crawl_domain(
         target,
         render_js=request.render_js,
@@ -146,9 +146,15 @@ async def _scan_single_target(
     ssl_task = check_ssl(target, timeout=request.timeout)
     landing_task = fetch_landing_page_full(target, timeout=request.timeout)
     paths_task = scan_sensitive_paths(target, timeout=request.timeout)
+    dns_task = query_dns(domain, timeout=request.timeout)
+    ct_task = query_ct_logs(domain, timeout=request.timeout)
+    rdap_task = query_rdap(domain, timeout=request.timeout)
+    wayback_task = query_wayback(domain, timeout=request.timeout)
 
-    crawl_result, ssl_result, landing_result, paths_result = await asyncio.gather(
+    (crawl_result, ssl_result, landing_result, paths_result,
+     dns_result, ct_result, rdap_result, wayback_result) = await asyncio.gather(
         crawl_task, ssl_task, landing_task, paths_task,
+        dns_task, ct_task, rdap_task, wayback_task,
         return_exceptions=True,
     )
 
@@ -216,6 +222,44 @@ async def _scan_single_target(
     if isinstance(paths_result, Exception):
         logger.warning("Path scan failed for %s: %s", target, paths_result)
         paths_result = []
+
+    # Process passive intel results
+    def _passive_result(x, kind):
+        if isinstance(x, Exception):
+            msg = str(x) or x.__class__.__name__
+            logger.warning("Passive %s failed for %s: %s", kind.__name__, domain, msg)
+            return kind(domain=domain, error=msg)
+        return x
+
+    dns_result = _passive_result(dns_result, DNSResult)
+    ct_result = _passive_result(ct_result, CTResult)
+    rdap_result = _passive_result(rdap_result, RDAPResult)
+    wayback_result = _passive_result(wayback_result, WaybackResult)
+
+    # Email security + IP enrichment (depend on DNS data)
+    mx_records = dns_result.mx_records if not dns_result.error else []
+    a_records = dns_result.a_records if not dns_result.error else []
+
+    try:
+        email_sec = await asyncio.wait_for(
+            query_email_security(domain, mx_records, timeout=request.timeout),
+            timeout=request.timeout,
+        )
+    except Exception as exc:
+        email_sec = EmailSecurityResult(domain=domain, error=str(exc))
+
+    try:
+        ip_enrich = await asyncio.wait_for(
+            query_ip_enrichment(domain, a_records, timeout=request.timeout),
+            timeout=request.timeout,
+        )
+    except Exception as exc:
+        ip_enrich = IPEnrichmentResult(domain=domain, error=str(exc))
+
+    passive = PassiveIntelResult(
+        dns=dns_result, ct=ct_result, rdap=rdap_result, wayback=wayback_result,
+        email_security=email_sec, ip_enrichment=ip_enrich, breaches=[],
+    )
 
     # Aggregate contacts, links, and secrets across all pages,
     # tracking which page URL each finding came from.
@@ -312,6 +356,8 @@ async def _scan_single_target(
         ioc_findings=len(all_iocs),
         technologies_found=len(tech_findings),
         js_endpoints_found=js_endpoints_count,
+        subdomains_found=len(ct_result.subdomains) if not ct_result.error else 0,
+        wayback_snapshots=wayback_result.snapshot_count if not wayback_result.error else 0,
     )
 
     result = DomainResult(
@@ -336,6 +382,7 @@ async def _scan_single_target(
         ioc_findings=all_iocs,
         technologies=tech_findings,
         js_intel=js_intel_result,
+        passive_intel=passive,
         metadata={
             "domain": domain,
             "render_js": request.render_js,
@@ -433,14 +480,55 @@ async def _lighttouch_single_target(target: str, timeout: int) -> DomainResult:
 
     ssl_task = check_ssl(target, timeout=timeout)
     landing_task = fetch_landing_page_full(target, timeout=timeout, stealth=True)
+    dns_task = query_dns(domain, timeout=timeout)
+    ct_task = query_ct_logs(domain, timeout=timeout)
+    rdap_task = query_rdap(domain, timeout=timeout)
+    wayback_task = query_wayback(domain, timeout=timeout)
 
-    ssl_result, landing_result = await asyncio.gather(
-        ssl_task, landing_task, return_exceptions=True,
+    (ssl_result, landing_result,
+     dns_result, ct_result, rdap_result, wayback_result) = await asyncio.gather(
+        ssl_task, landing_task,
+        dns_task, ct_task, rdap_task, wayback_task,
+        return_exceptions=True,
     )
 
     if isinstance(ssl_result, Exception):
         logger.warning("SSL check failed for %s: %s", target, ssl_result)
         ssl_result = SSLCertResult(is_valid=False, issues=[f"Check failed: {ssl_result}"])
+
+    def _pr(x, kind):
+        if isinstance(x, Exception):
+            msg = str(x) or x.__class__.__name__
+            logger.warning("Passive %s failed for %s: %s", kind.__name__, domain, msg)
+            return kind(domain=domain, error=msg)
+        return x
+
+    dns_result = _pr(dns_result, DNSResult)
+    ct_result = _pr(ct_result, CTResult)
+    rdap_result = _pr(rdap_result, RDAPResult)
+    wayback_result = _pr(wayback_result, WaybackResult)
+
+    mx_records = dns_result.mx_records if not dns_result.error else []
+    a_records_dns = dns_result.a_records if not dns_result.error else []
+
+    try:
+        email_sec = await asyncio.wait_for(
+            query_email_security(domain, mx_records, timeout=timeout), timeout=timeout,
+        )
+    except Exception as exc:
+        email_sec = EmailSecurityResult(domain=domain, error=str(exc))
+
+    try:
+        ip_enrich = await asyncio.wait_for(
+            query_ip_enrichment(domain, a_records_dns, timeout=timeout), timeout=timeout,
+        )
+    except Exception as exc:
+        ip_enrich = IPEnrichmentResult(domain=domain, error=str(exc))
+
+    lt_passive = PassiveIntelResult(
+        dns=dns_result, ct=ct_result, rdap=rdap_result, wayback=wayback_result,
+        email_security=email_sec, ip_enrichment=ip_enrich, breaches=[],
+    )
 
     if isinstance(landing_result, Exception) or not landing_result:
         logger.warning("Light-touch landing fetch failed for %s", target)
@@ -547,6 +635,7 @@ async def _lighttouch_single_target(target: str, timeout: int) -> DomainResult:
         ioc_findings=iocs,
         technologies=tech_findings,
         js_intel=None,
+        passive_intel=lt_passive,
         metadata={"domain": domain, "mode": "lighttouch"},
         error=None if html else "landing page fetch failed",
     )
