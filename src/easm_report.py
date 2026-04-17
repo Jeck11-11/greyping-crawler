@@ -748,18 +748,29 @@ def _build_dns_posture(result: DomainResult) -> DNSPostureSummary | None:
         return None
     dns = result.passive_intel.dns
     es = result.passive_intel.email_security
+    ip_enrich = result.passive_intel.ip_enrichment
     if not dns and not es:
         return None
 
     summary = DNSPostureSummary()
     if dns and not dns.error:
+        summary.a_records = dns.a_records
+        summary.aaaa_records = dns.aaaa_records
         summary.a_record_count = len(dns.a_records)
         summary.has_ipv6 = bool(dns.aaaa_records)
         summary.nameservers = dns.ns_records[:5] if dns.ns_records else ["not_found"]
+        summary.cname_chain = dns.cname_records
+        summary.txt_records = dns.txt_records
+        summary.mx_hosts = [f"{mx.priority} {mx.host}" for mx in dns.mx_records]
 
         if dns.soa_record:
             summary.soa_primary_ns = dns.soa_record.primary_ns
             summary.soa_admin_email = dns.soa_record.admin_email
+            summary.soa_serial = dns.soa_record.serial
+            summary.soa_refresh = dns.soa_record.refresh
+            summary.soa_retry = dns.soa_record.retry
+            summary.soa_expire = dns.soa_record.expire
+            summary.soa_minimum_ttl = dns.soa_record.minimum_ttl
         else:
             summary.soa_primary_ns = "not_found"
             summary.soa_admin_email = "not_found"
@@ -784,6 +795,20 @@ def _build_dns_posture(result: DomainResult) -> DNSPostureSummary | None:
             summary.dnssec_enabled = False
         else:
             summary.dnssec_enabled = None
+
+    if ip_enrich and not ip_enrich.error:
+        summary.ip_asn_map = [
+            {
+                "ip": r.ip,
+                "asn": r.asn,
+                "asn_name": r.asn_name,
+                "prefix": r.prefix,
+                "country_code": r.country_code,
+            }
+            for r in ip_enrich.records
+        ]
+        summary.hosting_providers = ip_enrich.hosting_providers or ["not_found"]
+        summary.hosting_countries = ip_enrich.countries or ["not_found"]
 
     if es and not es.error:
         summary.email_grade = es.grade or "not_found"

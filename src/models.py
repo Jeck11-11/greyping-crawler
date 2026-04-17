@@ -613,22 +613,40 @@ class AssetContext(BaseModel):
 
 
 class DNSPostureSummary(BaseModel):
-    """Condensed DNS posture for EASM report."""
+    """Full DNS posture + IP/ASN enrichment for EASM report."""
+    # Raw DNS records
+    a_records: list[str] = Field(default_factory=list, description="IPv4 addresses.")
+    aaaa_records: list[str] = Field(default_factory=list, description="IPv6 addresses.")
     a_record_count: int = 0
     has_ipv6: bool = False
-    mail_providers: list[str] = Field(default_factory=list)
+    mx_hosts: list[str] = Field(default_factory=list, description="MX records as 'priority host'.")
     nameservers: list[str] = Field(default_factory=list)
-    spf_status: str = Field(default="", description="'pass', 'soft_fail', 'weak', 'missing'.")
-    dmarc_status: str = Field(default="", description="'enforce', 'monitor', 'missing'.")
-    dkim_status: str = Field(default="", description="'found', 'not_found'.")
-    email_grade: str = ""
+    cname_chain: list[str] = Field(default_factory=list, description="CNAME records.")
+    txt_records: list[str] = Field(default_factory=list, description="TXT records.")
+    # SOA
     soa_primary_ns: str = ""
     soa_admin_email: str = ""
+    soa_serial: int = 0
+    soa_refresh: int = 0
+    soa_retry: int = 0
+    soa_expire: int = 0
+    soa_minimum_ttl: int = 0
+    # SRV / CAA / PTR / DNSSEC
     srv_services: list[str] = Field(default_factory=list, description="Discovered SRV service names.")
     caa_records: list[str] = Field(default_factory=list, description="CAA policy records.")
     caa_restricted: bool = Field(default=False, description="True if CAA restricts certificate issuance.")
     ptr_records: list[str] = Field(default_factory=list, description="Reverse DNS for A records.")
     dnssec_enabled: bool | None = Field(default=None, description="True if DNSSEC is enabled.")
+    # Email security
+    mail_providers: list[str] = Field(default_factory=list)
+    spf_status: str = Field(default="", description="'pass', 'soft_fail', 'weak', 'not_found'.")
+    dmarc_status: str = Field(default="", description="'enforce', 'monitor', 'not_found'.")
+    dkim_status: str = Field(default="", description="'found', 'not_found'.")
+    email_grade: str = ""
+    # IP / ASN enrichment
+    ip_asn_map: list[dict] = Field(default_factory=list, description="Per-IP ASN info: ip, asn, asn_name, prefix, country_code.")
+    hosting_providers: list[str] = Field(default_factory=list, description="Inferred hosting providers from ASN.")
+    hosting_countries: list[str] = Field(default_factory=list, description="Countries where IPs are geolocated.")
 
 
 class CertificateSummary(BaseModel):
