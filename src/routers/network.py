@@ -1,0 +1,81 @@
+"""Network-level reconnaissance endpoints (SSL, headers, cookies)."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+
+from fastapi import APIRouter
+
+from .._http_utils import fetch_landing_page, normalise_target
+from ..cookie_checker import analyze_cookies
+from ..models import (
+    CookiesReconResult,
+    HeadersReconResult,
+    ReconRequest,
+    SecurityHeadersResult,
+    SSLCertResult,
+    SSLReconResult,
+)
+from ..security_headers import analyze_headers
+from ..ssl_checker import check_ssl
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/recon", tags=["network"])
+
+
+@router.post("/ssl", response_model=list[SSLReconResult])
+async def recon_ssl(request: ReconRequest) -> list[SSLReconResult]:
+    """Grade the TLS certificate for each target."""
+    targets = [normalise_target(t) for t in request.targets]
+
+    async def _one(target: str) -> SSLReconResult:
+        try:
+            ssl = await check_ssl(target, timeout=request.timeout)
+            return SSLReconResult(target=target, ssl=ssl)
+        except Exception as exc:
+            logger.warning("SSL check failed for %s: %s", target, exc)
+            return SSLReconResult(
+                target=target,
+                ssl=SSLCertResult(is_valid=False, issues=[f"Check failed: {exc}"]),
+                error=str(exc),
+            )
+
+    return await asyncio.gather(*(_one(t) for t in targets))
+
+
+@router.post("/headers", response_model=list[HeadersReconResult])
+async def recon_headers(request: ReconRequest) -> list[HeadersReconResult]:
+    """Audit security response headers on the landing page of each target."""
+    targets = [normalise_target(t) for t in request.targets]
+
+    async def _one(target: str) -> HeadersReconResult:
+        try:
+            headers, _cookies = await fetch_landing_page(target, timeout=request.timeout)
+            return HeadersReconResult(target=target, headers=analyze_headers(headers))
+        except Exception as exc:
+            logger.warning("Header audit failed for %s: %s", target, exc)
+            return HeadersReconResult(
+                target=target,
+                headers=SecurityHeadersResult(),
+                error=str(exc),
+            )
+
+    return await asyncio.gather(*(_one(t) for t in targets))
+
+
+@router.post("/cookies", response_model=list[CookiesReconResult])
+async def recon_cookies(request: ReconRequest) -> list[CookiesReconResult]:
+    """Audit cookies set by each target's landing page."""
+    targets = [normalise_target(t) for t in request.targets]
+
+    async def _one(target: str) -> CookiesReconResult:
+        try:
+            _headers, cookies = await fetch_landing_page(target, timeout=request.timeout)
+            return CookiesReconResult(target=target, cookies=analyze_cookies(cookies))
+        except Exception as exc:
+            logger.warning("Cookie audit failed for %s: %s", target, exc)
+            return CookiesReconResult(target=target, cookies=[], error=str(exc))
+
+    return await asyncio.gather(*(_one(t) for t in targets))

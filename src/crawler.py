@@ -10,6 +10,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from .extractors import extract_contacts, extract_links, extract_page_metadata
+from .ioc_scanner import scan_ioc
 from .models import ContactInfo, LinkInfo, PageResult
 from .secret_scanner import scan_secrets
 
@@ -117,6 +118,7 @@ async def crawl_page(
     contacts = extract_contacts(soup, html)
     links = extract_links(soup, url)
     secrets = scan_secrets(html)
+    iocs = scan_ioc(html, url)
 
     return PageResult(
         url=url,
@@ -127,6 +129,7 @@ async def crawl_page(
         links=links,
         contacts=contacts,
         secrets=secrets,
+        ioc_findings=iocs,
     )
 
 
