@@ -416,6 +416,7 @@ class PassiveIntelResult(BaseModel):
     rdap: RDAPResult | None = None
     wayback: WaybackResult | None = None
     email_security: EmailSecurityResult | None = None
+    ip_enrichment: IPEnrichmentResult | None = None
     breaches: list[BreachRecord] = Field(default_factory=list)
 
 

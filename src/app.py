@@ -32,6 +32,7 @@ from .models import (
     EmailSecurityResult,
     EmailFinding,
     ExternalLinkFinding,
+    IPEnrichmentResult,
     JSIntelResult,
     LinkInfo,
     PageResult,
@@ -51,6 +52,7 @@ from .passive_intel import (
     query_ct_logs,
     query_dns,
     query_email_security,
+    query_ip_enrichment,
     query_rdap,
     query_wayback,
 )
@@ -652,8 +654,10 @@ async def _passive_single_target(
         logger.warning("Passive breach lookup failed for %s: %s", domain, breaches)
         breaches = []
 
-    # Email security runs after DNS so it can reuse MX records.
+    # Email security and IP enrichment run after DNS so they can reuse its data.
     mx_records = dns.mx_records if not dns.error else []
+    a_records = dns.a_records if not dns.error else []
+
     try:
         email_sec = await asyncio.wait_for(
             query_email_security(domain, mx_records, timeout=timeout),
@@ -662,9 +666,17 @@ async def _passive_single_target(
     except Exception as exc:
         email_sec = EmailSecurityResult(domain=domain, error=str(exc))
 
+    try:
+        ip_enrich = await asyncio.wait_for(
+            query_ip_enrichment(domain, a_records, timeout=timeout),
+            timeout=timeout,
+        )
+    except Exception as exc:
+        ip_enrich = IPEnrichmentResult(domain=domain, error=str(exc))
+
     passive = PassiveIntelResult(
         dns=dns, ct=ct, rdap=rdap, wayback=wayback,
-        email_security=email_sec, breaches=breaches,
+        email_security=email_sec, ip_enrichment=ip_enrich, breaches=breaches,
     )
 
     # If every upstream source reported an error, surface that on

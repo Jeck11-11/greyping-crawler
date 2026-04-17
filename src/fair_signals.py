@@ -393,6 +393,31 @@ def _build_control_strength(result: DomainResult) -> FAIRFactor:
             ],
         ))
 
+    # Hosting posture — major cloud/CDN = managed security controls in place.
+    ip_enrich = (
+        result.passive_intel.ip_enrichment
+        if result.passive_intel else None
+    )
+    if ip_enrich and not ip_enrich.error and ip_enrich.records:
+        if ip_enrich.hosting_providers:
+            signals.append(FAIRSignal(
+                name="hosting_posture",
+                score=75,
+                weight=0.8,
+                evidence=[
+                    f"Hosted on {', '.join(ip_enrich.hosting_providers[:3])}",
+                    f"Countries: {', '.join(ip_enrich.countries[:3]) or 'unknown'}",
+                ],
+            ))
+        else:
+            asn_names = [r.asn_name for r in ip_enrich.records if r.asn_name][:3]
+            signals.append(FAIRSignal(
+                name="hosting_posture",
+                score=45,
+                weight=0.8,
+                evidence=asn_names or ["Unknown hosting provider"],
+            ))
+
     return _factor_from_signals(
         signals,
         notes="Higher Control Strength means stronger observed defences (WAF, TLS, headers, cookies, email auth).",

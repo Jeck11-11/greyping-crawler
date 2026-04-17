@@ -28,11 +28,13 @@ import dns.resolver
 import httpx
 
 from .models import (
+    ASNInfo,
     CTResult,
     DKIMResult,
     DMARCResult,
     DNSResult,
     EmailSecurityResult,
+    IPEnrichmentResult,
     MXRecord,
     RDAPResult,
     SPFResult,
@@ -528,3 +530,152 @@ async def query_email_security(
     except Exception as exc:
         logger.warning("Email security check failed for %s: %s", domain, exc)
         return EmailSecurityResult(domain=domain, error=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# IP enrichment via Team Cymru DNS
+# ---------------------------------------------------------------------------
+
+# ASN name substrings → friendly hosting provider labels.
+_ASN_PROVIDER_PATTERNS: list[tuple[str, str]] = [
+    ("CLOUDFLARENET", "Cloudflare"),
+    ("AMAZON", "AWS"),
+    ("GOOGLE", "Google Cloud"),
+    ("MICROSOFT", "Microsoft Azure"),
+    ("FASTLY", "Fastly"),
+    ("AKAMAI", "Akamai"),
+    ("HETZNER", "Hetzner"),
+    ("OVH", "OVH"),
+    ("DIGITALOCEAN", "DigitalOcean"),
+    ("LINODE", "Akamai/Linode"),
+    ("VULTR", "Vultr"),
+    ("IONOS", "IONOS"),
+    ("GODADDY", "GoDaddy"),
+    ("RACKSPACE", "Rackspace"),
+    ("LEASEWEB", "Leaseweb"),
+    ("LAYERSHIFT", "Layershift"),
+    ("KINSTA", "Kinsta"),
+    ("WPENGINE", "WP Engine"),
+    ("SITEGROUND", "SiteGround"),
+]
+
+
+def _cymru_origin_lookup(ip: str) -> str | None:
+    """Reverse-IP Cymru DNS TXT → 'ASN | prefix | CC | registry | date'."""
+    try:
+        parts = ip.split(".")
+        if len(parts) != 4:
+            return None
+        rev = ".".join(reversed(parts))
+        answers = dns.resolver.resolve(f"{rev}.origin.asn.cymru.com", "TXT", lifetime=8)
+        return b"".join(answers[0].strings).decode("utf-8", errors="replace")
+    except Exception:
+        return None
+
+
+def _cymru_asn_lookup(asn_num: int) -> str | None:
+    """AS-number Cymru DNS TXT → 'ASN | CC | Registry | Date | Name, CC'."""
+    try:
+        answers = dns.resolver.resolve(f"AS{asn_num}.asn.cymru.com", "TXT", lifetime=8)
+        return b"".join(answers[0].strings).decode("utf-8", errors="replace")
+    except Exception:
+        return None
+
+
+def _parse_cymru_origin(raw: str) -> tuple[int | None, str, str, str]:
+    parts = [p.strip() for p in raw.split("|")]
+    asn = int(parts[0]) if parts and parts[0].isdigit() else None
+    prefix = parts[1] if len(parts) > 1 else ""
+    cc = parts[2] if len(parts) > 2 else ""
+    registry = parts[3] if len(parts) > 3 else ""
+    return asn, prefix, cc, registry
+
+
+def _parse_cymru_asn_name(raw: str) -> str:
+    parts = [p.strip() for p in raw.split("|")]
+    return parts[4] if len(parts) > 4 else ""
+
+
+def _infer_provider(asn_name: str) -> str | None:
+    upper = asn_name.upper()
+    for pattern, provider in _ASN_PROVIDER_PATTERNS:
+        if pattern in upper:
+            return provider
+    return None
+
+
+async def query_ip_enrichment(
+    domain: str, a_records: list[str], *, timeout: int = 20,
+) -> IPEnrichmentResult:
+    """Enrich A records with ASN/hosting/country info via Team Cymru DNS.
+
+    Two TXT lookups per unique IP (origin + ASN name), run concurrently.
+    No traffic reaches the target — all queries go to Cymru's resolvers.
+    """
+    if not a_records:
+        return IPEnrichmentResult(domain=domain)
+
+    loop = asyncio.get_running_loop()
+
+    try:
+        origin_tasks = [
+            loop.run_in_executor(None, _cymru_origin_lookup, ip)
+            for ip in a_records
+        ]
+        origin_raws = await asyncio.wait_for(
+            asyncio.gather(*origin_tasks, return_exceptions=True),
+            timeout=timeout,
+        )
+
+        ip_parsed: dict[str, tuple[int | None, str, str, str]] = {}
+        unique_asns: set[int] = set()
+        for ip, raw in zip(a_records, origin_raws):
+            if isinstance(raw, Exception) or not raw:
+                ip_parsed[ip] = (None, "", "", "")
+            else:
+                parsed = _parse_cymru_origin(raw)
+                ip_parsed[ip] = parsed
+                if parsed[0]:
+                    unique_asns.add(parsed[0])
+
+        asn_name_tasks = [
+            loop.run_in_executor(None, _cymru_asn_lookup, asn)
+            for asn in unique_asns
+        ]
+        asn_name_raws = await asyncio.wait_for(
+            asyncio.gather(*asn_name_tasks, return_exceptions=True),
+            timeout=timeout,
+        )
+        asn_name_map: dict[int, str] = {}
+        for asn, raw in zip(unique_asns, asn_name_raws):
+            if not isinstance(raw, Exception) and raw:
+                asn_name_map[asn] = _parse_cymru_asn_name(raw)
+
+        records: list[ASNInfo] = []
+        providers: list[str] = []
+        countries: set[str] = set()
+        for ip in a_records:
+            asn, prefix, cc, registry = ip_parsed.get(ip, (None, "", "", ""))
+            asn_name = asn_name_map.get(asn, "") if asn else ""
+            records.append(ASNInfo(
+                ip=ip, asn=asn, asn_name=asn_name,
+                prefix=prefix, country_code=cc, registry=registry,
+            ))
+            if cc:
+                countries.add(cc)
+            if asn_name:
+                p = _infer_provider(asn_name)
+                if p and p not in providers:
+                    providers.append(p)
+
+        return IPEnrichmentResult(
+            domain=domain,
+            records=records,
+            hosting_providers=providers,
+            countries=sorted(countries),
+        )
+    except asyncio.TimeoutError:
+        return IPEnrichmentResult(domain=domain, error="IP enrichment timed out")
+    except Exception as exc:
+        logger.warning("IP enrichment failed for %s: %s", domain, exc)
+        return IPEnrichmentResult(domain=domain, error=str(exc))
