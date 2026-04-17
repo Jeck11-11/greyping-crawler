@@ -557,6 +557,9 @@ _ASN_PROVIDER_PATTERNS: list[tuple[str, str]] = [
     ("KINSTA", "Kinsta"),
     ("WPENGINE", "WP Engine"),
     ("SITEGROUND", "SiteGround"),
+    ("WIX", "Wix"),
+    ("SQUARESPACE", "Squarespace"),
+    ("SHOPIFY", "Shopify"),
 ]
 
 
