@@ -358,6 +358,26 @@ class EmailSecurityResult(BaseModel):
     error: str | None = None
 
 
+class ASNInfo(BaseModel):
+    ip: str
+    asn: int | None = None
+    asn_name: str = ""
+    prefix: str = ""
+    country_code: str = ""
+    registry: str = ""
+
+
+class IPEnrichmentResult(BaseModel):
+    domain: str
+    records: list[ASNInfo] = Field(default_factory=list)
+    hosting_providers: list[str] = Field(
+        default_factory=list,
+        description="Friendly names derived from ASN owners (e.g. 'AWS', 'Cloudflare').",
+    )
+    countries: list[str] = Field(default_factory=list)
+    error: str | None = None
+
+
 class CTResult(BaseModel):
     domain: str
     subdomains: list[str] = Field(
