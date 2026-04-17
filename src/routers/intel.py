@@ -11,6 +11,7 @@ from fastapi import APIRouter
 from .._http_utils import normalise_target
 from ..breach_checker import check_breaches
 from ..models import BreachReconRequest, BreachReconResult
+from ..postprocess import fill_not_found
 
 logger = logging.getLogger(__name__)
 
@@ -36,4 +37,7 @@ async def recon_breaches(request: BreachReconRequest) -> list[BreachReconResult]
             logger.warning("Breach check failed for %s: %s", target, exc)
             return BreachReconResult(target=target, error=str(exc))
 
-    return await asyncio.gather(*(_one(t) for t in targets))
+    results = await asyncio.gather(*(_one(t) for t in targets))
+    for r in results:
+        fill_not_found(r)
+    return results

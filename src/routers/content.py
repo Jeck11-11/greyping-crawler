@@ -10,6 +10,7 @@ from fastapi import APIRouter
 
 from .._http_utils import normalise_target
 from ..crawler import crawl_domain
+from ..postprocess import fill_not_found
 from ..models import (
     ContactReconResult,
     CrawlReconRequest,
@@ -72,7 +73,10 @@ async def recon_crawl(request: CrawlReconRequest) -> list[CrawlReconResult]:
             logger.warning("Crawl failed for %s: %s", target, exc)
             return CrawlReconResult(target=target, error=str(exc))
 
-    return await asyncio.gather(*(_one(t) for t in targets))
+    results = await asyncio.gather(*(_one(t) for t in targets))
+    for r in results:
+        fill_not_found(r)
+    return results
 
 
 @router.post("/contacts", response_model=list[ContactReconResult])
@@ -117,7 +121,10 @@ async def recon_contacts(request: CrawlReconRequest) -> list[ContactReconResult]
             logger.warning("Contact scan failed for %s: %s", target, exc)
             return ContactReconResult(target=target, error=str(exc))
 
-    return await asyncio.gather(*(_one(t) for t in targets))
+    results = await asyncio.gather(*(_one(t) for t in targets))
+    for r in results:
+        fill_not_found(r)
+    return results
 
 
 @router.post("/links", response_model=list[LinkReconResult])
@@ -157,7 +164,10 @@ async def recon_links(request: CrawlReconRequest) -> list[LinkReconResult]:
             logger.warning("Link scan failed for %s: %s", target, exc)
             return LinkReconResult(target=target, error=str(exc))
 
-    return await asyncio.gather(*(_one(t) for t in targets))
+    results = await asyncio.gather(*(_one(t) for t in targets))
+    for r in results:
+        fill_not_found(r)
+    return results
 
 
 @router.post("/secrets", response_model=list[SecretsReconResult])
@@ -176,7 +186,10 @@ async def recon_secrets(request: CrawlReconRequest) -> list[SecretsReconResult]:
             logger.warning("Secret scan failed for %s: %s", target, exc)
             return SecretsReconResult(target=target, error=str(exc))
 
-    return await asyncio.gather(*(_one(t) for t in targets))
+    results = await asyncio.gather(*(_one(t) for t in targets))
+    for r in results:
+        fill_not_found(r)
+    return results
 
 
 @router.post("/ioc", response_model=list[IoCReconResult])
@@ -200,4 +213,7 @@ async def recon_ioc(request: CrawlReconRequest) -> list[IoCReconResult]:
             logger.warning("IoC scan failed for %s: %s", target, exc)
             return IoCReconResult(target=target, error=str(exc))
 
-    return await asyncio.gather(*(_one(t) for t in targets))
+    results = await asyncio.gather(*(_one(t) for t in targets))
+    for r in results:
+        fill_not_found(r)
+    return results

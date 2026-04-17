@@ -21,6 +21,7 @@ from .cookie_checker import analyze_cookies
 from .crawler import crawl_domain
 from .easm_report import build_easm_report
 from .fair_signals import compute_fair_signals
+from .postprocess import fill_not_found
 from .js_miner import mine_javascript
 from .extractors import extract_contacts, extract_links, extract_page_metadata
 from .ioc_scanner import scan_ioc
@@ -166,6 +167,7 @@ async def _scan_single_target(
         )
         failed.fair_signals = compute_fair_signals(failed, scan_mode="full")
         failed.easm_report = build_easm_report(failed, scan_mode="full")
+        fill_not_found(failed)
         return failed
 
     pages = crawl_result
@@ -344,6 +346,7 @@ async def _scan_single_target(
     )
     result.fair_signals = compute_fair_signals(result, scan_mode="full")
     result.easm_report = build_easm_report(result, scan_mode="full")
+    fill_not_found(result)
     return result
 
 
@@ -549,6 +552,7 @@ async def _lighttouch_single_target(target: str, timeout: int) -> DomainResult:
     )
     result.fair_signals = compute_fair_signals(result, scan_mode="lighttouch")
     result.easm_report = build_easm_report(result, scan_mode="lighttouch")
+    fill_not_found(result)
     return result
 
 
@@ -716,6 +720,7 @@ async def _passive_single_target(
     )
     result.fair_signals = compute_fair_signals(result, scan_mode="passive")
     result.easm_report = build_easm_report(result, scan_mode="passive")
+    fill_not_found(result)
     return result
 
 
