@@ -13,14 +13,20 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from .models import (
+    AssetContext,
+    CertificateSummary,
+    CloudAsset,
     CookieSummary,
+    DNSPostureSummary,
     DomainResult,
     EASMReport,
     ExecutiveSummary,
     FindingClassification,
     FindingOwner,
     JSIntelSummary,
+    PageSummary,
     PrioritizedFinding,
+    ReconArtifact,
     SourcemapSummary,
     TechSummary,
 )
@@ -597,6 +603,287 @@ def _build_tech_summary(result: DomainResult, platform: str) -> TechSummary | No
 
 
 # ---------------------------------------------------------------------------
+# Asset context inference
+# ---------------------------------------------------------------------------
+
+_STAGING_INDICATORS = ("staging", "stage", "dev", "test", "qa", "uat", "preview", "sandbox", "beta")
+_APP_CATEGORIES = frozenset({"webmail", "vpn", "remote_access", "database"})
+_ECOMMERCE_NAMES = frozenset({"Shopify", "WooCommerce", "Magento", "BigCommerce", "PrestaShop"})
+
+
+def _infer_asset_context(result: DomainResult, platform: str, profile: PlatformProfile) -> AssetContext:
+    evidence: list[str] = []
+    domain = result.metadata.get("domain", "")
+
+    is_staging = any(ind in domain.lower() for ind in _STAGING_INDICATORS)
+    env = "staging" if is_staging else "production"
+    if is_staging:
+        evidence.append(f"Domain contains staging indicator: {domain}")
+    else:
+        evidence.append("No staging indicators in domain name")
+
+    tech_names = {t.name for t in result.technologies}
+    tech_cats = set()
+    for t in result.technologies:
+        tech_cats.update(t.categories)
+
+    if tech_cats & _ECOMMERCE_NAMES or any(n in _ECOMMERCE_NAMES for n in tech_names):
+        asset_type = "ecommerce"
+        evidence.append("Ecommerce platform detected")
+    elif tech_cats & _APP_CATEGORIES:
+        asset_type = "web_app"
+        evidence.append(f"Application-type tech detected: {tech_cats & _APP_CATEGORIES}")
+    elif result.js_intel and len(result.js_intel.api_endpoints) > 5:
+        asset_type = "web_app"
+        evidence.append(f"{len(result.js_intel.api_endpoints)} API endpoints suggest a web application")
+    elif platform in ("Wix", "Squarespace", "Webflow"):
+        asset_type = "brochure_site"
+        evidence.append(f"Built on {platform} — typically a brochure/marketing site")
+    elif result.pages_scanned == 0 and not result.technologies:
+        asset_type = "unknown"
+    else:
+        asset_type = "website"
+        evidence.append("General website")
+
+    if profile.owns_infrastructure:
+        hosting = "managed_platform"
+        evidence.append(f"Fully managed on {platform}")
+    elif result.passive_intel and result.passive_intel.ip_enrichment:
+        providers = result.passive_intel.ip_enrichment.hosting_providers
+        if providers:
+            hosting = "cloud_hosted"
+            evidence.append(f"Hosted on {', '.join(providers[:2])}")
+        else:
+            hosting = "self_hosted"
+            evidence.append("No major cloud provider detected in ASN")
+    else:
+        hosting = "unknown"
+
+    if asset_type == "ecommerce":
+        criticality = "high"
+    elif asset_type == "web_app":
+        criticality = "high"
+    elif is_staging:
+        criticality = "low"
+    elif asset_type == "brochure_site":
+        criticality = "medium"
+    else:
+        criticality = "medium"
+
+    return AssetContext(
+        asset_type=asset_type,
+        environment=env,
+        audience="customer_facing",
+        hosting_type=hosting,
+        business_criticality=criticality,
+        inferred_from=evidence,
+    )
+
+
+# ---------------------------------------------------------------------------
+# DNS posture summary
+# ---------------------------------------------------------------------------
+
+def _build_dns_posture(result: DomainResult) -> DNSPostureSummary | None:
+    if not result.passive_intel:
+        return None
+    dns = result.passive_intel.dns
+    es = result.passive_intel.email_security
+    if not dns and not es:
+        return None
+
+    summary = DNSPostureSummary()
+    if dns and not dns.error:
+        summary.a_record_count = len(dns.a_records)
+        summary.has_ipv6 = bool(dns.aaaa_records)
+        summary.nameservers = dns.ns_records[:5]
+
+    if es and not es.error:
+        summary.email_grade = es.grade
+        summary.mail_providers = es.mail_providers
+
+        if not es.spf.exists:
+            summary.spf_status = "missing"
+        elif es.spf.all_qualifier == "-all":
+            summary.spf_status = "pass"
+        elif es.spf.all_qualifier == "~all":
+            summary.spf_status = "soft_fail"
+        else:
+            summary.spf_status = "weak"
+
+        if not es.dmarc.exists:
+            summary.dmarc_status = "missing"
+        elif es.dmarc.policy in ("reject", "quarantine"):
+            summary.dmarc_status = "enforce"
+        else:
+            summary.dmarc_status = "monitor"
+
+        summary.dkim_status = "found" if es.dkim.selectors_found else "not_found"
+
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# Certificate summary
+# ---------------------------------------------------------------------------
+
+def _build_certificate_summary(result: DomainResult) -> CertificateSummary | None:
+    ssl = result.ssl_certificate
+    passive = result.passive_intel
+
+    has_ssl = ssl and (ssl.grade or ssl.issuer or ssl.issues)
+    has_ct = passive and passive.ct and not passive.ct.error
+    if not has_ssl and not has_ct:
+        return None
+
+    summary = CertificateSummary()
+    if ssl:
+        summary.current_valid = ssl.is_valid
+        summary.current_issuer = ssl.issuer
+        summary.current_grade = ssl.grade
+        summary.days_until_expiry = ssl.days_until_expiry
+        summary.san_domains = ssl.san[:20]
+
+    if has_ct:
+        summary.ct_subdomains = passive.ct.subdomains[:30]
+        summary.ct_issuers = passive.ct.issuers[:10]
+        summary.certificates_seen = passive.ct.certificates_seen
+
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# Cloud asset / SaaS detection
+# ---------------------------------------------------------------------------
+
+import re
+
+_CLOUD_PATTERNS = [
+    (re.compile(r"https?://([a-z0-9\-]+)\.s3[.\-]amazonaws\.com", re.I), "s3_bucket"),
+    (re.compile(r"https?://s3[.\-]amazonaws\.com/([a-z0-9\-]+)", re.I), "s3_bucket"),
+    (re.compile(r"https?://([a-z0-9\-]+)\.blob\.core\.windows\.net", re.I), "azure_blob"),
+    (re.compile(r"https?://storage\.googleapis\.com/([a-z0-9\-]+)", re.I), "gcs_bucket"),
+    (re.compile(r"https?://([a-z0-9\-]+)\.storage\.googleapis\.com", re.I), "gcs_bucket"),
+    (re.compile(r"https?://([a-z0-9\-]+)\.firebaseio\.com", re.I), "firebase"),
+    (re.compile(r"https?://([a-z0-9\-]+)\.firebaseapp\.com", re.I), "firebase"),
+]
+
+_SAAS_DOMAINS = {
+    "intercom.io": "Intercom",
+    "zendesk.com": "Zendesk",
+    "hubspot.com": "HubSpot",
+    "salesforce.com": "Salesforce",
+    "mailchimp.com": "Mailchimp",
+    "sendgrid.net": "SendGrid",
+    "slack.com": "Slack",
+    "atlassian.net": "Atlassian",
+    "freshdesk.com": "Freshdesk",
+    "drift.com": "Drift",
+    "crisp.chat": "Crisp",
+    "tawk.to": "Tawk.to",
+}
+
+
+def _detect_cloud_assets(result: DomainResult) -> list[CloudAsset]:
+    assets: list[CloudAsset] = []
+    seen: set[str] = set()
+
+    all_urls: list[tuple[str, str]] = []
+    for link in result.external_links:
+        all_urls.append((link.url, "html"))
+    if result.js_intel:
+        for ep in result.js_intel.api_endpoints:
+            all_urls.append((ep, "js"))
+    for page in result.pages:
+        for link in page.links:
+            if link.link_type == "external":
+                all_urls.append((link.url, "html"))
+
+    for url, source in all_urls:
+        for pattern, asset_type in _CLOUD_PATTERNS:
+            m = pattern.search(url)
+            if m:
+                identifier = m.group(1)
+                key = f"{asset_type}:{identifier}"
+                if key not in seen:
+                    seen.add(key)
+                    assets.append(CloudAsset(asset_type=asset_type, identifier=identifier, source=source))
+
+        try:
+            from urllib.parse import urlparse
+            host = urlparse(url).hostname or ""
+            for domain_pat, saas_name in _SAAS_DOMAINS.items():
+                if host.endswith(domain_pat):
+                    key = f"saas:{saas_name}"
+                    if key not in seen:
+                        seen.add(key)
+                        assets.append(CloudAsset(asset_type="saas_platform", identifier=saas_name, source=source))
+                    break
+        except Exception:
+            pass
+
+    return assets
+
+
+# ---------------------------------------------------------------------------
+# Page summary — condense verbose page data
+# ---------------------------------------------------------------------------
+
+def _build_page_summary(result: DomainResult) -> PageSummary | None:
+    if not result.pages:
+        return None
+
+    from urllib.parse import urlparse
+    routes: set[str] = set()
+    notable: list[str] = []
+    ext_domains: dict[str, int] = {}
+
+    for page in result.pages:
+        parsed = urlparse(page.url)
+        path = parsed.path.rstrip("/") or "/"
+        routes.add(path)
+        if page.secrets or page.ioc_findings:
+            notable.append(page.url)
+
+    for link in result.external_links:
+        try:
+            host = urlparse(link.url).hostname or ""
+            host = host.lower().lstrip("www.")
+            if host:
+                ext_domains[host] = ext_domains.get(host, 0) + 1
+        except Exception:
+            pass
+
+    top_ext = sorted(ext_domains, key=ext_domains.get, reverse=True)[:10]
+
+    return PageSummary(
+        total_pages=len(result.pages),
+        unique_routes=sorted(routes),
+        notable_pages=notable[:10],
+        unique_emails=len(result.emails),
+        unique_phones=len(result.phone_numbers),
+        unique_socials=len(result.social_profiles),
+        external_dependencies=top_ext,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Recon artifacts — reclassify robots.txt, sitemap.xml, etc.
+# ---------------------------------------------------------------------------
+
+_RECON_ARTIFACT_PATHS = frozenset({"/robots.txt", "/sitemap.xml", "/security.txt", "/humans.txt"})
+
+
+def _extract_recon_artifacts(result: DomainResult) -> list[ReconArtifact]:
+    artifacts: list[ReconArtifact] = []
+    for p in result.sensitive_paths:
+        if p.path in _RECON_ARTIFACT_PATHS or p.severity == "info":
+            note = "Standard web artifact" if p.path in _RECON_ARTIFACT_PATHS else p.risk or ""
+            artifacts.append(ReconArtifact(path=p.path, status_code=p.status_code, note=note))
+    return artifacts
+
+
+# ---------------------------------------------------------------------------
 # Executive summary — template-driven, deterministic
 # ---------------------------------------------------------------------------
 
@@ -717,6 +1004,12 @@ def build_easm_report(
 
         sorted_findings = _sort_findings(all_findings)
         tech_summary = _build_tech_summary(result, platform)
+        asset_context = _infer_asset_context(result, platform, profile)
+        dns_posture = _build_dns_posture(result)
+        cert_summary = _build_certificate_summary(result)
+        cloud_assets = _detect_cloud_assets(result)
+        page_summary = _build_page_summary(result)
+        recon_artifacts = _extract_recon_artifacts(result)
         executive = _build_executive_summary(sorted_findings, result, platform, scan_mode)
 
         confirmed = sum(1 for f in sorted_findings if f.classification == FindingClassification.confirmed_issue)
@@ -727,6 +1020,12 @@ def build_easm_report(
             generated_at=datetime.now(timezone.utc).isoformat(),
             scan_mode=scan_mode,
             executive_summary=executive,
+            asset_context=asset_context,
+            dns_posture=dns_posture,
+            certificate_summary=cert_summary,
+            cloud_assets=cloud_assets,
+            page_summary=page_summary,
+            recon_artifacts=recon_artifacts,
             prioritized_findings=sorted_findings,
             total_findings=len(sorted_findings),
             confirmed_issues=confirmed,

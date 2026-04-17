@@ -579,6 +579,65 @@ class TechSummary(BaseModel):
     other_count: int = Field(default=0, description="Count of low/medium confidence detections.")
 
 
+class AssetContext(BaseModel):
+    """Inferred business context for the asset."""
+    asset_type: str = Field(default="", description="E.g. 'brochure_site', 'ecommerce', 'web_app', 'api', 'email_only'.")
+    environment: str = Field(default="", description="'production', 'staging', 'development', or 'unknown'.")
+    audience: str = Field(default="", description="'customer_facing', 'internal', 'unknown'.")
+    hosting_type: str = Field(default="", description="'managed_platform', 'cloud_hosted', 'self_hosted', 'unknown'.")
+    business_criticality: str = Field(default="", description="'high', 'medium', 'low' — inferred from asset type and exposure.")
+    inferred_from: list[str] = Field(default_factory=list, description="Evidence used for inference.")
+
+
+class DNSPostureSummary(BaseModel):
+    """Condensed DNS posture for EASM report."""
+    a_record_count: int = 0
+    has_ipv6: bool = False
+    mail_providers: list[str] = Field(default_factory=list)
+    nameservers: list[str] = Field(default_factory=list)
+    spf_status: str = Field(default="", description="'pass', 'soft_fail', 'weak', 'missing'.")
+    dmarc_status: str = Field(default="", description="'enforce', 'monitor', 'missing'.")
+    dkim_status: str = Field(default="", description="'found', 'not_found'.")
+    email_grade: str = ""
+
+
+class CertificateSummary(BaseModel):
+    """Certificate posture from SSL check + CT logs."""
+    current_valid: bool = True
+    current_issuer: str = ""
+    current_grade: str = ""
+    days_until_expiry: int = 0
+    san_domains: list[str] = Field(default_factory=list, description="Subject Alternative Names on current cert.")
+    ct_subdomains: list[str] = Field(default_factory=list, description="Subdomains seen in CT logs.")
+    ct_issuers: list[str] = Field(default_factory=list, description="Unique CA issuers from CT history.")
+    certificates_seen: int = 0
+
+
+class CloudAsset(BaseModel):
+    """A discovered cloud storage or SaaS asset."""
+    asset_type: str = Field(..., description="'s3_bucket', 'azure_blob', 'gcs_bucket', 'saas_platform'.")
+    identifier: str = Field(..., description="Bucket name, SaaS URL, etc.")
+    source: str = Field(default="", description="Where discovered: 'html', 'js', 'dns', 'headers'.")
+
+
+class PageSummary(BaseModel):
+    """Condensed page crawl summary for EASM report."""
+    total_pages: int = 0
+    unique_routes: list[str] = Field(default_factory=list, description="Canonicalized unique paths.")
+    notable_pages: list[str] = Field(default_factory=list, description="Pages with findings (secrets, IoCs).")
+    unique_emails: int = 0
+    unique_phones: int = 0
+    unique_socials: int = 0
+    external_dependencies: list[str] = Field(default_factory=list, description="Top external link domains.")
+
+
+class ReconArtifact(BaseModel):
+    """Low-signal discovery — standard web artifacts, not sensitive paths."""
+    path: str
+    status_code: int = 0
+    note: str = ""
+
+
 class ExecutiveSummary(BaseModel):
     risk_posture: str = Field(default="", description="Low / Moderate / High / Critical.")
     narrative: str = Field(default="", description="2-4 sentence natural-language posture assessment.")
@@ -593,6 +652,12 @@ class EASMReport(BaseModel):
     generated_at: str = ""
     scan_mode: str = ""
     executive_summary: ExecutiveSummary = Field(default_factory=ExecutiveSummary)
+    asset_context: AssetContext | None = None
+    dns_posture: DNSPostureSummary | None = None
+    certificate_summary: CertificateSummary | None = None
+    cloud_assets: list[CloudAsset] = Field(default_factory=list)
+    page_summary: PageSummary | None = None
+    recon_artifacts: list[ReconArtifact] = Field(default_factory=list)
     prioritized_findings: list[PrioritizedFinding] = Field(
         default_factory=list, description="Sorted by severity desc, confidence desc, actionability desc.",
     )
