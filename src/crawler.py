@@ -102,8 +102,6 @@ async def crawl_page(
         if render_js and pw_available:
             html, status_code = await _fetch_rendered(url, timeout=timeout)
         else:
-            if render_js and not pw_available:
-                notes = "Playwright unavailable; fell back to static fetch"
             html, status_code = await _fetch_static(
                 url, follow_redirects=follow_redirects, timeout=timeout,
             )
