@@ -5,18 +5,16 @@ LABEL maintainer="GreyPing" \
       org.opencontainers.image.description="Nuclei passive scanner with opinionated defaults"
 
 # Install a few helpful packages required for shell scripting and time zone handling.
-# Chromium + deps for Playwright JS rendering.
-RUN apk add --no-cache bash tzdata python3 py3-pip \
-    chromium nss freetype harfbuzz ca-certificates ttf-freefont
+RUN apk add --no-cache bash tzdata python3 py3-pip
 
 # Install Python dependencies for the OSINT API
+# NOTE: Playwright requires glibc and has no Alpine wheel, so JS rendering
+# is unavailable in Docker. The crawler falls back to static httpx fetching
+# automatically. For JS rendering, run the API outside Docker with
+# requirements-dev.txt and `playwright install chromium`.
 COPY requirements.txt /tmp/requirements.txt
 RUN pip3 install --no-cache-dir --break-system-packages -r /tmp/requirements.txt && \
-    pip3 install --no-cache-dir --break-system-packages playwright && \
-    PLAYWRIGHT_BROWSERS_PATH=/usr/lib playwright install chromium && \
     rm /tmp/requirements.txt
-
-ENV PLAYWRIGHT_BROWSERS_PATH=/usr/lib
 
 COPY config/nuclei-config.yaml /etc/nuclei/config.yaml
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
