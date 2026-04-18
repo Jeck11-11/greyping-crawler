@@ -5,15 +5,18 @@ LABEL maintainer="GreyPing" \
       org.opencontainers.image.description="Nuclei passive scanner with opinionated defaults"
 
 # Install a few helpful packages required for shell scripting and time zone handling.
-RUN apk add --no-cache bash tzdata python3 py3-pip
+# Chromium + deps for Playwright JS rendering.
+RUN apk add --no-cache bash tzdata python3 py3-pip \
+    chromium nss freetype harfbuzz ca-certificates ttf-freefont
 
 # Install Python dependencies for the OSINT API
-# NOTE: Playwright is omitted because the base image is Alpine (musl).
-# The crawler falls back to static fetching via httpx automatically.
-# For JS rendering, run the API locally with requirements-dev.txt.
 COPY requirements.txt /tmp/requirements.txt
 RUN pip3 install --no-cache-dir --break-system-packages -r /tmp/requirements.txt && \
+    pip3 install --no-cache-dir --break-system-packages playwright && \
+    PLAYWRIGHT_BROWSERS_PATH=/usr/lib playwright install chromium && \
     rm /tmp/requirements.txt
+
+ENV PLAYWRIGHT_BROWSERS_PATH=/usr/lib
 
 COPY config/nuclei-config.yaml /etc/nuclei/config.yaml
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
