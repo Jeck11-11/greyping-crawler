@@ -131,6 +131,22 @@ async def crawl_page(
     )
 
 
+_SKIP_EXTENSIONS = frozenset({
+    ".pdf", ".pptx", ".ppt", ".docx", ".doc", ".xlsx", ".xls",
+    ".zip", ".tar", ".gz", ".rar", ".7z",
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico", ".bmp",
+    ".mp4", ".mp3", ".avi", ".mov", ".wmv", ".flv", ".wav", ".ogg",
+    ".woff", ".woff2", ".ttf", ".eot",
+    ".exe", ".msi", ".dmg", ".iso", ".apk",
+})
+
+
+def _is_crawlable_url(url: str) -> bool:
+    """Return False for URLs pointing to binary/non-HTML files."""
+    path = urlparse(url).path.lower()
+    return not any(path.endswith(ext) for ext in _SKIP_EXTENSIONS)
+
+
 async def crawl_domain(
     target: str,
     *,
@@ -158,6 +174,9 @@ async def crawl_domain(
         if url in visited:
             continue
         visited.add(url)
+
+        if not _is_crawlable_url(url):
+            continue
 
         page = await crawl_page(
             url,

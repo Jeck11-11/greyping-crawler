@@ -19,9 +19,9 @@ _EMAIL_RE = re.compile(
 )
 
 _PHONE_RE = re.compile(
-    r"(?:\+?\d{1,3}[\s\-.]?)?"        # optional country code
-    r"(?:\(?\d{1,4}\)?[\s\-.]?)?"      # optional area code
-    r"\d{2,4}[\s\-.]?\d{2,4}[\s\-.]?\d{2,4}",
+    r"(?:\+?\d{1,3}[\s\-]?)?"         # optional country code
+    r"(?:\(?\d{1,4}\)?[\s\-]?)?"       # optional area code
+    r"\d{2,4}[\s\-]\d{2,4}(?:[\s\-]\d{2,4})?",
 )
 
 # Minimum digits to consider something a real phone number
@@ -56,10 +56,13 @@ def _digit_count(s: str) -> int:
 
 def _normalise_phone(raw: str) -> str | None:
     """Return a cleaned phone string or *None* if it looks like a false positive."""
-    digits = re.sub(r"\D", "", raw)
+    stripped = raw.strip()
+    if "." in stripped:
+        return None
+    digits = re.sub(r"\D", "", stripped)
     if len(digits) < _MIN_PHONE_DIGITS or len(digits) > 15:
         return None
-    return raw.strip()
+    return stripped
 
 
 def extract_contacts(soup: BeautifulSoup, raw_html: str) -> ContactInfo:
