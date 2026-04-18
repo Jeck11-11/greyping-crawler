@@ -23,6 +23,7 @@ from ._http_utils import (
     normalise_target,
     validate_target,
 )
+from ._link_utils import is_social_url, normalise_ext_url, MAX_FOUND_ON
 from ._social_utils import detect_platform
 from .breach_checker import check_breaches
 from .cookie_checker import analyze_cookies
@@ -119,6 +120,8 @@ def _extract_domain(url: str) -> str:
     """Return the bare domain from a URL."""
     parsed = urlparse(url)
     return (parsed.hostname or url).lower().lstrip("www.")
+
+
 
 
 # Backwards-compatible aliases — existing callers / tests may import these.
@@ -283,10 +286,13 @@ async def _scan_single_target(
         for link in page.links:
             if link.link_type == "internal":
                 internal_links.add(link.url)
-            else:
+            elif not is_social_url(link.url):
+                norm = normalise_ext_url(link.url)
                 entry = ext_link_sources.setdefault(
-                    link.url, {"anchor_text": link.anchor_text, "found_on": []}
+                    norm, {"anchor_text": "", "found_on": []}
                 )
+                if link.anchor_text and not entry["anchor_text"]:
+                    entry["anchor_text"] = link.anchor_text
                 entry["found_on"].append(page_url)
         for secret in page.secrets:
             secret.found_on = page_url
@@ -310,12 +316,14 @@ async def _scan_single_target(
         SocialFinding(url=s, platform=detect_platform(s), found_on=sorted(set(urls)))
         for s, urls in sorted(social_sources.items())
     ]
-    ext_link_findings = [
-        ExternalLinkFinding(
-            url=u, anchor_text=d["anchor_text"], found_on=sorted(set(d["found_on"])),
-        )
-        for u, d in sorted(ext_link_sources.items())
-    ]
+    ext_link_findings = []
+    for u, d in sorted(ext_link_sources.items()):
+        unique_pages = sorted(set(d["found_on"]))
+        ext_link_findings.append(ExternalLinkFinding(
+            url=u,
+            anchor_text=d["anchor_text"],
+            found_on=unique_pages[:MAX_FOUND_ON],
+        ))
 
     # Flat contact list (backwards-compatible)
     flat_contacts = ContactInfo(
@@ -565,10 +573,18 @@ async def _lighttouch_single_target(target: str, timeout: int) -> DomainResult:
     cookie_findings = analyze_cookies(resp_cookies)
 
     internal_links = sorted({l.url for l in links if l.link_type == "internal"})
-    ext_link_findings = [
-        ExternalLinkFinding(url=l.url, anchor_text=l.anchor_text, found_on=[target])
-        for l in links if l.link_type == "external"
-    ]
+    ext_seen: dict[str, ExternalLinkFinding] = {}
+    for l in links:
+        if l.link_type != "external" or is_social_url(l.url):
+            continue
+        norm = normalise_ext_url(l.url)
+        if norm not in ext_seen:
+            ext_seen[norm] = ExternalLinkFinding(
+                url=norm, anchor_text=l.anchor_text, found_on=[target],
+            )
+        elif l.anchor_text and not ext_seen[norm].anchor_text:
+            ext_seen[norm].anchor_text = l.anchor_text
+    ext_link_findings = sorted(ext_seen.values(), key=lambda x: x.url)
     email_findings = [
         EmailFinding(email=e, found_on=[target]) for e in sorted(set(contacts.emails))
     ]

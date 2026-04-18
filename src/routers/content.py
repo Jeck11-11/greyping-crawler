@@ -8,6 +8,7 @@ import logging
 from fastapi import APIRouter
 
 from .._http_utils import validate_target
+from .._link_utils import normalise_ext_url, is_social_url, MAX_FOUND_ON
 from .._social_utils import detect_platform
 from ..crawler import crawl_domain
 from ..postprocess import fill_not_found
@@ -122,24 +123,28 @@ async def recon_links(request: CrawlReconRequest) -> list[LinkReconResult]:
                 for link in page.links:
                     if link.link_type == "internal":
                         internal.add(link.url)
-                    else:
+                    elif not is_social_url(link.url):
+                        norm = normalise_ext_url(link.url)
                         entry = ext.setdefault(
-                            link.url,
-                            {"anchor_text": link.anchor_text, "found_on": []},
+                            norm, {"anchor_text": "", "found_on": []},
                         )
+                        if link.anchor_text and not entry["anchor_text"]:
+                            entry["anchor_text"] = link.anchor_text
                         entry["found_on"].append(page.url)
+
+            ext_findings = []
+            for u, d in sorted(ext.items()):
+                unique_pages = sorted(set(d["found_on"]))
+                ext_findings.append(ExternalLinkFinding(
+                    url=u,
+                    anchor_text=d["anchor_text"],
+                    found_on=unique_pages[:MAX_FOUND_ON],
+                ))
 
             return LinkReconResult(
                 target=target,
                 internal_links=sorted(internal),
-                external_links=[
-                    ExternalLinkFinding(
-                        url=u,
-                        anchor_text=d["anchor_text"],
-                        found_on=sorted(set(d["found_on"])),
-                    )
-                    for u, d in sorted(ext.items())
-                ],
+                external_links=ext_findings,
             )
         except Exception as exc:
             logger.warning("Link scan failed for %s: %s", target, exc)

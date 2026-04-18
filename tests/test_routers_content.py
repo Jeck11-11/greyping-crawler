@@ -119,7 +119,7 @@ class TestReconLinks:
         body = resp.json()[0]
         assert body["internal_links"] == ["https://example.com/about"]
         assert len(body["external_links"]) == 1
-        assert body["external_links"][0]["url"] == "https://partner.com/"
+        assert body["external_links"][0]["url"] == "https://partner.com"
 
 
 class TestReconSecrets:
