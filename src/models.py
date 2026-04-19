@@ -88,6 +88,7 @@ class BreachReconRequest(ReconRequest):
 
     emails: list[str] = Field(
         default_factory=list,
+        max_length=100,
         description="Optional seed emails to look up in addition to the domain.",
     )
 

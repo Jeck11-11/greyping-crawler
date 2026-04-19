@@ -13,6 +13,7 @@ from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import Field
 
 import httpx
 
@@ -727,7 +728,7 @@ async def lighttouch_scan(request: LightTouchRequest) -> ScanResponse:
 class PassiveRequest(ReconRequest):
     """Passive scan payload — optional seed emails to also check against HIBP."""
 
-    emails: list = []  # list[str]; keep weak-typed so an empty JSON array is OK
+    emails: list = Field(default_factory=list, max_length=100)
 
 
 async def _passive_single_target(
@@ -809,6 +810,7 @@ async def _passive_single_target(
         breaches_found=len(breaches),
         subdomains_found=len(ct.subdomains),
         wayback_snapshots=wayback.snapshot_count,
+        sensitive_paths_found=0,
     )
 
     result = DomainResult(
