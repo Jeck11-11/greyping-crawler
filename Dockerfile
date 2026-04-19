@@ -8,9 +8,10 @@ LABEL maintainer="GreyPing" \
 RUN apk add --no-cache bash tzdata python3 py3-pip
 
 # Install Python dependencies for the OSINT API
-# NOTE: Playwright is omitted because the base image is Alpine (musl).
-# The crawler falls back to static fetching via httpx automatically.
-# For JS rendering, run the API locally with requirements-dev.txt.
+# NOTE: Playwright requires glibc and has no Alpine wheel, so JS rendering
+# is unavailable in Docker. The crawler falls back to static httpx fetching
+# automatically. For JS rendering, run the API outside Docker with
+# requirements-dev.txt and `playwright install chromium`.
 COPY requirements.txt /tmp/requirements.txt
 RUN pip3 install --no-cache-dir --break-system-packages -r /tmp/requirements.txt && \
     rm /tmp/requirements.txt

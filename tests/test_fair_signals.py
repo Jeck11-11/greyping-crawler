@@ -2,6 +2,8 @@
 
 from unittest.mock import AsyncMock, patch
 
+from src.models import ARecord
+
 import httpx
 from fastapi.testclient import TestClient
 
@@ -170,7 +172,7 @@ class TestFAIRBuilder:
             target="https://lurker.example.com",
             passive_intel=PassiveIntelResult(
                 dns=DNSResult(domain="lurker.example.com",
-                              a_records=["93.184.216.34"]),
+                              a_records=[ARecord(address="93.184.216.34")]),
                 ct=CTResult(
                     domain="lurker.example.com",
                     subdomains=[
@@ -242,7 +244,7 @@ class TestFAIRIntegration:
         self, mock_dns, mock_ct, mock_rdap, mock_wb, mock_breaches,
     ):
         mock_dns.return_value = DNSResult(
-            domain="p.example.com", a_records=["1.2.3.4"],
+            domain="p.example.com", a_records=[ARecord(address="1.2.3.4")],
         )
         mock_ct.return_value = CTResult(
             domain="p.example.com",

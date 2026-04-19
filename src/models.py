@@ -88,6 +88,7 @@ class BreachReconRequest(ReconRequest):
 
     emails: list[str] = Field(
         default_factory=list,
+        max_length=100,
         description="Optional seed emails to look up in addition to the domain.",
     )
 
@@ -168,6 +169,10 @@ class SecretFinding(BaseModel):
         default="high",
         description="Severity level: critical, high, medium, low.",
     )
+    found_on: str = Field(
+        default="",
+        description="Page URL where the secret was detected.",
+    )
 
 
 class BreachRecord(BaseModel):
@@ -235,6 +240,8 @@ class SSLCertResult(BaseModel):
     san: list[str] = Field(default_factory=list, description="Subject Alternative Names.")
     issues: list[str] = Field(default_factory=list)
     grade: str = Field(default="", description="A, B, C, D, F based on issues found.")
+    tls_version: str = Field(default="", description="Negotiated TLS version (e.g. TLSv1.3).")
+    cipher: str = Field(default="", description="Negotiated cipher suite.")
 
 
 class SensitivePathFinding(BaseModel):
@@ -307,14 +314,78 @@ class MXRecord(BaseModel):
     host: str
 
 
+class SOARecord(BaseModel):
+    primary_ns: str = ""
+    admin_email: str = ""
+    serial: int = 0
+    refresh: int = 0
+    retry: int = 0
+    expire: int = 0
+    minimum_ttl: int = 0
+
+
+class SRVRecord(BaseModel):
+    service: str = ""
+    priority: int = 0
+    weight: int = 0
+    port: int = 0
+    target: str = ""
+
+
+class ARecord(BaseModel):
+    address: str
+    ttl: int = 0
+    reverse: str = Field(default="", description="Reverse DNS (PTR) hostname if available.")
+
+
+class AAAARecord(BaseModel):
+    address: str
+    ttl: int = 0
+    reverse: str = Field(default="", description="Reverse DNS (PTR) hostname if available.")
+
+
+class MXRecordFull(BaseModel):
+    priority: int = 0
+    host: str
+    ttl: int = 0
+
+
+class NSRecord(BaseModel):
+    host: str
+    ttl: int = 0
+
+
+class TXTRecord(BaseModel):
+    data: str
+    ttl: int = 0
+    entries: list[str] = Field(default_factory=list, description="Parsed entries from the TXT record.")
+
+
+class CNAMERecord(BaseModel):
+    target: str
+    ttl: int = 0
+
+
+class CAARecord(BaseModel):
+    flags: int = 0
+    tag: str = ""
+    value: str = ""
+    ttl: int = 0
+
+
 class DNSResult(BaseModel):
     domain: str
-    a_records: list[str] = Field(default_factory=list)
-    aaaa_records: list[str] = Field(default_factory=list)
-    mx_records: list[MXRecord] = Field(default_factory=list)
-    ns_records: list[str] = Field(default_factory=list)
-    txt_records: list[str] = Field(default_factory=list)
-    cname_records: list[str] = Field(default_factory=list)
+    a_records: list[ARecord] = Field(default_factory=list)
+    aaaa_records: list[AAAARecord] = Field(default_factory=list)
+    mx_records: list[MXRecordFull] = Field(default_factory=list)
+    ns_records: list[NSRecord] = Field(default_factory=list)
+    txt_records: list[TXTRecord] = Field(default_factory=list)
+    cname_records: list[CNAMERecord] = Field(default_factory=list)
+    soa_record: SOARecord | None = None
+    srv_records: list[SRVRecord] = Field(default_factory=list)
+    caa_records: list[CAARecord] = Field(default_factory=list, description="CAA records — which CAs may issue certs.")
+    ptr_records: list[str] = Field(default_factory=list, description="Reverse DNS lookup results for A records.")
+    dnssec: bool | None = Field(default=None, description="True if DNSSEC is enabled (DNSKEY found).")
     error: str | None = None
 
 
@@ -416,6 +487,7 @@ class PassiveIntelResult(BaseModel):
     rdap: RDAPResult | None = None
     wayback: WaybackResult | None = None
     email_security: EmailSecurityResult | None = None
+    ip_enrichment: IPEnrichmentResult | None = None
     breaches: list[BreachRecord] = Field(default_factory=list)
 
 
@@ -512,6 +584,189 @@ class FAIRSignals(BaseModel):
     )
 
 
+# ---------------------------------------------------------------------------
+# EASM report layer — business-grade classification and prioritization
+# ---------------------------------------------------------------------------
+
+
+class FindingClassification(str, Enum):
+    confirmed_issue = "confirmed_issue"
+    platform_behavior = "platform_behavior"
+    informational = "informational"
+    false_positive_likely = "false_positive_likely"
+
+
+class FindingOwner(str, Enum):
+    customer = "customer"
+    platform = "platform"
+    third_party = "third_party"
+    not_actionable = "not_actionable"
+
+
+class PrioritizedFinding(BaseModel):
+    id: str = Field(..., description="Stable identifier, e.g. 'missing_hsts', 'exposed_env'.")
+    title: str
+    category: str = Field(..., description="E.g. 'security_headers', 'ssl', 'cookies', 'secrets', 'email_security'.")
+    severity: str = Field(default="medium", description="critical / high / medium / low / info.")
+    classification: FindingClassification
+    confidence: str = Field(default="medium", description="high / medium / low.")
+    owner: FindingOwner
+    platform_name: str = Field(default="", description="If owner=platform, which platform.")
+    why_it_matters: str = Field(default="", description="One sentence explaining business impact.")
+    business_impact: str = Field(default="", description="E.g. 'Data breach risk', 'Compliance gap'.")
+    evidence: list[str] = Field(default_factory=list)
+    recommended_action: str = Field(default="", description="One-line remediation guidance.")
+    source_field: str = Field(default="", description="Which DomainResult field this came from.")
+
+
+class SourcemapSummary(BaseModel):
+    detected: bool = False
+    count: int = 0
+    ownership: str = Field(default="", description="'vendor', 'first_party', 'mixed', or 'unknown'.")
+    proprietary_exposure: str = Field(default="none", description="'none', 'low', or 'high'.")
+
+
+class JSIntelSummary(BaseModel):
+    scripts_scanned: int = 0
+    api_endpoints_count: int = 0
+    internal_hosts_count: int = 0
+    sourcemaps: SourcemapSummary = Field(default_factory=SourcemapSummary)
+    notable_endpoints: list[str] = Field(
+        default_factory=list, description="First-party /api/* endpoints, max 5.",
+    )
+
+
+class CookieSummary(BaseModel):
+    total: int = 0
+    with_issues: int = 0
+    platform_standard: int = Field(default=0, description="Cookie issues that are expected platform behavior.")
+    customer_actionable: int = 0
+    notable: list[str] = Field(default_factory=list, description="Non-platform cookies with issues, by name.")
+
+
+class TechSummary(BaseModel):
+    platform: str = Field(default="", description="Primary platform detected (Wix, Shopify, WordPress, etc.).")
+    high_confidence: list[str] = Field(default_factory=list, description="Tech names with confidence=high.")
+    other_count: int = Field(default=0, description="Count of low/medium confidence detections.")
+
+
+class AssetContext(BaseModel):
+    """Inferred business context for the asset."""
+    asset_type: str = Field(default="", description="E.g. 'brochure_site', 'ecommerce', 'web_app', 'api', 'email_only'.")
+    environment: str = Field(default="", description="'production', 'staging', 'development', or 'unknown'.")
+    audience: str = Field(default="", description="'customer_facing', 'internal', 'unknown'.")
+    hosting_type: str = Field(default="", description="'managed_platform', 'cloud_hosted', 'self_hosted', 'unknown'.")
+    business_criticality: str = Field(default="", description="'high', 'medium', 'low' — inferred from asset type and exposure.")
+    inferred_from: list[str] = Field(default_factory=list, description="Evidence used for inference.")
+
+
+class DNSPostureSummary(BaseModel):
+    """Full DNS posture + IP/ASN enrichment for EASM report."""
+    # Raw DNS records
+    a_records: list[str] = Field(default_factory=list, description="IPv4 addresses.")
+    aaaa_records: list[str] = Field(default_factory=list, description="IPv6 addresses.")
+    a_record_count: int = 0
+    has_ipv6: bool = False
+    mx_hosts: list[str] = Field(default_factory=list, description="MX records as 'priority host'.")
+    nameservers: list[str] = Field(default_factory=list)
+    cname_chain: list[str] = Field(default_factory=list, description="CNAME records.")
+    txt_records: list[str] = Field(default_factory=list, description="TXT records.")
+    # SOA
+    soa_primary_ns: str = ""
+    soa_admin_email: str = ""
+    soa_serial: int = 0
+    soa_refresh: int = 0
+    soa_retry: int = 0
+    soa_expire: int = 0
+    soa_minimum_ttl: int = 0
+    # SRV / CAA / PTR / DNSSEC
+    srv_services: list[str] = Field(default_factory=list, description="Discovered SRV service names.")
+    caa_records: list[str] = Field(default_factory=list, description="CAA policy records.")
+    caa_restricted: bool = Field(default=False, description="True if CAA restricts certificate issuance.")
+    ptr_records: list[str] = Field(default_factory=list, description="Reverse DNS for A records.")
+    dnssec_enabled: bool | None = Field(default=None, description="True if DNSSEC is enabled.")
+    # Email security
+    mail_providers: list[str] = Field(default_factory=list)
+    spf_status: str = Field(default="", description="'pass', 'soft_fail', 'weak', 'not_found'.")
+    dmarc_status: str = Field(default="", description="'enforce', 'monitor', 'not_found'.")
+    dkim_status: str = Field(default="", description="'found', 'not_found'.")
+    email_grade: str = ""
+    # IP / ASN enrichment
+    ip_asn_map: list[dict] = Field(default_factory=list, description="Per-IP ASN info: ip, asn, asn_name, prefix, country_code.")
+    hosting_providers: list[str] = Field(default_factory=list, description="Inferred hosting providers from ASN.")
+    hosting_countries: list[str] = Field(default_factory=list, description="Countries where IPs are geolocated.")
+
+
+class CertificateSummary(BaseModel):
+    """Certificate posture from SSL check + CT logs."""
+    current_valid: bool = True
+    current_issuer: str = ""
+    current_grade: str = ""
+    days_until_expiry: int = 0
+    san_domains: list[str] = Field(default_factory=list, description="Subject Alternative Names on current cert.")
+    ct_subdomains: list[str] = Field(default_factory=list, description="Subdomains seen in CT logs.")
+    ct_issuers: list[str] = Field(default_factory=list, description="Unique CA issuers from CT history.")
+    certificates_seen: int = 0
+
+
+class CloudAsset(BaseModel):
+    """A discovered cloud storage or SaaS asset."""
+    asset_type: str = Field(..., description="'s3_bucket', 'azure_blob', 'gcs_bucket', 'saas_platform'.")
+    identifier: str = Field(..., description="Bucket name, SaaS URL, etc.")
+    source: str = Field(default="", description="Where discovered: 'html', 'js', 'dns', 'headers'.")
+
+
+class PageSummary(BaseModel):
+    """Condensed page crawl summary for EASM report."""
+    total_pages: int = 0
+    unique_routes: list[str] = Field(default_factory=list, description="Canonicalized unique paths.")
+    notable_pages: list[str] = Field(default_factory=list, description="Pages with findings (secrets, IoCs).")
+    unique_emails: int = 0
+    unique_phones: int = 0
+    unique_socials: int = 0
+    external_dependencies: list[str] = Field(default_factory=list, description="Top external link domains.")
+
+
+class ReconArtifact(BaseModel):
+    """Low-signal discovery — standard web artifacts, not sensitive paths."""
+    path: str
+    status_code: int = 0
+    note: str = ""
+
+
+class ExecutiveSummary(BaseModel):
+    risk_posture: str = Field(default="", description="Low / Moderate / High / Critical.")
+    narrative: str = Field(default="", description="2-4 sentence natural-language posture assessment.")
+    key_positives: list[str] = Field(default_factory=list, description="Up to 3 strengths observed.")
+    key_concerns: list[str] = Field(default_factory=list, description="Up to 3 areas of concern.")
+    scan_coverage: str = Field(default="", description="full / lighttouch / passive.")
+
+
+class EASMReport(BaseModel):
+    """Business-grade EASM report layer. Additive overlay on raw scanner output."""
+
+    generated_at: str = ""
+    scan_mode: str = ""
+    executive_summary: ExecutiveSummary = Field(default_factory=ExecutiveSummary)
+    asset_context: AssetContext | None = None
+    dns_posture: DNSPostureSummary | None = None
+    certificate_summary: CertificateSummary | None = None
+    cloud_assets: list[CloudAsset] = Field(default_factory=list)
+    page_summary: PageSummary | None = None
+    recon_artifacts: list[ReconArtifact] = Field(default_factory=list)
+    prioritized_findings: list[PrioritizedFinding] = Field(
+        default_factory=list, description="Sorted by severity desc, confidence desc, actionability desc.",
+    )
+    total_findings: int = 0
+    confirmed_issues: int = 0
+    platform_behaviors: int = 0
+    informational_count: int = 0
+    js_intel_summary: JSIntelSummary | None = None
+    cookie_summary: CookieSummary | None = None
+    tech_summary: TechSummary | None = None
+    platform_detected: str = Field(default="", description="Primary platform if any: 'Wix', 'Shopify', etc.")
+
+
 class PageResult(BaseModel):
     """Scan results for a single crawled page."""
 
@@ -529,6 +784,10 @@ class PageResult(BaseModel):
     ioc_findings: list[IoCFinding] = Field(
         default_factory=list,
         description="Indicators of compromise detected on this page.",
+    )
+    notes: str = Field(
+        default="",
+        description="Informational notes, e.g. Playwright fallback warning.",
     )
     error: str | None = None
 
@@ -631,6 +890,14 @@ class DomainResult(BaseModel):
             "FAIR-aligned risk signals (TEF, Vulnerability, Control Strength, "
             "Loss Magnitude) derived from the evidence in this result. Use "
             "these signals to build a risk profile in a downstream system."
+        ),
+    )
+    easm_report: EASMReport | None = Field(
+        default=None,
+        description=(
+            "Business-grade EASM report with classified findings, executive "
+            "summary, and prioritization. Generated as a post-processing "
+            "step over the raw scanner output."
         ),
     )
     metadata: dict[str, Any] = Field(default_factory=dict)

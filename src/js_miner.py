@@ -8,6 +8,7 @@ Fetches `<script src>` files referenced by a page and extracts:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from urllib.parse import urljoin, urlparse
@@ -15,6 +16,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from bs4 import BeautifulSoup
 
+from .config import JS_FETCH_CONCURRENCY, JS_MINE_TIMEOUT, MAX_SCRIPTS, UA_HONEST
 from .models import JSIntelResult
 
 logger = logging.getLogger(__name__)
@@ -47,7 +49,7 @@ _SOURCEMAP_RE = re.compile(r"(?://|/\*)[#@]\s*sourceMappingURL=([^\s*]+)")
 # HTTP helpers
 # ---------------------------------------------------------------------------
 
-_UA = "GreypingCrawler/1.0 (JS-Intel)"
+_UA = f"{UA_HONEST} (JS-Intel)"
 
 
 async def _fetch_text(client: httpx.AsyncClient, url: str) -> str:
@@ -128,8 +130,8 @@ async def mine_javascript(
     target: str,
     html: str,
     *,
-    timeout: int = 30,
-    max_scripts: int = 50,
+    timeout: int = JS_MINE_TIMEOUT,
+    max_scripts: int = MAX_SCRIPTS,
 ) -> JSIntelResult:
     """Fetch every <script src> on *target*'s landing page and mine for intel."""
     script_urls = extract_script_urls(html, target)[:max_scripts]
@@ -147,6 +149,18 @@ async def mine_javascript(
     sourcemaps: list[str] = []
     recovered: list[str] = []
     scanned = 0
+    sem = asyncio.Semaphore(JS_FETCH_CONCURRENCY)
+
+    async def _mine_one(client: httpx.AsyncClient, url: str):
+        async with sem:
+            js = await _fetch_text(client, url)
+        if not js:
+            return None
+        return (
+            extract_endpoints(js),
+            extract_internal_hosts(js),
+            extract_sourcemap_url(js, url),
+        )
 
     try:
         async with httpx.AsyncClient(
@@ -154,16 +168,17 @@ async def mine_javascript(
             follow_redirects=True,
             verify=False,
         ) as client:
-            for url in own_scripts:
-                js = await _fetch_text(client, url)
-                if not js:
+            results = await asyncio.gather(
+                *(_mine_one(client, u) for u in own_scripts),
+                return_exceptions=True,
+            )
+            for r in results:
+                if r is None or isinstance(r, Exception):
                     continue
+                eps, hosts, sm = r
                 scanned += 1
-                for ep in extract_endpoints(js):
-                    api_endpoints.add(ep)
-                for host in extract_internal_hosts(js):
-                    internal_hosts.add(host)
-                sm = extract_sourcemap_url(js, url)
+                api_endpoints.update(eps)
+                internal_hosts.update(hosts)
                 if sm:
                     sourcemaps.append(sm)
 

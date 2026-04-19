@@ -10,16 +10,29 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import Field
 
 import httpx
 
-from ._http_utils import fetch_landing_page, fetch_landing_page_full, normalise_target
+from ._http_utils import (
+    TargetValidationError,
+    fetch_landing_page,
+    fetch_landing_page_full,
+    normalise_target,
+    validate_target,
+)
+from ._link_utils import is_social_url, normalise_ext_url, MAX_FOUND_ON
+from ._social_utils import detect_platform
 from .breach_checker import check_breaches
 from .cookie_checker import analyze_cookies
 from .crawler import crawl_domain
+from .easm_report import build_easm_report
 from .fair_signals import compute_fair_signals
+from .postprocess import fill_not_found
+from .middleware import APIKeyMiddleware, RateLimitMiddleware
 from .js_miner import mine_javascript
 from .extractors import extract_contacts, extract_links, extract_page_metadata
 from .ioc_scanner import scan_ioc
@@ -32,6 +45,7 @@ from .models import (
     EmailSecurityResult,
     EmailFinding,
     ExternalLinkFinding,
+    IPEnrichmentResult,
     JSIntelResult,
     LinkInfo,
     PageResult,
@@ -51,6 +65,7 @@ from .passive_intel import (
     query_ct_logs,
     query_dns,
     query_email_security,
+    query_ip_enrichment,
     query_rdap,
     query_wayback,
 )
@@ -87,6 +102,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(RateLimitMiddleware)
+app.add_middleware(APIKeyMiddleware)
 
 app.include_router(network_router.router)
 app.include_router(content_router.router)
@@ -95,30 +112,17 @@ app.include_router(intel_router.router)
 app.include_router(passive_router.router)
 
 
-_SOCIAL_PLATFORM_MAP = {
-    "twitter.com": "Twitter", "x.com": "Twitter/X",
-    "facebook.com": "Facebook", "fb.com": "Facebook",
-    "linkedin.com": "LinkedIn", "instagram.com": "Instagram",
-    "github.com": "GitHub", "youtube.com": "YouTube",
-    "tiktok.com": "TikTok", "pinterest.com": "Pinterest",
-    "reddit.com": "Reddit", "t.me": "Telegram",
-    "mastodon.social": "Mastodon",
-}
-
-
-def _detect_platform(url: str) -> str:
-    """Return the platform name for a social URL, or empty string."""
-    try:
-        host = (urlparse(url).hostname or "").lower().lstrip("www.")
-        return _SOCIAL_PLATFORM_MAP.get(host, "")
-    except Exception:
-        return ""
+@app.exception_handler(TargetValidationError)
+async def _target_validation_handler(_request: Request, exc: TargetValidationError):
+    return JSONResponse(status_code=422, content={"detail": str(exc)})
 
 
 def _extract_domain(url: str) -> str:
     """Return the bare domain from a URL."""
     parsed = urlparse(url)
     return (parsed.hostname or url).lower().lstrip("www.")
+
+
 
 
 # Backwards-compatible aliases — existing callers / tests may import these.
@@ -134,8 +138,8 @@ async def _scan_single_target(
     domain = _extract_domain(target)
     started = datetime.now(timezone.utc).isoformat()
 
-    # Run crawl, SSL check, landing-page fetch (for headers/cookies/HTML),
-    # and sensitive-path scan concurrently.
+    # Run crawl, SSL check, landing-page fetch, sensitive-path scan,
+    # and passive intel (DNS, CT, RDAP, Wayback) all concurrently.
     crawl_task = crawl_domain(
         target,
         render_js=request.render_js,
@@ -146,9 +150,15 @@ async def _scan_single_target(
     ssl_task = check_ssl(target, timeout=request.timeout)
     landing_task = fetch_landing_page_full(target, timeout=request.timeout)
     paths_task = scan_sensitive_paths(target, timeout=request.timeout)
+    dns_task = query_dns(domain, timeout=request.timeout)
+    ct_task = query_ct_logs(domain, timeout=request.timeout)
+    rdap_task = query_rdap(domain, timeout=request.timeout)
+    wayback_task = query_wayback(domain, timeout=request.timeout)
 
-    crawl_result, ssl_result, landing_result, paths_result = await asyncio.gather(
+    (crawl_result, ssl_result, landing_result, paths_result,
+     dns_result, ct_result, rdap_result, wayback_result) = await asyncio.gather(
         crawl_task, ssl_task, landing_task, paths_task,
+        dns_task, ct_task, rdap_task, wayback_task,
         return_exceptions=True,
     )
 
@@ -162,6 +172,8 @@ async def _scan_single_target(
             error=str(crawl_result),
         )
         failed.fair_signals = compute_fair_signals(failed, scan_mode="full")
+        failed.easm_report = build_easm_report(failed, scan_mode="full")
+        fill_not_found(failed)
         return failed
 
     pages = crawl_result
@@ -215,6 +227,45 @@ async def _scan_single_target(
         logger.warning("Path scan failed for %s: %s", target, paths_result)
         paths_result = []
 
+    # Process passive intel results
+    def _passive_result(x, kind):
+        if isinstance(x, Exception):
+            msg = str(x) or x.__class__.__name__
+            logger.warning("Passive %s failed for %s: %s", kind.__name__, domain, msg)
+            return kind(domain=domain, error=msg)
+        return x
+
+    dns_result = _passive_result(dns_result, DNSResult)
+    ct_result = _passive_result(ct_result, CTResult)
+    rdap_result = _passive_result(rdap_result, RDAPResult)
+    wayback_result = _passive_result(wayback_result, WaybackResult)
+
+    # Email security + IP enrichment (depend on DNS data)
+    mx_records = dns_result.mx_records if not dns_result.error else []
+    a_records = dns_result.a_records if not dns_result.error else []
+    a_ips = [r.address for r in a_records] if a_records else []
+
+    try:
+        email_sec = await asyncio.wait_for(
+            query_email_security(domain, mx_records, timeout=request.timeout),
+            timeout=request.timeout,
+        )
+    except Exception as exc:
+        email_sec = EmailSecurityResult(domain=domain, error=str(exc))
+
+    try:
+        ip_enrich = await asyncio.wait_for(
+            query_ip_enrichment(domain, a_ips, timeout=request.timeout),
+            timeout=request.timeout,
+        )
+    except Exception as exc:
+        ip_enrich = IPEnrichmentResult(domain=domain, error=str(exc))
+
+    passive = PassiveIntelResult(
+        dns=dns_result, ct=ct_result, rdap=rdap_result, wayback=wayback_result,
+        email_security=email_sec, ip_enrichment=ip_enrich, breaches=[],
+    )
+
     # Aggregate contacts, links, and secrets across all pages,
     # tracking which page URL each finding came from.
     email_sources: dict[str, list[str]] = {}
@@ -237,11 +288,16 @@ async def _scan_single_target(
         for link in page.links:
             if link.link_type == "internal":
                 internal_links.add(link.url)
-            else:
+            elif not is_social_url(link.url):
+                norm = normalise_ext_url(link.url)
                 entry = ext_link_sources.setdefault(
-                    link.url, {"anchor_text": link.anchor_text, "found_on": []}
+                    norm, {"anchor_text": "", "found_on": []}
                 )
+                if link.anchor_text and not entry["anchor_text"]:
+                    entry["anchor_text"] = link.anchor_text
                 entry["found_on"].append(page_url)
+        for secret in page.secrets:
+            secret.found_on = page_url
         all_secrets.extend(page.secrets)
         for ioc in page.ioc_findings:
             key = (ioc.ioc_type, ioc.evidence)
@@ -259,15 +315,17 @@ async def _scan_single_target(
         for p, urls in sorted(phone_sources.items())
     ]
     social_findings = [
-        SocialFinding(url=s, platform=_detect_platform(s), found_on=sorted(set(urls)))
+        SocialFinding(url=s, platform=detect_platform(s), found_on=sorted(set(urls)))
         for s, urls in sorted(social_sources.items())
     ]
-    ext_link_findings = [
-        ExternalLinkFinding(
-            url=u, anchor_text=d["anchor_text"], found_on=sorted(set(d["found_on"])),
-        )
-        for u, d in sorted(ext_link_sources.items())
-    ]
+    ext_link_findings = []
+    for u, d in sorted(ext_link_sources.items()):
+        unique_pages = sorted(set(d["found_on"]))
+        ext_link_findings.append(ExternalLinkFinding(
+            url=u,
+            anchor_text=d["anchor_text"],
+            found_on=unique_pages[:MAX_FOUND_ON],
+        ))
 
     # Flat contact list (backwards-compatible)
     flat_contacts = ContactInfo(
@@ -308,6 +366,8 @@ async def _scan_single_target(
         ioc_findings=len(all_iocs),
         technologies_found=len(tech_findings),
         js_endpoints_found=js_endpoints_count,
+        subdomains_found=len(ct_result.subdomains) if not ct_result.error else 0,
+        wayback_snapshots=wayback_result.snapshot_count if not wayback_result.error else 0,
     )
 
     result = DomainResult(
@@ -332,6 +392,7 @@ async def _scan_single_target(
         ioc_findings=all_iocs,
         technologies=tech_findings,
         js_intel=js_intel_result,
+        passive_intel=passive,
         metadata={
             "domain": domain,
             "render_js": request.render_js,
@@ -339,6 +400,8 @@ async def _scan_single_target(
         },
     )
     result.fair_signals = compute_fair_signals(result, scan_mode="full")
+    result.easm_report = build_easm_report(result, scan_mode="full")
+    fill_not_found(result)
     return result
 
 
@@ -357,7 +420,7 @@ async def scan(request: ScanRequest) -> ScanResponse:
     scan_id = uuid.uuid4().hex
     started = datetime.now(timezone.utc).isoformat()
 
-    targets = [_normalise_target(t) for t in request.targets]
+    targets = [validate_target(t) for t in request.targets]
 
     # Run all domain scans concurrently
     tasks = [_scan_single_target(t, request) for t in targets]
@@ -427,14 +490,56 @@ async def _lighttouch_single_target(target: str, timeout: int) -> DomainResult:
 
     ssl_task = check_ssl(target, timeout=timeout)
     landing_task = fetch_landing_page_full(target, timeout=timeout, stealth=True)
+    dns_task = query_dns(domain, timeout=timeout)
+    ct_task = query_ct_logs(domain, timeout=timeout)
+    rdap_task = query_rdap(domain, timeout=timeout)
+    wayback_task = query_wayback(domain, timeout=timeout)
 
-    ssl_result, landing_result = await asyncio.gather(
-        ssl_task, landing_task, return_exceptions=True,
+    (ssl_result, landing_result,
+     dns_result, ct_result, rdap_result, wayback_result) = await asyncio.gather(
+        ssl_task, landing_task,
+        dns_task, ct_task, rdap_task, wayback_task,
+        return_exceptions=True,
     )
 
     if isinstance(ssl_result, Exception):
         logger.warning("SSL check failed for %s: %s", target, ssl_result)
         ssl_result = SSLCertResult(is_valid=False, issues=[f"Check failed: {ssl_result}"])
+
+    def _pr(x, kind):
+        if isinstance(x, Exception):
+            msg = str(x) or x.__class__.__name__
+            logger.warning("Passive %s failed for %s: %s", kind.__name__, domain, msg)
+            return kind(domain=domain, error=msg)
+        return x
+
+    dns_result = _pr(dns_result, DNSResult)
+    ct_result = _pr(ct_result, CTResult)
+    rdap_result = _pr(rdap_result, RDAPResult)
+    wayback_result = _pr(wayback_result, WaybackResult)
+
+    mx_records = dns_result.mx_records if not dns_result.error else []
+    a_records_dns = dns_result.a_records if not dns_result.error else []
+    a_ips_dns = [r.address for r in a_records_dns] if a_records_dns else []
+
+    try:
+        email_sec = await asyncio.wait_for(
+            query_email_security(domain, mx_records, timeout=timeout), timeout=timeout,
+        )
+    except Exception as exc:
+        email_sec = EmailSecurityResult(domain=domain, error=str(exc))
+
+    try:
+        ip_enrich = await asyncio.wait_for(
+            query_ip_enrichment(domain, a_ips_dns, timeout=timeout), timeout=timeout,
+        )
+    except Exception as exc:
+        ip_enrich = IPEnrichmentResult(domain=domain, error=str(exc))
+
+    lt_passive = PassiveIntelResult(
+        dns=dns_result, ct=ct_result, rdap=rdap_result, wayback=wayback_result,
+        email_security=email_sec, ip_enrichment=ip_enrich, breaches=[],
+    )
 
     if isinstance(landing_result, Exception) or not landing_result:
         logger.warning("Light-touch landing fetch failed for %s", target)
@@ -447,6 +552,8 @@ async def _lighttouch_single_target(target: str, timeout: int) -> DomainResult:
     contacts = extract_contacts(soup, html)
     links = extract_links(soup, target)
     secrets = scan_secrets(html) if html else []
+    for s in secrets:
+        s.found_on = target
     iocs = scan_ioc(html, target) if html else []
 
     meta: dict[str, str] = {}
@@ -469,10 +576,18 @@ async def _lighttouch_single_target(target: str, timeout: int) -> DomainResult:
     cookie_findings = analyze_cookies(resp_cookies)
 
     internal_links = sorted({l.url for l in links if l.link_type == "internal"})
-    ext_link_findings = [
-        ExternalLinkFinding(url=l.url, anchor_text=l.anchor_text, found_on=[target])
-        for l in links if l.link_type == "external"
-    ]
+    ext_seen: dict[str, ExternalLinkFinding] = {}
+    for l in links:
+        if l.link_type != "external" or is_social_url(l.url):
+            continue
+        norm = normalise_ext_url(l.url)
+        if norm not in ext_seen:
+            ext_seen[norm] = ExternalLinkFinding(
+                url=norm, anchor_text=l.anchor_text, found_on=[target],
+            )
+        elif l.anchor_text and not ext_seen[norm].anchor_text:
+            ext_seen[norm].anchor_text = l.anchor_text
+    ext_link_findings = sorted(ext_seen.values(), key=lambda x: x.url)
     email_findings = [
         EmailFinding(email=e, found_on=[target]) for e in sorted(set(contacts.emails))
     ]
@@ -481,7 +596,7 @@ async def _lighttouch_single_target(target: str, timeout: int) -> DomainResult:
         for p in sorted(set(contacts.phone_numbers))
     ]
     social_findings = [
-        SocialFinding(url=s, platform=_detect_platform(s), found_on=[target])
+        SocialFinding(url=s, platform=detect_platform(s), found_on=[target])
         for s in sorted(set(contacts.social_profiles))
     ]
 
@@ -539,10 +654,13 @@ async def _lighttouch_single_target(target: str, timeout: int) -> DomainResult:
         ioc_findings=iocs,
         technologies=tech_findings,
         js_intel=None,
+        passive_intel=lt_passive,
         metadata={"domain": domain, "mode": "lighttouch"},
         error=None if html else "landing page fetch failed",
     )
     result.fair_signals = compute_fair_signals(result, scan_mode="lighttouch")
+    result.easm_report = build_easm_report(result, scan_mode="lighttouch")
+    fill_not_found(result)
     return result
 
 
@@ -561,7 +679,7 @@ async def lighttouch_scan(request: LightTouchRequest) -> ScanResponse:
     scan_id = uuid.uuid4().hex
     started = datetime.now(timezone.utc).isoformat()
 
-    targets = [_normalise_target(t) for t in request.targets]
+    targets = [validate_target(t) for t in request.targets]
     domain_results = await asyncio.gather(
         *(_lighttouch_single_target(t, request.timeout) for t in targets)
     )
@@ -612,7 +730,7 @@ async def lighttouch_scan(request: LightTouchRequest) -> ScanResponse:
 class PassiveRequest(ReconRequest):
     """Passive scan payload — optional seed emails to also check against HIBP."""
 
-    emails: list = []  # list[str]; keep weak-typed so an empty JSON array is OK
+    emails: list = Field(default_factory=list, max_length=100)
 
 
 async def _passive_single_target(
@@ -652,8 +770,11 @@ async def _passive_single_target(
         logger.warning("Passive breach lookup failed for %s: %s", domain, breaches)
         breaches = []
 
-    # Email security runs after DNS so it can reuse MX records.
+    # Email security and IP enrichment run after DNS so they can reuse its data.
     mx_records = dns.mx_records if not dns.error else []
+    a_records = dns.a_records if not dns.error else []
+    a_ips = [r.address for r in a_records] if a_records else []
+
     try:
         email_sec = await asyncio.wait_for(
             query_email_security(domain, mx_records, timeout=timeout),
@@ -662,9 +783,17 @@ async def _passive_single_target(
     except Exception as exc:
         email_sec = EmailSecurityResult(domain=domain, error=str(exc))
 
+    try:
+        ip_enrich = await asyncio.wait_for(
+            query_ip_enrichment(domain, a_ips, timeout=timeout),
+            timeout=timeout,
+        )
+    except Exception as exc:
+        ip_enrich = IPEnrichmentResult(domain=domain, error=str(exc))
+
     passive = PassiveIntelResult(
         dns=dns, ct=ct, rdap=rdap, wayback=wayback,
-        email_security=email_sec, breaches=breaches,
+        email_security=email_sec, ip_enrichment=ip_enrich, breaches=breaches,
     )
 
     # If every upstream source reported an error, surface that on
@@ -684,6 +813,7 @@ async def _passive_single_target(
         breaches_found=len(breaches),
         subdomains_found=len(ct.subdomains),
         wayback_snapshots=wayback.snapshot_count,
+        sensitive_paths_found=0,
     )
 
     result = DomainResult(
@@ -699,6 +829,8 @@ async def _passive_single_target(
         error=passive_error,
     )
     result.fair_signals = compute_fair_signals(result, scan_mode="passive")
+    result.easm_report = build_easm_report(result, scan_mode="passive")
+    fill_not_found(result)
     return result
 
 
@@ -713,7 +845,7 @@ async def passive_scan(request: PassiveRequest) -> ScanResponse:
     scan_id = uuid.uuid4().hex
     started = datetime.now(timezone.utc).isoformat()
 
-    targets = [_normalise_target(t) for t in request.targets]
+    targets = [validate_target(t) for t in request.targets]
     domain_results = await asyncio.gather(*(
         _passive_single_target(t, list(request.emails or []), request.timeout)
         for t in targets

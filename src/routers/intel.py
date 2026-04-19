@@ -8,9 +8,10 @@ from urllib.parse import urlparse
 
 from fastapi import APIRouter
 
-from .._http_utils import normalise_target
+from .._http_utils import validate_target
 from ..breach_checker import check_breaches
 from ..models import BreachReconRequest, BreachReconResult
+from ..postprocess import fill_not_found
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,7 @@ def _domain_of(target: str) -> str:
 @router.post("/breaches", response_model=list[BreachReconResult])
 async def recon_breaches(request: BreachReconRequest) -> list[BreachReconResult]:
     """Check each target domain (plus optional seed emails) against HIBP."""
-    targets = [normalise_target(t) for t in request.targets]
+    targets = [validate_target(t) for t in request.targets]
 
     async def _one(target: str) -> BreachReconResult:
         domain = _domain_of(target)
@@ -36,4 +37,7 @@ async def recon_breaches(request: BreachReconRequest) -> list[BreachReconResult]
             logger.warning("Breach check failed for %s: %s", target, exc)
             return BreachReconResult(target=target, error=str(exc))
 
-    return await asyncio.gather(*(_one(t) for t in targets))
+    results = await asyncio.gather(*(_one(t) for t in targets))
+    for r in results:
+        fill_not_found(r)
+    return results

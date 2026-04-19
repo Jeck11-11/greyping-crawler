@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 from src.app import app
-from src.models import CTResult, DNSResult, RDAPResult, WaybackResult
+from src.models import ARecord, AAAARecord, CTResult, DNSResult, RDAPResult, WaybackResult
 
 
 client = TestClient(app)
@@ -16,8 +16,8 @@ class TestReconDNS:
     def test_dns_returns_records(self, mock_dns):
         mock_dns.return_value = DNSResult(
             domain="example.com",
-            a_records=["93.184.216.34"],
-            aaaa_records=["2606:2800:220:1::248"],
+            a_records=[ARecord(address="93.184.216.34", ttl=3600, reverse="example.com")],
+            aaaa_records=[AAAARecord(address="2606:2800:220:1::248", ttl=3600, reverse="")],
         )
         resp = client.post(
             "/recon/dns", json={"targets": ["https://example.com"]},
@@ -25,7 +25,8 @@ class TestReconDNS:
         assert resp.status_code == 200
         body = resp.json()
         assert body[0]["domain"] == "example.com"
-        assert body[0]["a_records"] == ["93.184.216.34"]
+        assert len(body[0]["a_records"]) == 1
+        assert body[0]["a_records"][0]["address"] == "93.184.216.34"
         args, _ = mock_dns.call_args
         assert args[0] == "example.com"   # normalised: no scheme, no www
 

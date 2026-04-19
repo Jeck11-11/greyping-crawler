@@ -2,17 +2,103 @@
 
 from __future__ import annotations
 
+import ipaddress
 import logging
+import os
+import socket
+from urllib.parse import urlparse
 
 import httpx
 
+from .config import HTTP_TIMEOUT, UA_BROWSER, UA_HONEST
+
 logger = logging.getLogger(__name__)
+
+
+class TargetValidationError(ValueError):
+    """Raised when a target URL fails security validation."""
+
+
+_BLOCKED_SCHEMES = frozenset({"file", "ftp", "data", "javascript", "gopher"})
+
+_DENYLIST_HOSTS: frozenset[str] = frozenset(
+    h.strip().lower()
+    for h in os.getenv("TARGET_DENYLIST", "").split(",")
+    if h.strip()
+)
+
+
+def _is_private_ip(ip_str: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(ip_str)
+        return (
+            addr.is_private
+            or addr.is_loopback
+            or addr.is_link_local
+            or addr.is_reserved
+            or addr.is_multicast
+        )
+    except ValueError:
+        return False
+
+
+def validate_target(raw: str) -> str:
+    """Normalise *raw* and validate it against SSRF / private-IP rules.
+
+    Returns the normalised URL on success; raises
+    :class:`TargetValidationError` on any violation.
+    """
+    raw = raw.strip()
+    if not raw:
+        raise TargetValidationError("Empty target")
+
+    pre_parsed = urlparse(raw)
+    if pre_parsed.scheme and pre_parsed.scheme in _BLOCKED_SCHEMES:
+        raise TargetValidationError(f"Blocked scheme: {pre_parsed.scheme}")
+
+    if not raw.startswith(("http://", "https://")):
+        raw = f"https://{raw}"
+
+    parsed = urlparse(raw)
+
+    if parsed.scheme not in ("http", "https"):
+        raise TargetValidationError(f"Blocked scheme: {parsed.scheme}")
+
+    hostname = (parsed.hostname or "").lower()
+    if not hostname:
+        raise TargetValidationError("No hostname in target URL")
+
+    if hostname in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+        raise TargetValidationError(f"Loopback target blocked: {hostname}")
+
+    if _is_private_ip(hostname):
+        raise TargetValidationError(f"Private/reserved IP blocked: {hostname}")
+
+    if hostname in _DENYLIST_HOSTS:
+        raise TargetValidationError(f"Denylisted host: {hostname}")
+
+    try:
+        resolved = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        for _family, _type, _proto, _canonname, sockaddr in resolved:
+            ip = sockaddr[0]
+            if _is_private_ip(ip):
+                raise TargetValidationError(
+                    f"Host {hostname} resolves to private IP {ip}"
+                )
+    except socket.gaierror:
+        pass
+    except TargetValidationError:
+        raise
+    except Exception:
+        pass
+
+    return raw
 
 
 async def fetch_landing_page(
     target: str,
     *,
-    timeout: int = 15,
+    timeout: int = HTTP_TIMEOUT,
 ) -> tuple[dict[str, str], httpx.Cookies]:
     """GET the landing page and return (response_headers, cookies).
 
@@ -27,7 +113,7 @@ async def fetch_landing_page(
         ) as client:
             resp = await client.get(
                 target,
-                headers={"User-Agent": "GreypingCrawler/1.0"},
+                headers={"User-Agent": UA_HONEST},
             )
             return dict(resp.headers), resp.cookies
     except Exception as exc:
@@ -36,10 +122,7 @@ async def fetch_landing_page(
 
 
 _STEALTH_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ),
+    "User-Agent": UA_BROWSER,
     "Accept": (
         "text/html,application/xhtml+xml,application/xml;q=0.9,"
         "image/avif,image/webp,*/*;q=0.8"
@@ -57,7 +140,7 @@ _STEALTH_HEADERS = {
 async def fetch_landing_page_full(
     target: str,
     *,
-    timeout: int = 15,
+    timeout: int = HTTP_TIMEOUT,
     stealth: bool = False,
 ) -> tuple[dict[str, str], httpx.Cookies, str]:
     """Like :func:`fetch_landing_page`, but also returns the response body (HTML).
@@ -70,7 +153,7 @@ async def fetch_landing_page_full(
     light-touch orchestrator uses so a single GET looks like a real
     visitor to a WAF.
     """
-    headers = dict(_STEALTH_HEADERS) if stealth else {"User-Agent": "GreypingCrawler/1.0"}
+    headers = dict(_STEALTH_HEADERS) if stealth else {"User-Agent": UA_HONEST}
     try:
         async with httpx.AsyncClient(
             follow_redirects=True,

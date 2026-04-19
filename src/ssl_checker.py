@@ -8,6 +8,7 @@ import ssl
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
+from .config import SSL_TIMEOUT
 from .models import SSLCertResult
 
 logger = logging.getLogger(__name__)
@@ -16,7 +17,7 @@ logger = logging.getLogger(__name__)
 def _grade_cert(issues: list[str]) -> str:
     if not issues:
         return "A"
-    severities = {"expired": 3, "self-signed": 3, "sha1": 2, "expiring": 1, "weak": 2}
+    severities = {"expired": 3, "self-signed": 3, "sha1": 2, "expiring": 1, "weak": 2, "deprecated": 2}
     worst = 0
     for issue in issues:
         low = issue.lower()
@@ -32,7 +33,7 @@ def _grade_cert(issues: list[str]) -> str:
     return "A"
 
 
-async def check_ssl(target_url: str, timeout: int = 10) -> SSLCertResult:
+async def check_ssl(target_url: str, timeout: int = SSL_TIMEOUT) -> SSLCertResult:
     """Connect to *target_url* over TLS and inspect the certificate.
 
     Returns an :class:`SSLCertResult` with certificate details and any issues found.
@@ -45,22 +46,35 @@ async def check_ssl(target_url: str, timeout: int = 10) -> SSLCertResult:
         return SSLCertResult(is_valid=False, issues=["Could not parse hostname from URL."])
 
     try:
-        cert_dict = await asyncio.to_thread(_fetch_cert, hostname, port, timeout)
+        cert_dict, tls_version, cipher_name = await asyncio.to_thread(
+            _fetch_cert, hostname, port, timeout,
+        )
     except Exception as exc:
         return SSLCertResult(is_valid=False, issues=[f"TLS connection failed: {exc}"])
 
-    return _parse_cert(cert_dict, hostname)
+    return _parse_cert(cert_dict, hostname, tls_version=tls_version, cipher=cipher_name)
 
 
-def _fetch_cert(hostname: str, port: int, timeout: int) -> dict:
-    """Blocking call to fetch the peer certificate dict."""
+def _fetch_cert(hostname: str, port: int, timeout: int) -> tuple[dict, str, str]:
+    """Blocking call to fetch the peer certificate dict, TLS version, and cipher."""
     ctx = ssl.create_default_context()
     with ssl.create_connection((hostname, port), timeout=timeout) as sock:
         with ctx.wrap_socket(sock, server_hostname=hostname) as ssock:
-            return ssock.getpeercert()
+            cert = ssock.getpeercert()
+            tls_version = ssock.version() or ""
+            cipher_info = ssock.cipher()
+            cipher_name = cipher_info[0] if cipher_info else ""
+            return cert, tls_version, cipher_name
 
 
-def _parse_cert(cert: dict, hostname: str) -> SSLCertResult:
+_WEAK_CIPHERS = {"RC4", "DES", "3DES", "RC2", "NULL", "EXPORT", "anon"}
+
+_DEPRECATED_TLS = {"TLSv1", "TLSv1.1", "SSLv3", "SSLv2"}
+
+
+def _parse_cert(
+    cert: dict, hostname: str, *, tls_version: str = "", cipher: str = "",
+) -> SSLCertResult:
     """Parse a certificate dict returned by ``ssl.SSLSocket.getpeercert()``."""
     issues: list[str] = []
 
@@ -126,10 +140,17 @@ def _parse_cert(cert: dict, hostname: str) -> SSLCertResult:
     # Version
     version = cert.get("version", 0)
 
-    # Signature algorithm (not always in getpeercert dict, best-effort)
-    sig_alg = ""
-    # Python's getpeercert() doesn't expose the sig algorithm directly,
-    # so we flag it only if we can detect it.
+    # TLS version check
+    if tls_version and tls_version in _DEPRECATED_TLS:
+        issues.append(f"Deprecated TLS version: {tls_version}.")
+
+    # Cipher strength check
+    if cipher:
+        cipher_upper = cipher.upper()
+        for weak in _WEAK_CIPHERS:
+            if weak.upper() in cipher_upper:
+                issues.append(f"Weak cipher detected: {cipher}.")
+                break
 
     is_valid = len(issues) == 0 or all("expiring soon" in i.lower() for i in issues)
 
@@ -142,8 +163,10 @@ def _parse_cert(cert: dict, hostname: str) -> SSLCertResult:
         days_until_expiry=days_until_expiry,
         version=version,
         serial_number=serial,
-        signature_algorithm=sig_alg,
+        signature_algorithm="",
         san=san,
         issues=issues,
         grade=_grade_cert(issues),
+        tls_version=tls_version,
+        cipher=cipher,
     )

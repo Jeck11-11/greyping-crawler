@@ -8,7 +8,7 @@ import logging
 from bs4 import BeautifulSoup
 from fastapi import APIRouter
 
-from .._http_utils import fetch_landing_page_full, normalise_target
+from .._http_utils import fetch_landing_page_full, validate_target
 from ..js_miner import mine_javascript
 from ..models import (
     JSIntelResult,
@@ -17,6 +17,7 @@ from ..models import (
     TechIntelResult,
 )
 from ..path_scanner import scan_sensitive_paths
+from ..postprocess import fill_not_found
 from ..tech_fingerprint import fingerprint_tech
 
 logger = logging.getLogger(__name__)
@@ -27,7 +28,7 @@ router = APIRouter(prefix="/recon", tags=["discovery"])
 @router.post("/paths", response_model=list[PathsReconResult])
 async def recon_paths(request: ReconRequest) -> list[PathsReconResult]:
     """Probe each target for exposed sensitive paths (.env, .git, backups, …)."""
-    targets = [normalise_target(t) for t in request.targets]
+    targets = [validate_target(t) for t in request.targets]
 
     async def _one(target: str) -> PathsReconResult:
         try:
@@ -37,7 +38,10 @@ async def recon_paths(request: ReconRequest) -> list[PathsReconResult]:
             logger.warning("Path scan failed for %s: %s", target, exc)
             return PathsReconResult(target=target, sensitive_paths=[], error=str(exc))
 
-    return await asyncio.gather(*(_one(t) for t in targets))
+    results = await asyncio.gather(*(_one(t) for t in targets))
+    for r in results:
+        fill_not_found(r)
+    return results
 
 
 def _parse_meta(html: str) -> dict[str, str]:
@@ -59,7 +63,7 @@ def _extract_script_urls_for_fingerprint(html: str) -> list[str]:
 @router.post("/tech", response_model=list[TechIntelResult])
 async def recon_tech(request: ReconRequest) -> list[TechIntelResult]:
     """Fingerprint the web stack (CMS, JS frameworks, servers, CDNs, analytics)."""
-    targets = [normalise_target(t) for t in request.targets]
+    targets = [validate_target(t) for t in request.targets]
 
     async def _one(target: str) -> TechIntelResult:
         try:
@@ -80,13 +84,16 @@ async def recon_tech(request: ReconRequest) -> list[TechIntelResult]:
             logger.warning("Tech fingerprint failed for %s: %s", target, exc)
             return TechIntelResult(target=target, technologies=[], error=str(exc))
 
-    return await asyncio.gather(*(_one(t) for t in targets))
+    results = await asyncio.gather(*(_one(t) for t in targets))
+    for r in results:
+        fill_not_found(r)
+    return results
 
 
 @router.post("/js-intel", response_model=list[JSIntelResult])
 async def recon_js_intel(request: ReconRequest) -> list[JSIntelResult]:
     """Mine the target's JavaScript bundles for endpoints, internal hosts, sourcemaps."""
-    targets = [normalise_target(t) for t in request.targets]
+    targets = [validate_target(t) for t in request.targets]
 
     async def _one(target: str) -> JSIntelResult:
         try:
@@ -98,4 +105,7 @@ async def recon_js_intel(request: ReconRequest) -> list[JSIntelResult]:
             logger.warning("JS intel failed for %s: %s", target, exc)
             return JSIntelResult(target=target, scripts_scanned=0, error=str(exc))
 
-    return await asyncio.gather(*(_one(t) for t in targets))
+    results = await asyncio.gather(*(_one(t) for t in targets))
+    for r in results:
+        fill_not_found(r)
+    return results

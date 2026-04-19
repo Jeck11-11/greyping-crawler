@@ -84,7 +84,9 @@ _TRUSTED_IFRAME_DOMAINS: set[str] = {
     "platform.twitter.com", "syndication.twitter.com",
     "snap.licdn.com", "platform.linkedin.com",
     "bat.bing.com", "clarity.ms",
-    "analytics.tiktok.com",
+    "analytics.tiktok.com", "tiktok.com",
+    "snap.snapchat.com", "tr.snapchat.com",
+    "reddit.com", "embed.reddit.com",
     "cdn.segment.com",
     "js.hs-analytics.net", "js.hubspot.com",
     "static.hotjar.com", "vars.hotjar.com",
@@ -159,6 +161,7 @@ _OBFUSCATION_PATTERNS = [
     (re.compile(r"\beval\s*\(\s*String\.fromCharCode\s*\("), "eval(String.fromCharCode(...))"),
     (re.compile(r"document\.write\s*\(\s*unescape\s*\("), "document.write(unescape(...))"),
     (re.compile(r"document\.write\s*\(\s*atob\s*\("), "document.write(atob(...))"),
+    (re.compile(r"WebAssembly\.instantiate\s*\(\s*(?:new\s+Uint8Array|atob)\s*\("), "WebAssembly.instantiate(blob)"),
 ]
 
 # A single page with many eval() calls is suspicious
@@ -219,7 +222,8 @@ def _check_obfuscated_js(html: str) -> list[IoCFinding]:
 _SEO_SPAM_KEYWORDS = re.compile(
     r"\b(?:buy\s+viagra|cheap\s+cialis|online\s+casino|free\s+slots|"
     r"payday\s+loan|poker\s+online|buy\s+cheap|pharma\s+online|"
-    r"gambling\s+online|adult\s+dating|essay\s+writing\s+service)\b",
+    r"gambling\s+online|adult\s+dating|essay\s+writing\s+service|"
+    r"replica\s+watches|cheap\s+shoes|buy\s+followers)\b",
     re.I,
 )
 
