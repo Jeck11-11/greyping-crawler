@@ -230,10 +230,11 @@ class TestEmailSecurityIntegration:
     def test_passive_scan_includes_email_security(
         self, mock_dns, mock_ct, mock_rdap, mock_wb, mock_breaches, mock_email,
     ):
+        from src.models import ARecord, MXRecordFull
         mock_dns.return_value = DNSResult(
             domain="example.com",
-            a_records=["93.184.216.34"],
-            mx_records=[MXRecord(priority=10, host="aspmx.l.google.com")],
+            a_records=[ARecord(address="93.184.216.34")],
+            mx_records=[MXRecordFull(priority=10, host="aspmx.l.google.com")],
         )
         mock_ct.return_value = CTResult(domain="example.com")
         mock_rdap.return_value = RDAPResult(domain="example.com")

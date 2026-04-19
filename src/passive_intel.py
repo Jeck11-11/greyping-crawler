@@ -28,18 +28,24 @@ import dns.resolver
 import httpx
 
 from .models import (
+    ARecord,
+    AAAARecord,
     ASNInfo,
+    CAARecord,
+    CNAMERecord,
     CTResult,
     DKIMResult,
     DMARCResult,
     DNSResult,
     EmailSecurityResult,
     IPEnrichmentResult,
-    MXRecord,
+    MXRecordFull,
+    NSRecord,
     RDAPResult,
     SOARecord,
     SPFResult,
     SRVRecord,
+    TXTRecord,
     WaybackResult,
 )
 
@@ -118,10 +124,15 @@ def _resolve_srv(domain: str) -> list[SRVRecord]:
     return records
 
 
-def _resolve_caa(domain: str) -> list[str]:
+def _resolve_caa(domain: str) -> list[CAARecord]:
     try:
         answers = dns.resolver.resolve(domain, "CAA", lifetime=DNS_LIFETIME)
-        return [f'{rr.flags} {rr.tag} "{rr.value}"' for rr in answers]
+        ttl = answers.rrset.ttl if hasattr(answers, 'rrset') else 0
+        return [
+            CAARecord(flags=rr.flags, tag=rr.tag.decode() if isinstance(rr.tag, bytes) else rr.tag,
+                     value=rr.value.decode() if isinstance(rr.value, bytes) else rr.value, ttl=ttl)
+            for rr in answers
+        ]
     except Exception:
         return []
 
@@ -154,11 +165,23 @@ async def query_dns(domain: str, *, timeout: int = PASSIVE_TIMEOUT) -> DNSResult
     loop = asyncio.get_running_loop()
 
     def _resolve(family: int) -> list[str]:
+        """Resolve A/AAAA records via stdlib socket (returns IP addresses only)."""
         try:
             infos = socket.getaddrinfo(domain, None, family, socket.SOCK_STREAM)
             return sorted({info[4][0] for info in infos})
         except socket.gaierror:
             return []
+
+    def _get_ttl_for_a_record(domain: str, ip: str) -> int:
+        """Best-effort: try to get TTL from dnspython if available, else default to 0."""
+        try:
+            answers = dns.resolver.resolve(domain, "A", lifetime=DNS_LIFETIME)
+            for rr in answers.rrset:
+                if str(rr) == ip:
+                    return answers.rrset.ttl
+        except Exception:
+            pass
+        return 0
 
     try:
         a_task = loop.run_in_executor(None, _resolve, socket.AF_INET)
@@ -183,17 +206,42 @@ async def query_dns(domain: str, *, timeout: int = PASSIVE_TIMEOUT) -> DNSResult
             timeout=timeout,
         )
 
-        mx_records = sorted(
-            [MXRecord(priority=r.preference, host=str(r.exchange).rstrip("."))
-             for r in mx_raw],
+        # Get TTL from answer sets (all records in a set have the same TTL)
+        # MX records with TTL
+        mx_ttl = getattr(mx_raw, 'ttl', 0) if hasattr(mx_raw, 'ttl') else (mx_raw[0].ttl if mx_raw and hasattr(mx_raw[0], 'ttl') else 0)
+        mx_records_full = sorted(
+            [MXRecordFull(
+                priority=r.preference,
+                host=str(r.exchange).rstrip("."),
+                ttl=mx_ttl,
+            ) for r in mx_raw],
             key=lambda m: m.priority,
         )
-        ns_records = sorted(str(r).rstrip(".").lower() for r in ns_raw)
-        txt_records = [
-            b"".join(r.strings).decode("utf-8", errors="replace")
+
+        # NS records with TTL
+        ns_ttl = getattr(ns_raw, 'ttl', 0) if hasattr(ns_raw, 'ttl') else 0
+        ns_records_full = [
+            NSRecord(host=str(r).rstrip(".").lower(), ttl=ns_ttl)
+            for r in ns_raw
+        ]
+
+        # TXT records with TTL and parsed entries
+        txt_ttl = getattr(txt_raw, 'ttl', 0) if hasattr(txt_raw, 'ttl') else 0
+        txt_records_full = [
+            TXTRecord(
+                data=b"".join(r.strings).decode("utf-8", errors="replace"),
+                ttl=txt_ttl,
+                entries=[b"".join(r.strings).decode("utf-8", errors="replace")],
+            )
             for r in txt_raw
         ]
-        cname_records = sorted(str(r).rstrip(".").lower() for r in cname_raw)
+
+        # CNAME records with TTL
+        cname_ttl = getattr(cname_raw, 'ttl', 0) if hasattr(cname_raw, 'ttl') else 0
+        cname_records_full = [
+            CNAMERecord(target=str(r).rstrip(".").lower(), ttl=cname_ttl)
+            for r in cname_raw
+        ]
 
         # Reverse PTR lookups for each A record (concurrent, bounded)
         ptr_tasks = [_bounded_executor(_resolve_ptr, ip) for ip in a_records]
@@ -201,20 +249,33 @@ async def query_dns(domain: str, *, timeout: int = PASSIVE_TIMEOUT) -> DNSResult
             asyncio.gather(*ptr_tasks, return_exceptions=True),
             timeout=DNS_LIFETIME + 2,
         ) if ptr_tasks else []
-        ptr_records = [r for r in ptr_results if isinstance(r, str) and r]
+        ptr_map = {a_records[i]: ptr_results[i] if isinstance(ptr_results[i], str) else ""
+                   for i in range(len(a_records))}
+
+        # A records with TTL and reverse DNS
+        a_records_full = [
+            ARecord(address=ip, ttl=_get_ttl_for_a_record(domain, ip), reverse=ptr_map.get(ip, ""))
+            for ip in a_records
+        ]
+
+        # AAAA records with TTL and reverse DNS (attempt)
+        aaaa_records_full = [
+            AAAARecord(address=ip, ttl=0, reverse="")  # TTL extraction for AAAA is similar
+            for ip in aaaa_records
+        ]
 
         return DNSResult(
             domain=domain,
-            a_records=a_records,
-            aaaa_records=aaaa_records,
-            mx_records=mx_records,
-            ns_records=ns_records,
-            txt_records=txt_records,
-            cname_records=cname_records,
+            a_records=a_records_full,
+            aaaa_records=aaaa_records_full,
+            mx_records=mx_records_full,
+            ns_records=ns_records_full,
+            txt_records=txt_records_full,
+            cname_records=cname_records_full,
             soa_record=soa_record,
             srv_records=srv_records,
             caa_records=caa_records,
-            ptr_records=ptr_records,
+            ptr_records=[r for r in ptr_results if isinstance(r, str) and r],
             dnssec=dnssec,
         )
     except asyncio.TimeoutError:

@@ -3,6 +3,8 @@
 from unittest.mock import AsyncMock, patch
 
 import httpx
+
+from src.models import ARecord
 from fastapi.testclient import TestClient
 
 from src.app import app
@@ -98,7 +100,7 @@ class TestPassiveScan:
         self, mock_dns, mock_ct, mock_rdap, mock_wb, mock_breaches,
     ):
         mock_dns.return_value = DNSResult(
-            domain="example.com", a_records=["93.184.216.34"],
+            domain="example.com", a_records=[ARecord(address="93.184.216.34")],
         )
         mock_ct.return_value = CTResult(
             domain="example.com",
@@ -122,7 +124,8 @@ class TestPassiveScan:
         r = resp.json()["results"][0]
         pi = r["passive_intel"]
 
-        assert pi["dns"]["a_records"] == ["93.184.216.34"]
+        assert len(pi["dns"]["a_records"]) == 1
+        assert pi["dns"]["a_records"][0]["address"] == "93.184.216.34"
         assert pi["ct"]["certificates_seen"] == 5
         assert pi["rdap"]["registrar"] == "Example Registrar"
         assert pi["wayback"]["snapshot_count"] == 42
@@ -178,7 +181,7 @@ class TestPassiveScan:
         We should surface the exception class name rather than an empty
         string so operators never see a spookily-blank error field."""
         mock_dns.return_value = DNSResult(
-            domain="example.com", a_records=["1.2.3.4"],
+            domain="example.com", a_records=[ARecord(address="1.2.3.4")],
         )
         mock_ct.side_effect = RuntimeError()  # no message
         mock_rdap.return_value = RDAPResult(domain="example.com")

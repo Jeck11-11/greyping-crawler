@@ -754,13 +754,13 @@ def _build_dns_posture(result: DomainResult) -> DNSPostureSummary | None:
 
     summary = DNSPostureSummary()
     if dns and not dns.error:
-        summary.a_records = dns.a_records
-        summary.aaaa_records = dns.aaaa_records
+        summary.a_records = [r.address for r in dns.a_records]
+        summary.aaaa_records = [r.address for r in dns.aaaa_records]
         summary.a_record_count = len(dns.a_records)
         summary.has_ipv6 = bool(dns.aaaa_records)
-        summary.nameservers = dns.ns_records[:5] if dns.ns_records else ["not_found"]
-        summary.cname_chain = dns.cname_records
-        summary.txt_records = dns.txt_records
+        summary.nameservers = [ns.host for ns in dns.ns_records[:5]] if dns.ns_records else ["not_found"]
+        summary.cname_chain = [c.target for c in dns.cname_records]
+        summary.txt_records = [t.data for t in dns.txt_records]
         summary.mx_hosts = [f"{mx.priority} {mx.host}" for mx in dns.mx_records]
 
         if dns.soa_record:

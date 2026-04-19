@@ -350,8 +350,8 @@ class TestEASMIntegration:
         self, mock_dns, mock_ct, mock_rdap, mock_wb, mock_breaches,
         mock_email, mock_ip,
     ):
-        from src.models import IPEnrichmentResult
-        mock_dns.return_value = DNSResult(domain="example.com", a_records=["93.184.216.34"])
+        from src.models import ARecord, IPEnrichmentResult
+        mock_dns.return_value = DNSResult(domain="example.com", a_records=[ARecord(address="93.184.216.34")])
         mock_ct.return_value = CTResult(domain="example.com")
         mock_rdap.return_value = RDAPResult(domain="example.com")
         mock_wb.return_value = WaybackResult(domain="example.com")

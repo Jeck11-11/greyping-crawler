@@ -332,18 +332,59 @@ class SRVRecord(BaseModel):
     target: str = ""
 
 
+class ARecord(BaseModel):
+    address: str
+    ttl: int = 0
+    reverse: str = Field(default="", description="Reverse DNS (PTR) hostname if available.")
+
+
+class AAAARecord(BaseModel):
+    address: str
+    ttl: int = 0
+    reverse: str = Field(default="", description="Reverse DNS (PTR) hostname if available.")
+
+
+class MXRecordFull(BaseModel):
+    priority: int = 0
+    host: str
+    ttl: int = 0
+
+
+class NSRecord(BaseModel):
+    host: str
+    ttl: int = 0
+
+
+class TXTRecord(BaseModel):
+    data: str
+    ttl: int = 0
+    entries: list[str] = Field(default_factory=list, description="Parsed entries from the TXT record.")
+
+
+class CNAMERecord(BaseModel):
+    target: str
+    ttl: int = 0
+
+
+class CAARecord(BaseModel):
+    flags: int = 0
+    tag: str = ""
+    value: str = ""
+    ttl: int = 0
+
+
 class DNSResult(BaseModel):
     domain: str
-    a_records: list[str] = Field(default_factory=list)
-    aaaa_records: list[str] = Field(default_factory=list)
-    mx_records: list[MXRecord] = Field(default_factory=list)
-    ns_records: list[str] = Field(default_factory=list)
-    txt_records: list[str] = Field(default_factory=list)
-    cname_records: list[str] = Field(default_factory=list)
+    a_records: list[ARecord] = Field(default_factory=list)
+    aaaa_records: list[AAAARecord] = Field(default_factory=list)
+    mx_records: list[MXRecordFull] = Field(default_factory=list)
+    ns_records: list[NSRecord] = Field(default_factory=list)
+    txt_records: list[TXTRecord] = Field(default_factory=list)
+    cname_records: list[CNAMERecord] = Field(default_factory=list)
     soa_record: SOARecord | None = None
     srv_records: list[SRVRecord] = Field(default_factory=list)
-    caa_records: list[str] = Field(default_factory=list, description="CAA records — which CAs may issue certs.")
-    ptr_records: list[str] = Field(default_factory=list, description="Reverse DNS for A records.")
+    caa_records: list[CAARecord] = Field(default_factory=list, description="CAA records — which CAs may issue certs.")
+    ptr_records: list[str] = Field(default_factory=list, description="Reverse DNS lookup results for A records.")
     dnssec: bool | None = Field(default=None, description="True if DNSSEC is enabled (DNSKEY found).")
     error: str | None = None
 

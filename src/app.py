@@ -243,6 +243,7 @@ async def _scan_single_target(
     # Email security + IP enrichment (depend on DNS data)
     mx_records = dns_result.mx_records if not dns_result.error else []
     a_records = dns_result.a_records if not dns_result.error else []
+    a_ips = [r.address for r in a_records] if a_records else []
 
     try:
         email_sec = await asyncio.wait_for(
@@ -254,7 +255,7 @@ async def _scan_single_target(
 
     try:
         ip_enrich = await asyncio.wait_for(
-            query_ip_enrichment(domain, a_records, timeout=request.timeout),
+            query_ip_enrichment(domain, a_ips, timeout=request.timeout),
             timeout=request.timeout,
         )
     except Exception as exc:
@@ -519,6 +520,7 @@ async def _lighttouch_single_target(target: str, timeout: int) -> DomainResult:
 
     mx_records = dns_result.mx_records if not dns_result.error else []
     a_records_dns = dns_result.a_records if not dns_result.error else []
+    a_ips_dns = [r.address for r in a_records_dns] if a_records_dns else []
 
     try:
         email_sec = await asyncio.wait_for(
@@ -529,7 +531,7 @@ async def _lighttouch_single_target(target: str, timeout: int) -> DomainResult:
 
     try:
         ip_enrich = await asyncio.wait_for(
-            query_ip_enrichment(domain, a_records_dns, timeout=timeout), timeout=timeout,
+            query_ip_enrichment(domain, a_ips_dns, timeout=timeout), timeout=timeout,
         )
     except Exception as exc:
         ip_enrich = IPEnrichmentResult(domain=domain, error=str(exc))
@@ -771,6 +773,7 @@ async def _passive_single_target(
     # Email security and IP enrichment run after DNS so they can reuse its data.
     mx_records = dns.mx_records if not dns.error else []
     a_records = dns.a_records if not dns.error else []
+    a_ips = [r.address for r in a_records] if a_records else []
 
     try:
         email_sec = await asyncio.wait_for(
@@ -782,7 +785,7 @@ async def _passive_single_target(
 
     try:
         ip_enrich = await asyncio.wait_for(
-            query_ip_enrichment(domain, a_records, timeout=timeout),
+            query_ip_enrichment(domain, a_ips, timeout=timeout),
             timeout=timeout,
         )
     except Exception as exc:

@@ -52,8 +52,10 @@ async def test_query_dns_resolves_a_and_aaaa():
         result = await query_dns("example.com")
 
     assert result.domain == "example.com"
-    assert result.a_records == ["93.184.216.34"]
-    assert result.aaaa_records == ["2606:2800:220:1::248"]
+    assert len(result.a_records) == 1
+    assert result.a_records[0].address == "93.184.216.34"
+    assert len(result.aaaa_records) == 1
+    assert result.aaaa_records[0].address == "2606:2800:220:1::248"
     assert result.error is None
 
 
