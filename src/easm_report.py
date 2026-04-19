@@ -521,6 +521,56 @@ def _classify_dns_findings(result: DomainResult) -> list[PrioritizedFinding]:
     return findings
 
 
+_SENSITIVE_DISALLOW_PREFIXES = (
+    "/admin", "/backup", "/api/internal", "/debug", "/.env",
+    "/config", "/private", "/secret", "/staging", "/test",
+)
+
+
+def _classify_robots_sitemap(result: DomainResult) -> list[PrioritizedFinding]:
+    findings: list[PrioritizedFinding] = []
+    rt = result.robots_txt
+    if rt and rt.found:
+        sensitive = [
+            r for r in rt.disallow_rules
+            if any(r.lower().startswith(p) for p in _SENSITIVE_DISALLOW_PREFIXES)
+        ]
+        if sensitive:
+            findings.append(PrioritizedFinding(
+                id="robots_sensitive_disallow",
+                title="robots.txt reveals sensitive paths",
+                category="discovery",
+                severity="low",
+                classification=FindingClassification.informational,
+                confidence="high",
+                owner=FindingOwner.customer,
+                why_it_matters="Disallow rules expose paths attackers can target directly.",
+                business_impact="Reconnaissance accelerator — hidden paths disclosed",
+                evidence=[f"Disallow: {p}" for p in sensitive[:5]],
+                recommended_action="Review Disallow rules; ensure sensitive paths are access-controlled, not just hidden from crawlers.",
+                source_field="robots_txt",
+            ))
+
+    sm = result.sitemap
+    if sm and sm.found and sm.url_count > 50:
+        findings.append(PrioritizedFinding(
+            id="sitemap_large_surface",
+            title=f"sitemap.xml exposes {sm.url_count} URLs",
+            category="discovery",
+            severity="info",
+            classification=FindingClassification.informational,
+            confidence="high",
+            owner=FindingOwner.customer,
+            why_it_matters="Large sitemaps reveal the full URL surface area of the application.",
+            business_impact="Attack surface mapping via publicly listed URLs",
+            evidence=[f"{sm.url_count} URLs in sitemap.xml"],
+            recommended_action="Verify all sitemap URLs are intended to be public.",
+            source_field="sitemap",
+        ))
+
+    return findings
+
+
 def _classify_breach_findings(result: DomainResult) -> list[PrioritizedFinding]:
     findings: list[PrioritizedFinding] = []
     for b in result.breaches:
@@ -589,7 +639,14 @@ def _classify_js_intel(result: DomainResult) -> tuple[list[PrioritizedFinding], 
         proprietary_exposure=prop_exposure,
     )
 
-    notable = [e for e in ji.api_endpoints if e.startswith("/api")][:5]
+    _NOTABLE_PREFIXES = (
+        "/api", "/graphql", "/webhook", "/admin", "/health",
+        "/.well-known/", "/v1/", "/v2/", "/v3/",
+    )
+    notable = [
+        e for e in ji.api_endpoints
+        if any(e.startswith(p) for p in _NOTABLE_PREFIXES)
+    ][:10]
 
     summary = JSIntelSummary(
         scripts_scanned=ji.scripts_scanned,
@@ -1080,7 +1137,8 @@ def _build_executive_summary(
     if es and not es.error and es.dmarc.exists and es.dmarc.policy in ("reject", "quarantine"):
         positives.append(f"DMARC enforcement active (p={es.dmarc.policy})")
     waf_names = [t.name for t in result.technologies if t.name in (
-        "Cloudflare", "AWS CloudFront", "Fastly", "Akamai", "Imperva", "Sucuri",
+        "Cloudflare", "AWS CloudFront", "Fastly", "Akamai", "Imperva",
+        "Sucuri", "F5 BIG-IP", "Azure Front Door",
     )]
     if waf_names:
         positives.append(f"WAF/CDN detected: {waf_names[0]}")
@@ -1118,6 +1176,7 @@ def build_easm_report(
         all_findings.extend(_classify_email_security(result))
         all_findings.extend(_classify_dns_findings(result))
         all_findings.extend(_classify_breach_findings(result))
+        all_findings.extend(_classify_robots_sitemap(result))
         js_findings, js_summary = _classify_js_intel(result)
         all_findings.extend(js_findings)
 

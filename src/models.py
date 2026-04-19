@@ -255,6 +255,25 @@ class SensitivePathFinding(BaseModel):
     severity: str = Field(default="high")
 
 
+class RobotsTxtResult(BaseModel):
+    """Parsed robots.txt intelligence."""
+
+    found: bool = False
+    disallow_rules: list[str] = Field(default_factory=list)
+    sitemap_urls: list[str] = Field(default_factory=list)
+    crawl_delay: int | None = None
+    raw_snippet: str = Field(default="", description="First 2000 chars of raw content.")
+
+
+class SitemapResult(BaseModel):
+    """Parsed sitemap.xml intelligence."""
+
+    found: bool = False
+    url_count: int = 0
+    urls: list[str] = Field(default_factory=list, description="Up to 100 URLs.")
+    nested_sitemaps: list[str] = Field(default_factory=list)
+
+
 class IoCFinding(BaseModel):
     """An Indicator of Compromise detected on a page."""
 
@@ -632,7 +651,8 @@ class JSIntelSummary(BaseModel):
     internal_hosts_count: int = 0
     sourcemaps: SourcemapSummary = Field(default_factory=SourcemapSummary)
     notable_endpoints: list[str] = Field(
-        default_factory=list, description="First-party /api/* endpoints, max 5.",
+        default_factory=list,
+        description="Notable endpoints (/api, /graphql, /webhook, /admin, /health, /.well-known), max 10.",
     )
 
 
@@ -812,6 +832,8 @@ class DomainSummary(BaseModel):
     js_endpoints_found: int = Field(default=0, description="Number of API endpoints discovered in JS.")
     subdomains_found: int = Field(default=0, description="Subdomains observed via CT logs (passive).")
     wayback_snapshots: int = Field(default=0, description="Archive.org snapshots recorded (passive).")
+    robots_disallow_count: int = Field(default=0, description="Disallow rules in robots.txt.")
+    sitemap_url_count: int = Field(default=0, description="URLs found in sitemap.xml.")
 
 
 class DomainResult(BaseModel):
@@ -867,6 +889,12 @@ class DomainResult(BaseModel):
     sensitive_paths: list[SensitivePathFinding] = Field(
         default_factory=list,
         description="Exposed sensitive paths.",
+    )
+    robots_txt: RobotsTxtResult | None = Field(
+        default=None, description="Parsed robots.txt intelligence.",
+    )
+    sitemap: SitemapResult | None = Field(
+        default=None, description="Parsed sitemap.xml intelligence.",
     )
     ioc_findings: list[IoCFinding] = Field(
         default_factory=list,

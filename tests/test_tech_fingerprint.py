@@ -197,3 +197,111 @@ def test_no_signals_returns_empty():
         meta={},
     )
     assert findings == []
+
+
+# ---------------------------------------------------------------------------
+# Modern JS framework detection
+# ---------------------------------------------------------------------------
+
+def test_svelte_via_scoped_class():
+    html = '<div class="svelte-abc123">Hello</div>'
+    findings = fingerprint_tech(html=html, headers={})
+    names = {f.name for f in findings}
+    assert "Svelte" in names
+
+
+def test_sveltekit_via_header():
+    findings = fingerprint_tech(
+        html="", headers={"x-sveltekit-page": "true"},
+    )
+    names = {f.name for f in findings}
+    assert "SvelteKit" in names
+
+
+def test_astro_via_meta_generator():
+    findings = fingerprint_tech(
+        html='<astro-island>hi</astro-island>',
+        headers={},
+        meta={"generator": "Astro v4.1.0"},
+    )
+    astro = next(f for f in findings if f.name == "Astro")
+    assert astro.version == "4.1.0"
+    assert astro.confidence == "medium"
+
+
+def test_remix_via_html():
+    html = '<script>window.__remixContext = {};</script>'
+    findings = fingerprint_tech(html=html, headers={})
+    names = {f.name for f in findings}
+    assert "Remix" in names
+
+
+def test_nuxt3_payload_marker():
+    html = '<div id="__NUXT_PAYLOAD__"></div>'
+    findings = fingerprint_tech(html=html, headers={})
+    names = {f.name for f in findings}
+    assert "Nuxt.js" in names
+
+
+def test_nextjs_app_router():
+    html = '<script id="__NEXT_APP_DATA__" type="application/json"></script>'
+    findings = fingerprint_tech(html=html, headers={})
+    names = {f.name for f in findings}
+    assert "Next.js" in names
+
+
+# ---------------------------------------------------------------------------
+# WAF / security appliance detection
+# ---------------------------------------------------------------------------
+
+class _Cookie:
+    def __init__(self, name):
+        self.name = name
+
+
+def test_akamai_via_header_and_cookie():
+    findings = fingerprint_tech(
+        html="",
+        headers={"x-akamai-transformed": "9 - 0 pmb=mRUM,3"},
+        cookies=[_Cookie("bm_sz")],
+    )
+    akamai = next(f for f in findings if f.name == "Akamai")
+    assert "header:x-akamai-transformed" in akamai.evidence
+    assert "cookie" in akamai.evidence
+
+
+def test_imperva_via_cookie():
+    findings = fingerprint_tech(
+        html="",
+        headers={"x-iinfo": "7-42-0"},
+        cookies=[_Cookie("visid_incap_12345")],
+    )
+    names = {f.name for f in findings}
+    assert "Imperva" in names
+
+
+def test_sucuri_via_header():
+    findings = fingerprint_tech(
+        html="",
+        headers={"x-sucuri-id": "abc123", "server": "Sucuri/Cloudproxy"},
+    )
+    sucuri = next(f for f in findings if f.name == "Sucuri")
+    assert sucuri.confidence == "medium"
+
+
+def test_f5_bigip_via_cookie():
+    findings = fingerprint_tech(
+        html="", headers={},
+        cookies=[_Cookie("BIGipServerpool_web_443")],
+    )
+    names = {f.name for f in findings}
+    assert "F5 BIG-IP" in names
+
+
+def test_azure_front_door_via_header():
+    findings = fingerprint_tech(
+        html="",
+        headers={"x-azure-ref": "0abc123def456"},
+    )
+    names = {f.name for f in findings}
+    assert "Azure Front Door" in names

@@ -70,6 +70,7 @@ from .passive_intel import (
     query_wayback,
 )
 from .path_scanner import scan_sensitive_paths
+from .robots_sitemap import fetch_and_parse_robots_sitemap
 from .routers import content as content_router
 from .routers import discovery as discovery_router
 from .routers import intel as intel_router
@@ -227,6 +228,15 @@ async def _scan_single_target(
         logger.warning("Path scan failed for %s: %s", target, paths_result)
         paths_result = []
 
+    # Fetch and parse robots.txt + sitemap.xml
+    robots_result, sitemap_result = None, None
+    try:
+        robots_result, sitemap_result = await fetch_and_parse_robots_sitemap(
+            target, timeout=request.timeout,
+        )
+    except Exception as exc:
+        logger.warning("robots/sitemap parse failed for %s: %s", target, exc)
+
     # Process passive intel results
     def _passive_result(x, kind):
         if isinstance(x, Exception):
@@ -368,6 +378,8 @@ async def _scan_single_target(
         js_endpoints_found=js_endpoints_count,
         subdomains_found=len(ct_result.subdomains) if not ct_result.error else 0,
         wayback_snapshots=wayback_result.snapshot_count if not wayback_result.error else 0,
+        robots_disallow_count=len(robots_result.disallow_rules) if robots_result else 0,
+        sitemap_url_count=sitemap_result.url_count if sitemap_result else 0,
     )
 
     result = DomainResult(
@@ -389,6 +401,8 @@ async def _scan_single_target(
         ssl_certificate=ssl_result,
         cookies=cookie_findings,
         sensitive_paths=paths_result,
+        robots_txt=robots_result,
+        sitemap=sitemap_result,
         ioc_findings=all_iocs,
         technologies=tech_findings,
         js_intel=js_intel_result,

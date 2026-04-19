@@ -17,6 +17,7 @@ from src.models import (
     FindingClassification,
     FindingOwner,
     HeaderFinding,
+    JSIntelResult,
     MXRecord,
     PassiveIntelResult,
     RDAPResult,
@@ -371,3 +372,50 @@ class TestEASMIntegration:
         assert r["easm_report"] is not None
         assert r["easm_report"]["executive_summary"]["risk_posture"] in ("Low", "Moderate")
         assert r["easm_report"]["scan_mode"] == "passive"
+
+
+# ---------------------------------------------------------------------------
+# Notable endpoints expansion
+# ---------------------------------------------------------------------------
+
+class TestNotableEndpoints:
+    def _build_with_endpoints(self, endpoints: list[str]) -> list[str]:
+        result = DomainResult(
+            target="https://example.com",
+            js_intel=JSIntelResult(
+                target="https://example.com",
+                scripts_scanned=1,
+                api_endpoints=endpoints,
+            ),
+        )
+        report = build_easm_report(result, scan_mode="full")
+        return report.js_intel_summary.notable_endpoints if report.js_intel_summary else []
+
+    def test_graphql_endpoint_included(self):
+        notable = self._build_with_endpoints(["/graphql", "/images/logo.png"])
+        assert "/graphql" in notable
+
+    def test_webhook_endpoint_included(self):
+        notable = self._build_with_endpoints(["/webhook/stripe"])
+        assert "/webhook/stripe" in notable
+
+    def test_admin_endpoint_included(self):
+        notable = self._build_with_endpoints(["/admin/dashboard"])
+        assert "/admin/dashboard" in notable
+
+    def test_health_endpoint_included(self):
+        notable = self._build_with_endpoints(["/health"])
+        assert "/health" in notable
+
+    def test_well_known_included(self):
+        notable = self._build_with_endpoints(["/.well-known/openid-configuration"])
+        assert "/.well-known/openid-configuration" in notable
+
+    def test_non_notable_excluded(self):
+        notable = self._build_with_endpoints(["/images/logo.png", "/css/style.css"])
+        assert notable == []
+
+    def test_cap_at_10(self):
+        endpoints = [f"/api/v1/resource{i}" for i in range(20)]
+        notable = self._build_with_endpoints(endpoints)
+        assert len(notable) <= 10
