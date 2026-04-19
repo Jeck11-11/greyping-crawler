@@ -20,6 +20,8 @@ MAX_SCRIPTS = int(os.getenv("MAX_SCRIPTS", "50"))
 PATH_CONCURRENCY = int(os.getenv("PATH_CONCURRENCY", "10"))
 BREACH_EMAIL_CAP = int(os.getenv("BREACH_EMAIL_CAP", "10"))
 PLAYWRIGHT_EXTRA_WAIT_MS = int(os.getenv("PLAYWRIGHT_EXTRA_WAIT_MS", "2000"))
+HIBP_RATE_LIMIT_DELAY = float(os.getenv("HIBP_RATE_LIMIT_DELAY", "1.5"))
+JS_FETCH_CONCURRENCY = int(os.getenv("JS_FETCH_CONCURRENCY", "5"))
 
 # User-Agent strings
 UA_HONEST = os.getenv("UA_HONEST", "GreypingCrawler/1.0")

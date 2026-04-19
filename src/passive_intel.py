@@ -49,6 +49,15 @@ logger = logging.getLogger(__name__)
 
 _UA = f"{UA_HONEST} (passive-intel)"
 
+_DNS_SEMAPHORE = asyncio.Semaphore(10)
+
+
+async def _bounded_executor(fn, *args):
+    """Run a blocking function in the default executor, bounded by _DNS_SEMAPHORE."""
+    loop = asyncio.get_running_loop()
+    async with _DNS_SEMAPHORE:
+        return await loop.run_in_executor(None, fn, *args)
+
 
 # ---------------------------------------------------------------------------
 # DNS
@@ -186,8 +195,8 @@ async def query_dns(domain: str, *, timeout: int = PASSIVE_TIMEOUT) -> DNSResult
         ]
         cname_records = sorted(str(r).rstrip(".").lower() for r in cname_raw)
 
-        # Reverse PTR lookups for each A record (concurrent)
-        ptr_tasks = [loop.run_in_executor(None, _resolve_ptr, ip) for ip in a_records]
+        # Reverse PTR lookups for each A record (concurrent, bounded)
+        ptr_tasks = [_bounded_executor(_resolve_ptr, ip) for ip in a_records]
         ptr_results = await asyncio.wait_for(
             asyncio.gather(*ptr_tasks, return_exceptions=True),
             timeout=DNS_LIFETIME + 2,
@@ -709,11 +718,9 @@ async def query_ip_enrichment(
     if not a_records:
         return IPEnrichmentResult(domain=domain)
 
-    loop = asyncio.get_running_loop()
-
     try:
         origin_tasks = [
-            loop.run_in_executor(None, _cymru_origin_lookup, ip)
+            _bounded_executor(_cymru_origin_lookup, ip)
             for ip in a_records
         ]
         origin_raws = await asyncio.wait_for(
@@ -733,7 +740,7 @@ async def query_ip_enrichment(
                     unique_asns.add(parsed[0])
 
         asn_name_tasks = [
-            loop.run_in_executor(None, _cymru_asn_lookup, asn)
+            _bounded_executor(_cymru_asn_lookup, asn)
             for asn in unique_asns
         ]
         asn_name_raws = await asyncio.wait_for(

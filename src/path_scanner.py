@@ -73,37 +73,28 @@ async def scan_sensitive_paths(
     Returns findings for paths that appear to exist (2xx/3xx/403).
     """
     sem = asyncio.Semaphore(concurrency)
-    results: list[SensitivePathFinding | None] = []
 
-    async def _check(path: str, risk: str, severity: str) -> SensitivePathFinding | None:
+    async def _check(
+        client: httpx.AsyncClient, path: str, risk: str, severity: str,
+    ) -> SensitivePathFinding | None:
         url = urljoin(base_url, path)
         async with sem:
             try:
-                async with httpx.AsyncClient(
-                    timeout=httpx.Timeout(timeout),
-                    follow_redirects=False,
-                    verify=False,
-                ) as client:
-                    resp = await client.head(url, headers={
-                        "User-Agent": UA_HONEST,
-                    })
-                    code = resp.status_code
-                    length = int(resp.headers.get("content-length", 0))
+                resp = await client.head(url, headers={"User-Agent": UA_HONEST})
+                code = resp.status_code
+                length = int(resp.headers.get("content-length", 0))
             except Exception:
                 return None
 
             if code not in _INTERESTING_CODES:
                 return None
 
-            # 403 on info paths is not interesting
             if path in _INFO_PATHS and code == 403:
                 return None
 
-            # For info paths, only report 200
             if path in _INFO_PATHS and code != 200:
                 return None
 
-            # Skip if it's a generic 200 with a tiny body (custom 404 pages)
             if code == 200 and length > 0 and length < 20 and path not in _INFO_PATHS:
                 return None
 
@@ -116,6 +107,11 @@ async def scan_sensitive_paths(
                 severity=severity if code != 403 else "medium",
             )
 
-    tasks = [_check(path, risk, sev) for path, risk, sev in _SENSITIVE_PATHS]
-    raw = await asyncio.gather(*tasks)
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(timeout),
+        follow_redirects=False,
+        verify=False,
+    ) as client:
+        tasks = [_check(client, path, risk, sev) for path, risk, sev in _SENSITIVE_PATHS]
+        raw = await asyncio.gather(*tasks)
     return [r for r in raw if r is not None]
