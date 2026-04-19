@@ -239,6 +239,8 @@ class SSLCertResult(BaseModel):
     san: list[str] = Field(default_factory=list, description="Subject Alternative Names.")
     issues: list[str] = Field(default_factory=list)
     grade: str = Field(default="", description="A, B, C, D, F based on issues found.")
+    tls_version: str = Field(default="", description="Negotiated TLS version (e.g. TLSv1.3).")
+    cipher: str = Field(default="", description="Negotiated cipher suite.")
 
 
 class SensitivePathFinding(BaseModel):

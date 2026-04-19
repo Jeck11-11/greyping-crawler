@@ -50,6 +50,10 @@ _SENSITIVE_PATHS: list[tuple[str, str, str]] = [
     ("/package.json", "Node package.json reveals dependencies and scripts.", "low"),
     ("/composer.json", "PHP composer.json reveals dependencies.", "low"),
     ("/Gemfile", "Ruby Gemfile reveals dependencies.", "low"),
+    ("/.git/index", "Exposed Git index can be used to reconstruct the full source tree.", "critical"),
+    ("/.aws/credentials", "AWS credentials file may contain access keys.", "critical"),
+    ("/graphql", "GraphQL endpoint may allow introspection queries.", "medium"),
+    ("/node_modules/.package-lock.json", "Exposed node_modules confirms dependency leak.", "medium"),
 ]
 
 # Paths at info severity are always reported when found; others only on
@@ -82,6 +86,10 @@ async def scan_sensitive_paths(
             try:
                 resp = await client.head(url, headers={"User-Agent": UA_HONEST})
                 code = resp.status_code
+                # Fallback to GET if server rejects HEAD
+                if code == 405:
+                    resp = await client.get(url, headers={"User-Agent": UA_HONEST})
+                    code = resp.status_code
                 length = int(resp.headers.get("content-length", 0))
             except Exception:
                 return None

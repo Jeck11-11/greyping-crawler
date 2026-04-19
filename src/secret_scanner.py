@@ -21,9 +21,9 @@ class _Pattern:
 # Pattern library – covers OWASP-style leaks commonly found in HTML/JS/comments
 # ---------------------------------------------------------------------------
 _PATTERNS: list[_Pattern] = [
-    # AWS
+    # AWS (AKIA = long-term, ASIA = temporary STS credentials)
     _Pattern("aws_access_key_id", "aws_access_key",
-             re.compile(r"(?:AKIA[0-9A-Z]{16})")),
+             re.compile(r"(?:(?:AKIA|ASIA)[0-9A-Z]{16})")),
     _Pattern("aws_secret_access_key", "aws_secret_key",
              re.compile(r"""(?:aws_secret_access_key|AWS_SECRET_ACCESS_KEY)\s*[:=]\s*['"]?([A-Za-z0-9/+=]{40})['"]?""", re.I)),
     # Google
@@ -39,11 +39,11 @@ _PATTERNS: list[_Pattern] = [
              re.compile(r"xox[bpors]-[0-9]{10,}-[0-9A-Za-z]{10,}")),
     _Pattern("slack_webhook", "slack_webhook",
              re.compile(r"https://hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]+")),
-    # Stripe
+    # Stripe (bounded length to reduce false positives)
     _Pattern("stripe_secret_key", "stripe_key",
-             re.compile(r"sk_live_[0-9a-zA-Z]{24,}")),
+             re.compile(r"sk_live_[0-9a-zA-Z]{24,99}")),
     _Pattern("stripe_publishable_key", "stripe_key",
-             re.compile(r"pk_live_[0-9a-zA-Z]{24,}")),
+             re.compile(r"pk_live_[0-9a-zA-Z]{24,99}")),
     # Twilio
     _Pattern("twilio_api_key", "twilio_key",
              re.compile(r"SK[0-9a-fA-F]{32}")),
@@ -59,9 +59,9 @@ _PATTERNS: list[_Pattern] = [
     # Private keys
     _Pattern("private_key", "private_key",
              re.compile(r"-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----")),
-    # Generic database connection strings
+    # Generic database connection strings (require user:pass@ to reduce false positives)
     _Pattern("database_url", "database_credential",
-             re.compile(r"""(?:mysql|postgres(?:ql)?|mongodb(?:\+srv)?|redis|amqp)://[^\s'"<>]{10,}""", re.I)),
+             re.compile(r"""(?:mysql|postgres(?:ql)?|mongodb(?:\+srv)?|redis|amqp)://[^:@\s'"<>]+:[^@\s'"<>]+@[^\s'"<>]{5,200}""", re.I)),
     # Generic password assignments
     _Pattern("generic_password", "generic_password",
              re.compile(r"""(?:password|passwd|pwd|secret|token|api_key|apikey|access_key)\s*[:=]\s*['"]([^'"]{8,})['"]""", re.I)),
@@ -77,6 +77,12 @@ _PATTERNS: list[_Pattern] = [
     # Azure
     _Pattern("azure_storage_key", "azure_key",
              re.compile(r"""AccountKey=[A-Za-z0-9+/=]{44,}""")),
+    # Slack bot/user tokens (xoxb = bot, xoxp = user)
+    _Pattern("slack_bot_token", "slack_token",
+             re.compile(r"xoxb-[0-9]{10,13}-[0-9]{10,13}-[A-Za-z0-9]{24,32}")),
+    # Twilio
+    _Pattern("twilio_account_sid", "twilio_credential",
+             re.compile(r"AC[0-9a-f]{32}", re.I)),
 ]
 
 
