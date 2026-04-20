@@ -9,7 +9,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from bs4 import BeautifulSoup
 
-from .config import CRAWL_TIMEOUT, MAX_PAGES, PLAYWRIGHT_EXTRA_WAIT_MS, UA_BROWSER, UA_HONEST
+from .config import CRAWL_TIMEOUT, MAX_PAGES, MAX_RESPONSE_BYTES, PLAYWRIGHT_EXTRA_WAIT_MS, UA_BROWSER, UA_HONEST
 from .extractors import extract_contacts, extract_links, extract_page_metadata
 from .ioc_scanner import scan_ioc
 from .models import ContactInfo, LinkInfo, PageResult
@@ -40,8 +40,8 @@ async def _fetch_static(
     *,
     follow_redirects: bool = True,
     timeout: int = CRAWL_TIMEOUT,
-) -> tuple[str, int | None]:
-    """Fetch a URL with httpx and return (html, status_code)."""
+) -> tuple[str, int | None, list[str]]:
+    """Fetch a URL with httpx and return (html, status_code, redirect_chain)."""
     headers = {
         "User-Agent": f"{UA_BROWSER} {UA_HONEST}",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -51,9 +51,12 @@ async def _fetch_static(
         follow_redirects=follow_redirects,
         timeout=httpx.Timeout(timeout),
         verify=False,  # OSINT scanning may hit self-signed certs
+        max_redirects=10,
     ) as client:
         resp = await client.get(url, headers=headers)
-        return resp.text, resp.status_code
+        chain = [str(r.url) for r in resp.history] if resp.history else []
+        body = resp.text[:MAX_RESPONSE_BYTES] if len(resp.content) > MAX_RESPONSE_BYTES else resp.text
+        return body, resp.status_code, chain
 
 
 async def _fetch_rendered(
@@ -95,6 +98,7 @@ async def crawl_page(
     """Crawl a single page and extract all OSINT data."""
     html: str = ""
     status_code: int | None = None
+    redirect_chain: list[str] = []
     notes: str = ""
 
     try:
@@ -102,7 +106,7 @@ async def crawl_page(
         if render_js and pw_available:
             html, status_code = await _fetch_rendered(url, timeout=timeout)
         else:
-            html, status_code = await _fetch_static(
+            html, status_code, redirect_chain = await _fetch_static(
                 url, follow_redirects=follow_redirects, timeout=timeout,
             )
     except Exception as exc:
@@ -118,6 +122,7 @@ async def crawl_page(
     return PageResult(
         url=url,
         status_code=status_code,
+        redirect_chain=redirect_chain,
         title=title,
         meta_description=meta_desc,
         content_snippet=snippet,

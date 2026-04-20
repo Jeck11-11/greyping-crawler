@@ -792,6 +792,7 @@ class PageResult(BaseModel):
 
     url: str
     status_code: int | None = None
+    redirect_chain: list[str] = Field(default_factory=list)
     title: str = ""
     meta_description: str = ""
     content_snippet: str = Field(

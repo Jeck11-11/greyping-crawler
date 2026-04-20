@@ -459,8 +459,7 @@ async def query_wayback(domain: str, *, timeout: int = PASSIVE_TIMEOUT) -> Wayba
 # Common DKIM selectors to try (covers Google, Microsoft, Mailchimp,
 # SendGrid, generic defaults).
 _DKIM_SELECTORS: list[str] = [
-    "google", "selector1", "selector2", "default", "dkim",
-    "k1", "s1", "s2", "mail", "mandrill", "smtp",
+    "google", "selector1", "selector2", "default", "dkim", "k1",
 ]
 
 # MX patterns → friendly provider names.
@@ -655,7 +654,7 @@ async def query_email_security(
             None, _dns_resolve, f"_dmarc.{domain}", "TXT",
         )
         # DKIM selector probing (multiple DNS queries, heavier).
-        dkim_task = loop.run_in_executor(None, _check_dkim, domain)
+        dkim_task = _bounded_executor(_check_dkim, domain)
 
         domain_txts_raw, dmarc_txts_raw, dkim = await asyncio.wait_for(
             asyncio.gather(txt_task, dmarc_task, dkim_task),

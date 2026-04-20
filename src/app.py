@@ -17,6 +17,8 @@ from pydantic import Field
 
 import httpx
 
+from .config import SCAN_CONCURRENCY
+
 from ._http_utils import (
     TargetValidationError,
     fetch_landing_page,
@@ -436,9 +438,16 @@ async def scan(request: ScanRequest) -> ScanResponse:
 
     targets = [validate_target(t) for t in request.targets]
 
-    # Run all domain scans concurrently
-    tasks = [_scan_single_target(t, request) for t in targets]
-    domain_results: list[DomainResult] = await asyncio.gather(*tasks)
+    # Run domain scans concurrently, bounded by SCAN_CONCURRENCY
+    sem = asyncio.Semaphore(SCAN_CONCURRENCY)
+
+    async def _bounded_scan(t: str) -> DomainResult:
+        async with sem:
+            return await _scan_single_target(t, request)
+
+    domain_results: list[DomainResult] = await asyncio.gather(
+        *(_bounded_scan(t) for t in targets)
+    )
 
     finished = datetime.now(timezone.utc).isoformat()
 
@@ -694,8 +703,14 @@ async def lighttouch_scan(request: LightTouchRequest) -> ScanResponse:
     started = datetime.now(timezone.utc).isoformat()
 
     targets = [validate_target(t) for t in request.targets]
+    sem = asyncio.Semaphore(SCAN_CONCURRENCY)
+
+    async def _bounded_lt(t: str) -> DomainResult:
+        async with sem:
+            return await _lighttouch_single_target(t, request.timeout)
+
     domain_results = await asyncio.gather(
-        *(_lighttouch_single_target(t, request.timeout) for t in targets)
+        *(_bounded_lt(t) for t in targets)
     )
     finished = datetime.now(timezone.utc).isoformat()
 
@@ -860,9 +875,14 @@ async def passive_scan(request: PassiveRequest) -> ScanResponse:
     started = datetime.now(timezone.utc).isoformat()
 
     targets = [validate_target(t) for t in request.targets]
+    sem = asyncio.Semaphore(SCAN_CONCURRENCY)
+
+    async def _bounded_passive(t: str) -> DomainResult:
+        async with sem:
+            return await _passive_single_target(t, list(request.emails or []), request.timeout)
+
     domain_results = await asyncio.gather(*(
-        _passive_single_target(t, list(request.emails or []), request.timeout)
-        for t in targets
+        _bounded_passive(t) for t in targets
     ))
     finished = datetime.now(timezone.utc).isoformat()
 
