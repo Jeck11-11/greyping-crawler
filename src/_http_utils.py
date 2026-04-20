@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from .config import HTTP_TIMEOUT, UA_BROWSER, UA_HONEST
+from .config import HTTP_TIMEOUT, MAX_RESPONSE_BYTES, UA_BROWSER, UA_HONEST
 
 logger = logging.getLogger(__name__)
 
@@ -161,7 +161,8 @@ async def fetch_landing_page_full(
             verify=False,
         ) as client:
             resp = await client.get(target, headers=headers)
-            return dict(resp.headers), resp.cookies, resp.text
+            body = resp.text[:MAX_RESPONSE_BYTES] if len(resp.content) > MAX_RESPONSE_BYTES else resp.text
+            return dict(resp.headers), resp.cookies, body
     except Exception as exc:
         logger.warning("Landing page fetch (full) failed for %s: %s", target, exc)
         return {}, httpx.Cookies(), ""

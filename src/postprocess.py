@@ -55,7 +55,7 @@ def _walk(obj: BaseModel) -> None:
                 setattr(obj, name, _NF)
             continue
 
-        if isinstance(val, str) and val == "":
+        if isinstance(val, str) and val.strip() == "":
             setattr(obj, name, _NF)
         elif isinstance(val, list):
             if len(val) == 0 and _is_str_list(annotation):

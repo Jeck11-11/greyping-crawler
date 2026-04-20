@@ -28,15 +28,17 @@ logger = logging.getLogger(__name__)
 
 _ENDPOINT_PATTERNS = [
     re.compile(r"""['"](/api/v?\d*/[^\s'"<>]{2,200})['"]"""),
+    re.compile(r"""['"](?:api/v?\d*/[^\s'"<>]{2,200})['"]"""),
+    re.compile(r"""['"](/v[1-9]\d*/[^\s'"<>]{2,200})['"]"""),
     re.compile(r"""['"](/graphql[^\s'"<>]*)['"]"""),
     re.compile(r"""baseURL\s*[:=]\s*['"]([^'"]+)['"]"""),
-    re.compile(r"""(?:API_URL|apiUrl|API_BASE|apiBase)\s*[:=]\s*['"]([^'"]+)['"]"""),
-    re.compile(r"""['"](https?://api\.[a-z0-9.-]+(?:/[^\s'"<>]{0,200})?)['"]"""),
+    re.compile(r"""(?:API_URL|apiUrl|API_BASE|apiBase|API_ENDPOINT|apiEndpoint|REST_URL|BACKEND_URL|SERVICE_URL|BASE_URL)\s*[:=]\s*['"]([^'"]+)['"]"""),
+    re.compile(r"""['"](https?://(?:api|service|backend|gateway)\.[a-z0-9.-]+(?:/[^\s'"<>]{0,200})?)['"]"""),
 ]
 
 _INTERNAL_HOST_PATTERNS = [
     re.compile(r"""['"](https?://[a-z0-9-]+\.internal(?::\d+)?(?:/[^\s'"<>]{0,200})?)['"]"""),
-    re.compile(r"""['"](https?://[a-z0-9-]+\.(?:local|corp|lan)(?::\d+)?(?:/[^\s'"<>]{0,200})?)['"]"""),
+    re.compile(r"""['"](https?://[a-z0-9-]+\.(?:local|corp|lan|dev|test|staging|qa|uat)(?::\d+)?(?:/[^\s'"<>]{0,200})?)['"]"""),
     re.compile(r"""['"](https?://10\.\d{1,3}\.\d{1,3}\.\d{1,3}(?::\d+)?(?:/[^\s'"<>]{0,200})?)['"]"""),
     re.compile(r"""['"](https?://192\.168\.\d{1,3}\.\d{1,3}(?::\d+)?(?:/[^\s'"<>]{0,200})?)['"]"""),
     re.compile(r"""['"](https?://172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}(?::\d+)?(?:/[^\s'"<>]{0,200})?)['"]"""),

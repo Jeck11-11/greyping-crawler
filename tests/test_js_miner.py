@@ -63,3 +63,49 @@ def test_extract_sourcemap_url():
 
 def test_extract_sourcemap_url_missing_returns_none():
     assert extract_sourcemap_url("console.log(1);", "https://x/y.js") is None
+
+
+# ---------------------------------------------------------------------------
+# Expanded endpoint and host detection
+# ---------------------------------------------------------------------------
+
+def test_relative_api_path_detected():
+    js = """fetch("api/v1/users/list");"""
+    eps = extract_endpoints(js)
+    assert any("api/v1/users" in e for e in eps)
+
+
+def test_versioned_endpoint_without_api_prefix():
+    js = """const url = "/v2/payments/checkout";"""
+    eps = extract_endpoints(js)
+    assert "/v2/payments/checkout" in eps
+
+
+def test_expanded_variable_names_detected():
+    js = """
+    const API_ENDPOINT = "https://api.example.com/v1";
+    const BACKEND_URL = "https://backend.internal/rpc";
+    const SERVICE_URL = "https://service.example.com/graphql";
+    """
+    eps = extract_endpoints(js)
+    assert any("api.example.com" in e for e in eps)
+    assert any("backend.internal" in e for e in eps)
+    assert any("service.example.com" in e for e in eps)
+
+
+def test_internal_dev_domain_detected():
+    js = """const url = "https://app.staging:3000/api";"""
+    hosts = extract_internal_hosts(js)
+    assert any("staging" in h for h in hosts)
+
+
+def test_service_subdomain_detected():
+    js = """fetch("https://service.example.com/v1/data");"""
+    eps = extract_endpoints(js)
+    assert any("service.example.com" in e for e in eps)
+
+
+def test_gateway_subdomain_detected():
+    js = """const gw = "https://gateway.example.com/proxy";"""
+    eps = extract_endpoints(js)
+    assert any("gateway.example.com" in e for e in eps)

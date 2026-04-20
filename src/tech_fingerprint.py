@@ -81,12 +81,12 @@ SIGNATURES: dict[str, dict[str, Any]] = {
     },
     "Next.js": {
         "categories": ["js_framework"],
-        "html": [r"__NEXT_DATA__", r"/_next/static/"],
+        "html": [r"__NEXT_DATA__", r"__NEXT_APP_DATA__", r"/_next/static/"],
         "headers": {"x-powered-by": r"Next\.js\s*(?P<version>[\d.]+)?"},
     },
     "Nuxt.js": {
         "categories": ["js_framework"],
-        "html": [r"window\.__NUXT__", r"/_nuxt/"],
+        "html": [r"window\.__NUXT__", r"__NUXT_PAYLOAD__", r"/_nuxt/"],
     },
     "jQuery": {
         "categories": ["js_library"],
@@ -212,6 +212,50 @@ SIGNATURES: dict[str, dict[str, Any]] = {
     "reCAPTCHA": {
         "categories": ["captcha"],
         "scripts": [r"www\.google\.com/recaptcha", r"recaptcha\.net"],
+    },
+    # --- Modern JS frameworks ------------------------------------------------
+    "Svelte": {
+        "categories": ["js_framework"],
+        "html": [r"svelte-[a-z0-9]", r"__svelte"],
+    },
+    "SvelteKit": {
+        "categories": ["js_framework"],
+        "html": [r"__sveltekit", r"_app/immutable/"],
+        "headers": {"x-sveltekit-page": r".+"},
+    },
+    "Astro": {
+        "categories": ["js_framework"],
+        "html": [r"astro-island", r"data-astro-cid-"],
+        "meta": {"generator": r"Astro\s*v?(?P<version>[\d.]+)?"},
+    },
+    "Remix": {
+        "categories": ["js_framework"],
+        "html": [r"__remix", r"__remixContext"],
+        "scripts": [r"entry\.client"],
+    },
+    # --- WAF / security appliances -------------------------------------------
+    "Akamai": {
+        "categories": ["cdn", "waf"],
+        "headers": {"x-akamai-transformed": r".+"},
+        "cookies": [r"^AkaSid$", r"^bm_sz$"],
+    },
+    "Imperva": {
+        "categories": ["cdn", "waf"],
+        "headers": {"x-iinfo": r".+"},
+        "cookies": [r"^visid_incap_\d+$", r"^incap_ses_\d+_\d+$"],
+    },
+    "Sucuri": {
+        "categories": ["cdn", "waf"],
+        "headers": {"x-sucuri-id": r".+", "server": r"Sucuri"},
+    },
+    "F5 BIG-IP": {
+        "categories": ["waf"],
+        "cookies": [r"^BIGipServer.+$"],
+        "headers": {"server": r"BIG-?IP"},
+    },
+    "Azure Front Door": {
+        "categories": ["cdn", "waf"],
+        "headers": {"x-azure-ref": r".+"},
     },
 }
 

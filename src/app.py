@@ -17,6 +17,8 @@ from pydantic import Field
 
 import httpx
 
+from .config import SCAN_CONCURRENCY
+
 from ._http_utils import (
     TargetValidationError,
     fetch_landing_page,
@@ -70,6 +72,7 @@ from .passive_intel import (
     query_wayback,
 )
 from .path_scanner import scan_sensitive_paths
+from .robots_sitemap import fetch_and_parse_robots_sitemap
 from .routers import content as content_router
 from .routers import discovery as discovery_router
 from .routers import intel as intel_router
@@ -227,6 +230,15 @@ async def _scan_single_target(
         logger.warning("Path scan failed for %s: %s", target, paths_result)
         paths_result = []
 
+    # Fetch and parse robots.txt + sitemap.xml
+    robots_result, sitemap_result = None, None
+    try:
+        robots_result, sitemap_result = await fetch_and_parse_robots_sitemap(
+            target, timeout=request.timeout,
+        )
+    except Exception as exc:
+        logger.warning("robots/sitemap parse failed for %s: %s", target, exc)
+
     # Process passive intel results
     def _passive_result(x, kind):
         if isinstance(x, Exception):
@@ -368,6 +380,8 @@ async def _scan_single_target(
         js_endpoints_found=js_endpoints_count,
         subdomains_found=len(ct_result.subdomains) if not ct_result.error else 0,
         wayback_snapshots=wayback_result.snapshot_count if not wayback_result.error else 0,
+        robots_disallow_count=len(robots_result.disallow_rules) if robots_result else 0,
+        sitemap_url_count=sitemap_result.url_count if sitemap_result else 0,
     )
 
     result = DomainResult(
@@ -389,6 +403,8 @@ async def _scan_single_target(
         ssl_certificate=ssl_result,
         cookies=cookie_findings,
         sensitive_paths=paths_result,
+        robots_txt=robots_result,
+        sitemap=sitemap_result,
         ioc_findings=all_iocs,
         technologies=tech_findings,
         js_intel=js_intel_result,
@@ -422,9 +438,16 @@ async def scan(request: ScanRequest) -> ScanResponse:
 
     targets = [validate_target(t) for t in request.targets]
 
-    # Run all domain scans concurrently
-    tasks = [_scan_single_target(t, request) for t in targets]
-    domain_results: list[DomainResult] = await asyncio.gather(*tasks)
+    # Run domain scans concurrently, bounded by SCAN_CONCURRENCY
+    sem = asyncio.Semaphore(SCAN_CONCURRENCY)
+
+    async def _bounded_scan(t: str) -> DomainResult:
+        async with sem:
+            return await _scan_single_target(t, request)
+
+    domain_results: list[DomainResult] = await asyncio.gather(
+        *(_bounded_scan(t) for t in targets)
+    )
 
     finished = datetime.now(timezone.utc).isoformat()
 
@@ -680,8 +703,14 @@ async def lighttouch_scan(request: LightTouchRequest) -> ScanResponse:
     started = datetime.now(timezone.utc).isoformat()
 
     targets = [validate_target(t) for t in request.targets]
+    sem = asyncio.Semaphore(SCAN_CONCURRENCY)
+
+    async def _bounded_lt(t: str) -> DomainResult:
+        async with sem:
+            return await _lighttouch_single_target(t, request.timeout)
+
     domain_results = await asyncio.gather(
-        *(_lighttouch_single_target(t, request.timeout) for t in targets)
+        *(_bounded_lt(t) for t in targets)
     )
     finished = datetime.now(timezone.utc).isoformat()
 
@@ -846,9 +875,14 @@ async def passive_scan(request: PassiveRequest) -> ScanResponse:
     started = datetime.now(timezone.utc).isoformat()
 
     targets = [validate_target(t) for t in request.targets]
+    sem = asyncio.Semaphore(SCAN_CONCURRENCY)
+
+    async def _bounded_passive(t: str) -> DomainResult:
+        async with sem:
+            return await _passive_single_target(t, list(request.emails or []), request.timeout)
+
     domain_results = await asyncio.gather(*(
-        _passive_single_target(t, list(request.emails or []), request.timeout)
-        for t in targets
+        _bounded_passive(t) for t in targets
     ))
     finished = datetime.now(timezone.utc).isoformat()
 
