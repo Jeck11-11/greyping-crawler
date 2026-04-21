@@ -25,6 +25,13 @@ JS_FETCH_CONCURRENCY = int(os.getenv("JS_FETCH_CONCURRENCY", "5"))
 SCAN_CONCURRENCY = int(os.getenv("SCAN_CONCURRENCY", "5"))
 MAX_RESPONSE_BYTES = int(os.getenv("MAX_RESPONSE_BYTES", str(10 * 1024 * 1024)))
 
+# Nuclei integration
+NUCLEI_API_URL = os.getenv("NUCLEI_API_URL", "")
+NUCLEI_TIMEOUT = int(os.getenv("NUCLEI_TIMEOUT", "120"))
+
+# CVE lookup
+CVE_LOOKUP_TIMEOUT = int(os.getenv("CVE_LOOKUP_TIMEOUT", "10"))
+
 # User-Agent strings
 UA_HONEST = os.getenv("UA_HONEST", "GreypingCrawler/1.0")
 UA_BROWSER = os.getenv(
