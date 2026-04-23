@@ -1,13 +1,12 @@
-# Default configuration for passive nuclei scans.
-# Template selection is handled by the -passive flag in the entrypoint,
-# which automatically filters for passive-capable templates.
+# Default configuration for WAF-friendly nuclei scans.
+# Uses active scanning with gentle rate limits suitable for production targets.
+# For true passive mode (scanning pre-recorded HTTP response files), pass
+# "passive": true in the /scan request body.
 
 # Tune concurrency so that it fits within the 2 vCPU / 8 GB Hetzner instance.
 bulk-size: 25
 rate-limit: 150
 
-# Enable passive mode by default and include helpful metadata.
-passive: true
 silent: true
 
 # Store JSONL results so they can be post-processed easily.
