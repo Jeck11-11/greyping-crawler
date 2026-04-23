@@ -53,6 +53,7 @@ from .models import (
     IPEnrichmentResult,
     JSIntelResult,
     LinkInfo,
+    NucleiResult,
     PageResult,
     PassiveIntelResult,
     PhoneFinding,
@@ -243,10 +244,9 @@ async def _scan_single_target(
     # Process nuclei result
     if isinstance(nuclei_result, Exception):
         logger.warning("Nuclei scan failed for %s: %s", target, nuclei_result)
-        nuclei_result = None
+        nuclei_result = NucleiResult(target=target, error=str(nuclei_result))
     elif nuclei_result and nuclei_result.error:
         logger.debug("Nuclei unavailable for %s: %s", target, nuclei_result.error)
-        nuclei_result = None
 
     # Process favicon result
     if isinstance(favicon_result, Exception):
