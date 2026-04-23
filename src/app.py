@@ -31,8 +31,11 @@ from ._social_utils import detect_platform
 from .breach_checker import check_breaches
 from .cookie_checker import analyze_cookies
 from .crawler import crawl_domain
+from .cve_lookup import lookup_cves
 from .easm_report import build_easm_report
 from .fair_signals import compute_fair_signals
+from .favicon import fetch_favicon
+from .nuclei_client import run_nuclei_scan
 from .postprocess import fill_not_found
 from .middleware import APIKeyMiddleware, RateLimitMiddleware
 from .js_miner import mine_javascript
@@ -142,7 +145,7 @@ async def _scan_single_target(
     started = datetime.now(timezone.utc).isoformat()
 
     # Run crawl, SSL check, landing-page fetch, sensitive-path scan,
-    # and passive intel (DNS, CT, RDAP, Wayback) all concurrently.
+    # passive intel (DNS, CT, RDAP, Wayback), nuclei, and favicon concurrently.
     crawl_task = crawl_domain(
         target,
         render_js=request.render_js,
@@ -157,11 +160,15 @@ async def _scan_single_target(
     ct_task = query_ct_logs(domain, timeout=request.timeout)
     rdap_task = query_rdap(domain, timeout=request.timeout)
     wayback_task = query_wayback(domain, timeout=request.timeout)
+    nuclei_task = run_nuclei_scan([target])
+    favicon_task = fetch_favicon(target, timeout=request.timeout)
 
     (crawl_result, ssl_result, landing_result, paths_result,
-     dns_result, ct_result, rdap_result, wayback_result) = await asyncio.gather(
+     dns_result, ct_result, rdap_result, wayback_result,
+     nuclei_result, favicon_result) = await asyncio.gather(
         crawl_task, ssl_task, landing_task, paths_task,
         dns_task, ct_task, rdap_task, wayback_task,
+        nuclei_task, favicon_task,
         return_exceptions=True,
     )
 
@@ -224,6 +231,27 @@ async def _scan_single_target(
         )
     except Exception as exc:
         logger.warning("JS mining failed for %s: %s", target, exc)
+
+    # CVE correlation from detected tech versions
+    cve_findings: list = []
+    if tech_findings:
+        try:
+            cve_findings = await lookup_cves(tech_findings, timeout=request.timeout)
+        except Exception as exc:
+            logger.warning("CVE lookup failed for %s: %s", target, exc)
+
+    # Process nuclei result
+    if isinstance(nuclei_result, Exception):
+        logger.warning("Nuclei scan failed for %s: %s", target, nuclei_result)
+        nuclei_result = None
+    elif nuclei_result and nuclei_result.error:
+        logger.debug("Nuclei unavailable for %s: %s", target, nuclei_result.error)
+        nuclei_result = None
+
+    # Process favicon result
+    if isinstance(favicon_result, Exception):
+        logger.warning("Favicon fetch failed for %s: %s", target, favicon_result)
+        favicon_result = None
 
     # Process sensitive paths
     if isinstance(paths_result, Exception):
@@ -382,6 +410,9 @@ async def _scan_single_target(
         wayback_snapshots=wayback_result.snapshot_count if not wayback_result.error else 0,
         robots_disallow_count=len(robots_result.disallow_rules) if robots_result else 0,
         sitemap_url_count=sitemap_result.url_count if sitemap_result else 0,
+        nuclei_findings=len(nuclei_result.findings) if nuclei_result else 0,
+        cve_count=len(cve_findings),
+        favicon_hash=favicon_result.hash if favicon_result else None,
     )
 
     result = DomainResult(
@@ -409,6 +440,9 @@ async def _scan_single_target(
         technologies=tech_findings,
         js_intel=js_intel_result,
         passive_intel=passive,
+        nuclei=nuclei_result,
+        cve_findings=cve_findings,
+        favicon=favicon_result,
         metadata={
             "domain": domain,
             "render_js": request.render_js,

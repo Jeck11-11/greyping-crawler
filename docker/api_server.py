@@ -34,12 +34,13 @@ def _write_targets_file(targets: List[str]) -> Path:
     return targets_file
 
 
-def _build_command(targets_file: Path, extra_args: Optional[str]) -> tuple[List[str], Path]:
+def _build_command(targets_file: Path, extra_args: Optional[str], passive: bool = True) -> tuple[List[str], Path]:
     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    output_file = LOG_DIR / f"passive-api-{timestamp}.txt"
+    label = "passive" if passive else "active"
+    output_file = LOG_DIR / f"{label}-api-{timestamp}.txt"
     command = [
         "nuclei",
-        "-passive",
+        *(("-passive",) if passive else ()),
         "-project",
         "-project-path",
         str(PROJECT_DIR),
@@ -110,9 +111,11 @@ class NucleiAPIHandler(BaseHTTPRequestHandler):
             self._bad_request("Field 'additional_args' must be a string when provided")
             return
 
+        passive = payload.get("passive", True)
+
         _ensure_dirs()
         targets_file = _write_targets_file(normalized)
-        command, output_file = _build_command(targets_file, extra_args)
+        command, output_file = _build_command(targets_file, extra_args, passive=passive)
 
         try:
             completed = subprocess.run(

@@ -813,6 +813,47 @@ class PageResult(BaseModel):
     error: str | None = None
 
 
+# ---------------------------------------------------------------------------
+# Nuclei / CVE / Favicon models
+# ---------------------------------------------------------------------------
+
+class NucleiFinding(BaseModel):
+    template_id: str = ""
+    name: str = ""
+    severity: str = Field(default="", description="info, low, medium, high, critical")
+    type: str = ""
+    matched_at: str = ""
+    description: str = ""
+    reference: list[str] = Field(default_factory=list)
+    extracted_results: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+
+
+class NucleiResult(BaseModel):
+    target: str
+    findings: list[NucleiFinding] = Field(default_factory=list)
+    templates_run: int = 0
+    scan_duration_seconds: float = 0
+    error: str = ""
+
+
+class CVEFinding(BaseModel):
+    cve_id: str
+    description: str = ""
+    severity: str = Field(default="", description="LOW, MEDIUM, HIGH, CRITICAL")
+    cvss_score: float | None = None
+    affected_tech: str = ""
+    affected_version: str = ""
+    reference_url: str = ""
+
+
+class FaviconResult(BaseModel):
+    url: str = ""
+    hash: int | None = Field(default=None, description="MurmurHash3 (Shodan-compatible)")
+    size_bytes: int = 0
+    error: str = ""
+
+
 class DomainSummary(BaseModel):
     """Quick-glance counts for a single target."""
 
@@ -835,6 +876,9 @@ class DomainSummary(BaseModel):
     wayback_snapshots: int = Field(default=0, description="Archive.org snapshots recorded (passive).")
     robots_disallow_count: int = Field(default=0, description="Disallow rules in robots.txt.")
     sitemap_url_count: int = Field(default=0, description="URLs found in sitemap.xml.")
+    nuclei_findings: int = Field(default=0, description="Nuclei vulnerability findings.")
+    cve_count: int = Field(default=0, description="CVEs correlated from detected tech versions.")
+    favicon_hash: int | None = Field(default=None, description="Favicon mmh3 hash (Shodan pivot).")
 
 
 class DomainResult(BaseModel):
@@ -928,6 +972,15 @@ class DomainResult(BaseModel):
             "summary, and prioritization. Generated as a post-processing "
             "step over the raw scanner output."
         ),
+    )
+    nuclei: NucleiResult | None = Field(
+        default=None, description="Nuclei vulnerability scan findings.",
+    )
+    cve_findings: list[CVEFinding] = Field(
+        default_factory=list, description="CVEs correlated from detected tech versions.",
+    )
+    favicon: FaviconResult | None = Field(
+        default=None, description="Favicon hash for Shodan/Censys pivoting.",
     )
     metadata: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None

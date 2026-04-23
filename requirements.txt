@@ -13,3 +13,6 @@ dnspython>=2.4,<3
 
 # Data validation
 pydantic>=2.7,<3
+
+# Favicon hashing (Shodan-compatible MurmurHash3)
+mmh3>=4.0,<5

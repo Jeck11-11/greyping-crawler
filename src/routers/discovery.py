@@ -11,11 +11,15 @@ from fastapi import APIRouter
 from .._http_utils import fetch_landing_page_full, validate_target
 from ..js_miner import mine_javascript
 from ..models import (
+    FaviconResult,
     JSIntelResult,
+    NucleiResult,
     PathsReconResult,
     ReconRequest,
     TechIntelResult,
 )
+from ..favicon import fetch_favicon
+from ..nuclei_client import run_nuclei_scan
 from ..path_scanner import scan_sensitive_paths
 from ..postprocess import fill_not_found
 from ..tech_fingerprint import fingerprint_tech
@@ -109,3 +113,36 @@ async def recon_js_intel(request: ReconRequest) -> list[JSIntelResult]:
     for r in results:
         fill_not_found(r)
     return results
+
+
+@router.post("/nuclei", response_model=list[NucleiResult])
+async def recon_nuclei(request: ReconRequest) -> list[NucleiResult]:
+    """Run Nuclei vulnerability templates against the target(s)."""
+    targets = [validate_target(t) for t in request.targets]
+
+    async def _one(target: str) -> NucleiResult:
+        try:
+            return await run_nuclei_scan([target])
+        except Exception as exc:
+            logger.warning("Nuclei scan failed for %s: %s", target, exc)
+            return NucleiResult(target=target, error=str(exc))
+
+    results = await asyncio.gather(*(_one(t) for t in targets))
+    for r in results:
+        fill_not_found(r)
+    return results
+
+
+@router.post("/favicon", response_model=list[FaviconResult])
+async def recon_favicon(request: ReconRequest) -> list[FaviconResult]:
+    """Fetch the favicon and compute its MurmurHash3 for Shodan/Censys pivoting."""
+    targets = [validate_target(t) for t in request.targets]
+
+    async def _one(target: str) -> FaviconResult:
+        try:
+            return await fetch_favicon(target, timeout=request.timeout)
+        except Exception as exc:
+            logger.warning("Favicon fetch failed for %s: %s", target, exc)
+            return FaviconResult(error=str(exc))
+
+    return await asyncio.gather(*(_one(t) for t in targets))
