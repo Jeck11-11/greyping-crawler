@@ -89,12 +89,32 @@ async def run_nuclei_scan(
 
     elapsed = time.monotonic() - start
 
-    findings = _parse_jsonl_findings(data.get("stdout") or "")
-    if not findings:
-        findings = _read_output_file(data.get("output_file", ""))
+    # Handle structured response (new format) or raw JSONL (legacy)
+    if "findings" in data and isinstance(data["findings"], list):
+        findings = [
+            NucleiFinding(
+                template_id=f.get("template_id", ""),
+                name=f.get("name", ""),
+                severity=f.get("severity", ""),
+                type=f.get("type", ""),
+                matched_at=f.get("matched_at", ""),
+                description=f.get("description", ""),
+                reference=f.get("reference") or [],
+                extracted_results=f.get("extracted_results") or [],
+                tags=f.get("tags") or [],
+            )
+            for f in data["findings"]
+        ]
+        templates_run = (data.get("stats") or {}).get("templates", 0)
+    else:
+        findings = _parse_jsonl_findings(data.get("stdout") or "")
+        if not findings:
+            findings = _read_output_file(data.get("output_file", ""))
+        templates_run = 0
 
     return NucleiResult(
         target=targets[0] if targets else "",
         findings=findings,
+        templates_run=templates_run,
         scan_duration_seconds=round(elapsed, 2),
     )
