@@ -53,7 +53,7 @@ def _read_output_file(path: str) -> list[NucleiFinding]:
 async def run_nuclei_scan(
     targets: list[str],
     *,
-    severity: str = "medium,high,critical",
+    severity: str = "info,low,medium,high,critical",
     tags: str = "",
     timeout: int = NUCLEI_TIMEOUT,
 ) -> NucleiResult:
