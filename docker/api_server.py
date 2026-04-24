@@ -58,7 +58,51 @@ def _build_command(targets_file: Path, extra_args: Optional[str], passive: bool 
     return command, output_file
 
 
-class NucleiAPIHandler(BaseHTTPRequestHandler):
+def _parse_findings(text: str) -> list[dict]:
+    """Parse nuclei JSONL stdout into structured finding dicts."""
+    findings = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        info = obj.get("info") or {}
+        findings.append({
+            "template_id": obj.get("template-id", obj.get("templateID", "")),
+            "name": info.get("name", ""),
+            "severity": info.get("severity", ""),
+            "type": obj.get("type", ""),
+            "host": obj.get("host", ""),
+            "matched_at": obj.get("matched-at", obj.get("matched", "")),
+            "url": obj.get("url", ""),
+            "matcher_name": obj.get("matcher-name", ""),
+            "description": info.get("description", "").strip(),
+            "tags": info.get("tags") or [],
+            "reference": info.get("reference") or [],
+            "extracted_results": obj.get("extracted-results") or [],
+            "curl_command": obj.get("curl-command", ""),
+            "timestamp": obj.get("timestamp", ""),
+        })
+    return findings
+
+
+def _parse_stats(text: str) -> dict:
+    """Parse the last stats JSON line from stderr."""
+    last_stats = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or not line.startswith("{"):
+            continue
+        try:
+            last_stats = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+    return last_stats
+
+
     def _send_json(self, status: HTTPStatus, payload: dict) -> None:
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
@@ -148,17 +192,27 @@ class NucleiAPIHandler(BaseHTTPRequestHandler):
             )
             return
 
-        print(f"[scan] completed exit_code={completed.returncode} stdout_bytes={len(completed.stdout or '')} stderr_bytes={len(completed.stderr or '')}", flush=True)
+        findings = _parse_findings(completed.stdout or "")
+        stats = _parse_stats(completed.stderr or "")
+
+        print(f"[scan] completed exit_code={completed.returncode} findings={len(findings)} templates={stats.get('templates', '?')}", flush=True)
 
         self._send_json(
             HTTPStatus.OK,
             {
-                "command": command,
-                "targets_file": str(targets_file),
-                "output_file": str(output_file),
+                "target": normalized[0] if len(normalized) == 1 else normalized,
+                "findings": findings,
+                "stats": {
+                    "templates": int(stats.get("templates", 0)),
+                    "requests": int(stats.get("requests", "0").split("/")[0]),
+                    "total_requests": int(stats.get("total", 0)),
+                    "matched": int(stats.get("matched", 0)),
+                    "errors": int(stats.get("errors", 0)),
+                    "duration": stats.get("duration", ""),
+                    "rps": int(stats.get("rps", 0)),
+                } if stats else None,
                 "exit_code": completed.returncode,
-                "stdout": completed.stdout,
-                "stderr": completed.stderr,
+                "output_file": str(output_file),
             },
         )
 
