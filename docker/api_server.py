@@ -41,9 +41,6 @@ def _build_command(targets_file: Path, extra_args: Optional[str], passive: bool 
     command = [
         "nuclei",
         *(("-passive",) if passive else ()),
-        "-project",
-        "-project-path",
-        str(PROJECT_DIR),
         "-output",
         str(output_file),
         "-jsonl",
