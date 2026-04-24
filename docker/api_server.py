@@ -113,10 +113,14 @@ class NucleiAPIHandler(BaseHTTPRequestHandler):
             return
 
         passive = payload.get("passive", False)
+        timeout_seconds = int(payload.get("timeout", 600))
 
         _ensure_dirs()
         targets_file = _write_targets_file(normalized)
         command, output_file = _build_command(targets_file, extra_args, passive=passive)
+
+        print(f"[scan] targets={normalized} passive={passive} timeout={timeout_seconds}s", flush=True)
+        print(f"[scan] command={' '.join(command)}", flush=True)
 
         try:
             completed = subprocess.run(
@@ -124,13 +128,30 @@ class NucleiAPIHandler(BaseHTTPRequestHandler):
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=timeout_seconds,
             )
+        except subprocess.TimeoutExpired as exc:
+            print(f"[scan] timeout after {timeout_seconds}s", flush=True)
+            self._send_json(
+                HTTPStatus.GATEWAY_TIMEOUT,
+                {
+                    "error": f"Nuclei scan timed out after {timeout_seconds}s",
+                    "command": command,
+                    "output_file": str(output_file),
+                    "partial_stdout": (exc.stdout or b"").decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or ""),
+                    "partial_stderr": (exc.stderr or b"").decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or ""),
+                },
+            )
+            return
         except Exception as exc:  # noqa: BLE001
+            print(f"[scan] failed to execute: {exc}", flush=True)
             self._send_json(
                 HTTPStatus.INTERNAL_SERVER_ERROR,
                 {"error": "Failed to execute nuclei", "detail": str(exc)},
             )
             return
+
+        print(f"[scan] completed exit_code={completed.returncode} stdout_bytes={len(completed.stdout or '')} stderr_bytes={len(completed.stderr or '')}", flush=True)
 
         self._send_json(
             HTTPStatus.OK,

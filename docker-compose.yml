@@ -28,6 +28,7 @@ services:
       - NUCLEI_ADDITIONAL_ARGS=-stats
       - NUCLEI_API_HOST=0.0.0.0
       - NUCLEI_API_PORT=8080
+      - PYTHONUNBUFFERED=1
     ports:
       - "8080:8080"
     ulimits:
