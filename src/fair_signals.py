@@ -310,6 +310,35 @@ def _build_vulnerability(result: DomainResult) -> FAIRFactor:
                 evidence=issues,
             ))
 
+    # Nuclei vulnerability findings.
+    nuclei_findings = (
+        result.nuclei.findings if result.nuclei and result.nuclei.findings else []
+    )
+    if nuclei_findings:
+        worst = max(_severity_score(f.severity) for f in nuclei_findings)
+        score = min(100, worst + 5 * (len(nuclei_findings) - 1))
+        signals.append(FAIRSignal(
+            name="nuclei_vulnerabilities",
+            score=score,
+            weight=1.4,
+            evidence=[
+                f"{f.name} ({f.severity})" for f in nuclei_findings[:5]
+            ],
+        ))
+
+    # CVE findings from detected technology versions.
+    if result.cve_findings:
+        worst = max(_severity_score(f.severity) for f in result.cve_findings)
+        score = min(100, worst + 10 * (len(result.cve_findings) - 1))
+        signals.append(FAIRSignal(
+            name="known_cves",
+            score=score,
+            weight=1.5,
+            evidence=[
+                f"{f.cve_id} ({f.severity})" for f in result.cve_findings[:5]
+            ],
+        ))
+
     return _factor_from_signals(
         signals,
         notes="Higher Vulnerability means a threat engagement is more likely to succeed.",
