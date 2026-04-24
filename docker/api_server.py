@@ -103,6 +103,7 @@ def _parse_stats(text: str) -> dict:
     return last_stats
 
 
+class NucleiAPIHandler(BaseHTTPRequestHandler):
     def _send_json(self, status: HTTPStatus, payload: dict) -> None:
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
