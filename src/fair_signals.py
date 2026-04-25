@@ -339,6 +339,21 @@ def _build_vulnerability(result: DomainResult) -> FAIRFactor:
             ],
         ))
 
+    # Subdomain takeover findings.
+    takeover = result.subdomain_takeover
+    if takeover and takeover.findings:
+        critical = [f for f in takeover.findings if f.severity == "critical"]
+        score = 100 if critical else 75
+        signals.append(FAIRSignal(
+            name="subdomain_takeover_risk",
+            score=score,
+            weight=1.5,
+            evidence=[
+                f"{f.subdomain} → {f.vulnerable_service} ({f.status})"
+                for f in takeover.findings[:5]
+            ],
+        ))
+
     return _factor_from_signals(
         signals,
         notes="Higher Vulnerability means a threat engagement is more likely to succeed.",

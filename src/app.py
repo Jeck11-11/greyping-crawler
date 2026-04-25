@@ -36,6 +36,7 @@ from .easm_report import build_easm_report
 from .fair_signals import compute_fair_signals
 from .favicon import fetch_favicon
 from .nuclei_client import run_nuclei_scan
+from .subdomain_takeover import scan_subdomain_takeover
 from .postprocess import fill_not_found
 from .middleware import APIKeyMiddleware, RateLimitMiddleware
 from .js_miner import mine_javascript
@@ -253,6 +254,20 @@ async def _scan_single_target(
         logger.warning("Favicon fetch failed for %s: %s", target, favicon_result)
         favicon_result = None
 
+    # Subdomain takeover scan (uses CT-discovered subdomains)
+    ct_subdomains = (
+        ct_result.subdomains
+        if not isinstance(ct_result, Exception) and ct_result and not ct_result.error
+        else []
+    )
+    try:
+        takeover_result = await scan_subdomain_takeover(
+            domain, known_subdomains=ct_subdomains,
+        )
+    except Exception as exc:
+        logger.warning("Takeover scan failed for %s: %s", target, exc)
+        takeover_result = None
+
     # Process sensitive paths
     if isinstance(paths_result, Exception):
         logger.warning("Path scan failed for %s: %s", target, paths_result)
@@ -413,6 +428,7 @@ async def _scan_single_target(
         nuclei_findings=len(nuclei_result.findings) if nuclei_result else 0,
         cve_count=len(cve_findings),
         favicon_hash=favicon_result.hash if favicon_result else None,
+        takeover_findings=len(takeover_result.findings) if takeover_result else 0,
     )
 
     result = DomainResult(
@@ -443,6 +459,7 @@ async def _scan_single_target(
         nuclei=nuclei_result,
         cve_findings=cve_findings,
         favicon=favicon_result,
+        subdomain_takeover=takeover_result,
         metadata={
             "domain": domain,
             "render_js": request.render_js,

@@ -854,6 +854,32 @@ class FaviconResult(BaseModel):
     error: str = ""
 
 
+class SubdomainTakeoverFinding(BaseModel):
+    subdomain: str
+    cname_target: str
+    vulnerable_service: str
+    status: str = Field(description="vulnerable, likely_vulnerable, service_detected")
+    severity: str = Field(description="critical, high, medium, low, info")
+    evidence: list[str] = Field(default_factory=list)
+    remediation: str = ""
+
+
+class SubdomainEnumResult(BaseModel):
+    domain: str
+    live_subdomains: list[str] = Field(default_factory=list)
+    sources: dict[str, int] = Field(default_factory=dict)
+    error: str | None = None
+
+
+class SubdomainTakeoverResult(BaseModel):
+    domain: str
+    enumeration: SubdomainEnumResult = Field(default_factory=lambda: SubdomainEnumResult(domain=""))
+    findings: list[SubdomainTakeoverFinding] = Field(default_factory=list)
+    subdomains_checked: int = 0
+    scan_duration_seconds: float = 0
+    error: str | None = None
+
+
 class DomainSummary(BaseModel):
     """Quick-glance counts for a single target."""
 
@@ -879,6 +905,7 @@ class DomainSummary(BaseModel):
     nuclei_findings: int = Field(default=0, description="Nuclei vulnerability findings.")
     cve_count: int = Field(default=0, description="CVEs correlated from detected tech versions.")
     favicon_hash: int | None = Field(default=None, description="Favicon mmh3 hash (Shodan pivot).")
+    takeover_findings: int = Field(default=0, description="Subdomain takeover vulnerabilities found.")
 
 
 class DomainResult(BaseModel):
@@ -981,6 +1008,9 @@ class DomainResult(BaseModel):
     )
     favicon: FaviconResult | None = Field(
         default=None, description="Favicon hash for Shodan/Censys pivoting.",
+    )
+    subdomain_takeover: SubdomainTakeoverResult | None = Field(
+        default=None, description="Subdomain enumeration and takeover detection results.",
     )
     metadata: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None

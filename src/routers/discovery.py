@@ -16,12 +16,14 @@ from ..models import (
     NucleiResult,
     PathsReconResult,
     ReconRequest,
+    SubdomainTakeoverResult,
     TechIntelResult,
 )
 from ..favicon import fetch_favicon
 from ..nuclei_client import run_nuclei_scan
 from ..path_scanner import scan_sensitive_paths
 from ..postprocess import fill_not_found
+from ..subdomain_takeover import scan_subdomain_takeover
 from ..tech_fingerprint import fingerprint_tech
 
 logger = logging.getLogger(__name__)
@@ -146,3 +148,31 @@ async def recon_favicon(request: ReconRequest) -> list[FaviconResult]:
             return FaviconResult(error=str(exc))
 
     return await asyncio.gather(*(_one(t) for t in targets))
+
+
+@router.post("/takeover", response_model=list[SubdomainTakeoverResult])
+async def recon_takeover(request: ReconRequest) -> list[SubdomainTakeoverResult]:
+    """Enumerate subdomains and check for takeover vulnerabilities."""
+    from .._http_utils import normalise_target
+    from urllib.parse import urlparse
+
+    targets = [validate_target(t) for t in request.targets]
+
+    async def _one(target: str) -> SubdomainTakeoverResult:
+        hostname = urlparse(target).hostname or target
+        domain = hostname.lstrip("www.")
+        try:
+            return await scan_subdomain_takeover(domain)
+        except Exception as exc:
+            logger.warning("Takeover scan failed for %s: %s", target, exc)
+            from ..models import SubdomainEnumResult
+            return SubdomainTakeoverResult(
+                domain=domain,
+                enumeration=SubdomainEnumResult(domain=domain, error=str(exc)),
+                error=str(exc),
+            )
+
+    results = await asyncio.gather(*(_one(t) for t in targets))
+    for r in results:
+        fill_not_found(r)
+    return results
