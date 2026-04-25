@@ -354,6 +354,26 @@ def _build_vulnerability(result: DomainResult) -> FAIRFactor:
             ],
         ))
 
+    # IP reputation — malicious IP is a strong signal.
+    ip_rep = result.ip_reputation
+    if ip_rep and ip_rep.malicious:
+        signals.append(FAIRSignal(
+            name="ip_reputation_malicious",
+            score=90,
+            weight=1.3,
+            evidence=ip_rep.detections[:5] or [f"IP {ip_rep.ip} flagged as malicious"],
+        ))
+
+    # URL/domain reputation — blacklisted domain.
+    url_rep = result.url_reputation
+    if url_rep and url_rep.blacklisted:
+        signals.append(FAIRSignal(
+            name="url_blacklisted",
+            score=85,
+            weight=1.3,
+            evidence=url_rep.detections[:5] or [f"{url_rep.url} is blacklisted"],
+        ))
+
     return _factor_from_signals(
         signals,
         notes="Higher Vulnerability means a threat engagement is more likely to succeed.",

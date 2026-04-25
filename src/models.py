@@ -880,6 +880,30 @@ class SubdomainTakeoverResult(BaseModel):
     error: str | None = None
 
 
+class IPReputationResult(BaseModel):
+    ip: str
+    malicious: bool = False
+    detections: list[str] = Field(default_factory=list)
+    error: str | None = None
+
+
+class URLReputationResult(BaseModel):
+    url: str
+    blacklisted: bool = False
+    detections: list[str] = Field(default_factory=list)
+    sources_checked: int = 0
+    error: str | None = None
+
+
+class EmailValidationResult(BaseModel):
+    email: str
+    valid: bool | None = None
+    disposable: bool = False
+    role_account: bool = False
+    free_provider: bool = False
+    error: str | None = None
+
+
 class DomainSummary(BaseModel):
     """Quick-glance counts for a single target."""
 
@@ -906,6 +930,9 @@ class DomainSummary(BaseModel):
     cve_count: int = Field(default=0, description="CVEs correlated from detected tech versions.")
     favicon_hash: int | None = Field(default=None, description="Favicon mmh3 hash (Shodan pivot).")
     takeover_findings: int = Field(default=0, description="Subdomain takeover vulnerabilities found.")
+    ip_malicious: bool = Field(default=False, description="Whether the target IP is flagged as malicious.")
+    url_blacklisted: bool = Field(default=False, description="Whether the target URL is blacklisted.")
+    emails_validated: int = Field(default=0, description="Number of discovered emails validated.")
 
 
 class DomainResult(BaseModel):
@@ -1011,6 +1038,15 @@ class DomainResult(BaseModel):
     )
     subdomain_takeover: SubdomainTakeoverResult | None = Field(
         default=None, description="Subdomain enumeration and takeover detection results.",
+    )
+    ip_reputation: IPReputationResult | None = Field(
+        default=None, description="IP reputation check from blacklists.",
+    )
+    url_reputation: URLReputationResult | None = Field(
+        default=None, description="URL/domain reputation check from blacklists.",
+    )
+    email_validations: list[EmailValidationResult] = Field(
+        default_factory=list, description="Deliverability validation for discovered emails.",
     )
     metadata: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None

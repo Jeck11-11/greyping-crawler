@@ -421,6 +421,19 @@ async def enumerate_subdomains(
             candidates[sub] = "ct"
             ct_count += 1
 
+    # Add C99 subdomain finder results
+    c99_count = 0
+    try:
+        from .c99_client import find_subdomains as c99_find
+        c99_subs = await c99_find(domain)
+        for sub in c99_subs:
+            sub = sub.strip().lower().rstrip(".")
+            if sub and sub != domain and sub.endswith(f".{domain}") and sub not in candidates:
+                candidates[sub] = "c99"
+                c99_count += 1
+    except Exception as exc:
+        logger.debug("C99 subdomain lookup skipped: %s", exc)
+
     # Add permutation candidates
     perm_count = 0
     for prefix in SUBDOMAIN_WORDLIST:
@@ -434,20 +447,25 @@ async def enumerate_subdomains(
 
     live: list[str] = []
     resolved: list[dict] = []
-    sources = {"ct_candidates": ct_count, "permutation_candidates": perm_count}
+    sources = {"ct_candidates": ct_count, "c99_candidates": c99_count, "permutation_candidates": perm_count}
     ct_live = 0
+    c99_live = 0
     perm_live = 0
 
     for fqdn, result in zip(candidates.keys(), results):
         if result is not None:
             live.append(fqdn)
             resolved.append(result)
-            if candidates[fqdn] == "ct":
+            src = candidates[fqdn]
+            if src == "ct":
                 ct_live += 1
+            elif src == "c99":
+                c99_live += 1
             else:
                 perm_live += 1
 
     sources["ct_live"] = ct_live
+    sources["c99_live"] = c99_live
     sources["permutation_live"] = perm_live
 
     return {

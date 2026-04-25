@@ -37,6 +37,7 @@ from .fair_signals import compute_fair_signals
 from .favicon import fetch_favicon
 from .nuclei_client import run_nuclei_scan
 from .subdomain_takeover import scan_subdomain_takeover
+from .c99_client import check_ip_reputation, check_url_reputation, validate_email
 from .postprocess import fill_not_found
 from .middleware import APIKeyMiddleware, RateLimitMiddleware
 from .js_miner import mine_javascript
@@ -50,8 +51,10 @@ from .models import (
     DomainSummary,
     EmailSecurityResult,
     EmailFinding,
+    EmailValidationResult,
     ExternalLinkFinding,
     IPEnrichmentResult,
+    IPReputationResult,
     JSIntelResult,
     LinkInfo,
     NucleiResult,
@@ -66,6 +69,7 @@ from .models import (
     SecurityHeadersResult,
     SocialFinding,
     SSLCertResult,
+    URLReputationResult,
     WaybackResult,
 )
 from .passive_intel import (
@@ -321,6 +325,31 @@ async def _scan_single_target(
         email_security=email_sec, ip_enrichment=ip_enrich, breaches=[],
     )
 
+    # C99 reputation checks (IP + URL, run concurrently)
+    ip_rep_result: IPReputationResult | None = None
+    url_rep_result: URLReputationResult | None = None
+    try:
+        primary_ip = a_ips[0] if a_ips else ""
+        ip_rep_coro = check_ip_reputation(primary_ip) if primary_ip else asyncio.sleep(0)
+        url_rep_coro = check_url_reputation(target)
+        ip_raw, url_raw = await asyncio.gather(ip_rep_coro, url_rep_coro, return_exceptions=True)
+
+        if primary_ip and isinstance(ip_raw, dict):
+            ip_rep_result = IPReputationResult(
+                ip=primary_ip,
+                malicious=ip_raw.get("malicious", False),
+                detections=ip_raw.get("details", []) if isinstance(ip_raw.get("details"), list) else [],
+            )
+        if isinstance(url_raw, dict):
+            url_rep_result = URLReputationResult(
+                url=target,
+                blacklisted=url_raw.get("blacklisted", False),
+                detections=url_raw.get("detections", []),
+                sources_checked=url_raw.get("sources_checked", 0),
+            )
+    except Exception as exc:
+        logger.warning("C99 reputation checks failed for %s: %s", target, exc)
+
     # Aggregate contacts, links, and secrets across all pages,
     # tracking which page URL each finding came from.
     email_sources: dict[str, list[str]] = {}
@@ -389,6 +418,25 @@ async def _scan_single_target(
         social_profiles=sorted(social_sources),
     )
 
+    # C99 email validation (up to 20 discovered emails)
+    email_validations: list[EmailValidationResult] = []
+    discovered_emails = sorted(email_sources)[:20]
+    if discovered_emails:
+        try:
+            val_tasks = [validate_email(e) for e in discovered_emails]
+            val_results = await asyncio.gather(*val_tasks, return_exceptions=True)
+            for raw in val_results:
+                if isinstance(raw, dict):
+                    email_validations.append(EmailValidationResult(
+                        email=raw.get("email", ""),
+                        valid=raw.get("valid"),
+                        disposable=raw.get("disposable", False),
+                        role_account=raw.get("role_account", False),
+                        free_provider=raw.get("free_provider", False),
+                    ))
+        except Exception as exc:
+            logger.warning("Email validation failed for %s: %s", domain, exc)
+
     # Breach checks
     breaches = []
     if request.check_breaches:
@@ -429,6 +477,9 @@ async def _scan_single_target(
         cve_count=len(cve_findings),
         favicon_hash=favicon_result.hash if favicon_result else None,
         takeover_findings=len(takeover_result.findings) if takeover_result else 0,
+        ip_malicious=ip_rep_result.malicious if ip_rep_result else False,
+        url_blacklisted=url_rep_result.blacklisted if url_rep_result else False,
+        emails_validated=len(email_validations),
     )
 
     result = DomainResult(
@@ -460,6 +511,9 @@ async def _scan_single_target(
         cve_findings=cve_findings,
         favicon=favicon_result,
         subdomain_takeover=takeover_result,
+        ip_reputation=ip_rep_result,
+        url_reputation=url_rep_result,
+        email_validations=email_validations,
         metadata={
             "domain": domain,
             "render_js": request.render_js,
