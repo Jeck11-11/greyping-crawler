@@ -799,7 +799,7 @@ class PageResult(BaseModel):
         default="",
         description="First 500 characters of visible page text.",
     )
-    links: list[LinkInfo] = Field(default_factory=list)
+    links: list[LinkInfo] = Field(default_factory=list, exclude=True)
     contacts: ContactInfo = Field(default_factory=ContactInfo)
     secrets: list[SecretFinding] = Field(default_factory=list)
     ioc_findings: list[IoCFinding] = Field(

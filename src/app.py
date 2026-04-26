@@ -26,7 +26,7 @@ from ._http_utils import (
     normalise_target,
     validate_target,
 )
-from ._link_utils import is_social_url, normalise_ext_url, MAX_FOUND_ON
+from ._link_utils import is_asset_url, is_social_url, normalise_ext_url, MAX_FOUND_ON
 from ._social_utils import detect_platform
 from .breach_checker import check_breaches
 from .cookie_checker import analyze_cookies
@@ -371,7 +371,8 @@ async def _scan_single_target(
             social_sources.setdefault(social, []).append(page_url)
         for link in page.links:
             if link.link_type == "internal":
-                internal_links.add(link.url)
+                if not is_asset_url(link.url):
+                    internal_links.add(link.url)
             elif not is_social_url(link.url):
                 norm = normalise_ext_url(link.url)
                 entry = ext_link_sources.setdefault(
@@ -703,7 +704,7 @@ async def _lighttouch_single_target(target: str, timeout: int) -> DomainResult:
     headers_result = analyze_headers(resp_headers)
     cookie_findings = analyze_cookies(resp_cookies)
 
-    internal_links = sorted({l.url for l in links if l.link_type == "internal"})
+    internal_links = sorted({l.url for l in links if l.link_type == "internal" and not is_asset_url(l.url)})
     ext_seen: dict[str, ExternalLinkFinding] = {}
     for l in links:
         if l.link_type != "external" or is_social_url(l.url):

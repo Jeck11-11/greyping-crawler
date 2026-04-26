@@ -8,7 +8,7 @@ import logging
 from fastapi import APIRouter
 
 from .._http_utils import validate_target
-from .._link_utils import normalise_ext_url, is_social_url, MAX_FOUND_ON
+from .._link_utils import is_asset_url, normalise_ext_url, is_social_url, MAX_FOUND_ON
 from .._social_utils import detect_platform
 from ..crawler import crawl_domain
 from ..postprocess import fill_not_found
@@ -122,7 +122,8 @@ async def recon_links(request: CrawlReconRequest) -> list[LinkReconResult]:
             for page in pages:
                 for link in page.links:
                     if link.link_type == "internal":
-                        internal.add(link.url)
+                        if not is_asset_url(link.url):
+                            internal.add(link.url)
                     elif not is_social_url(link.url):
                         norm = normalise_ext_url(link.url)
                         entry = ext.setdefault(

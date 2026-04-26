@@ -30,3 +30,37 @@ def is_social_url(url: str) -> bool:
         return host in _SOCIAL_HOSTS
     except Exception:
         return False
+
+
+_ASSET_EXTENSIONS = frozenset({
+    ".jpg", ".jpeg", ".png", ".gif", ".svg", ".webp", ".ico", ".bmp", ".avif",
+    ".css", ".js", ".mjs",
+    ".woff", ".woff2", ".ttf", ".eot", ".otf",
+    ".pdf", ".zip", ".gz", ".tar", ".rar",
+    ".mp4", ".mp3", ".webm", ".ogg", ".avi", ".mov",
+    ".xml", ".json", ".rss", ".atom",
+})
+
+_ASSET_PATH_SEGMENTS = frozenset({
+    "/wp-content/uploads/",
+    "/wp-includes/",
+    "/wp-json/",
+    "/assets/images/",
+    "/assets/fonts/",
+    "/static/",
+})
+
+
+def is_asset_url(url: str) -> bool:
+    """Return True if *url* points to a static asset (image, CSS, JS, font, etc.)."""
+    try:
+        path = urlparse(url).path.lower()
+    except Exception:
+        return False
+    dot = path.rfind(".")
+    if dot != -1 and path[dot:] in _ASSET_EXTENSIONS:
+        return True
+    for seg in _ASSET_PATH_SEGMENTS:
+        if seg in path:
+            return True
+    return False
