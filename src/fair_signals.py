@@ -20,7 +20,10 @@ engagement becomes a loss event.
 from __future__ import annotations
 
 import logging
+import re
+from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlparse as _urlparse
 
 from .models import (
     DomainResult,
@@ -63,6 +66,27 @@ _WAF_CDN_NAMES: frozenset[str] = frozenset(
     }
 )
 _WAF_CDN_CATEGORIES: frozenset[str] = frozenset({"cdn", "waf"})
+
+_SENSITIVE_ROBOTS_PATTERNS: tuple[str, ...] = (
+    "/admin", "/api", "/backup", "/config", "/debug", "/internal",
+    "/staging", "/test", "/deploy", "/dashboard", "/private",
+    "/secret", "/db", "/phpmyadmin", "/wp-admin", "/cgi-bin",
+    "/server-status", "/.env", "/.git",
+)
+
+_WEAK_CIPHERS: tuple[str, ...] = ("RC4", "DES", "3DES", "MD5", "NULL", "EXPORT")
+
+_HAS_VERSION = re.compile(r"\d+[\.\d]+")
+
+_SENSITIVE_DATA_WEIGHTS: dict[str, int] = {
+    "Passwords": 25, "Plaintext Passwords": 25,
+    "Credit cards": 25, "Bank account numbers": 25, "Payment histories": 25,
+    "Government issued IDs": 20, "Passport numbers": 20, "Dates of birth": 20,
+    "Social security numbers": 20,
+    "Health records": 20,
+    "Security questions and answers": 15,
+    "Private messages": 10, "Chat logs": 10,
+}
 
 
 def _grade_score(grade: str) -> int:
@@ -195,6 +219,46 @@ def _build_threat_event_frequency(result: DomainResult) -> FAIRFactor:
             weight=0.5,
             evidence=[f"{email_count} email addresses harvested"],
         ))
+
+    # Internal network hostnames leaked via JS bundles.
+    if result.js_intel and result.js_intel.internal_hosts:
+        hosts = result.js_intel.internal_hosts
+        signals.append(FAIRSignal(
+            name="internal_network_leak",
+            score=min(100, len(hosts) * 20),
+            weight=1.0,
+            evidence=hosts[:5],
+        ))
+
+    # Robots.txt disallow rules revealing sensitive paths.
+    if result.robots_txt and result.robots_txt.disallow_rules:
+        sensitive = [
+            r for r in result.robots_txt.disallow_rules
+            if any(r.lower().startswith(p) for p in _SENSITIVE_ROBOTS_PATTERNS)
+        ]
+        if sensitive:
+            signals.append(FAIRSignal(
+                name="robots_recon_value",
+                score=min(100, len(sensitive) * 20),
+                weight=0.5,
+                evidence=sensitive[:5],
+            ))
+
+    # Sourcemaps exposing application source code.
+    if result.js_intel:
+        smaps = result.js_intel.sourcemaps_found
+        recovered = result.js_intel.recovered_source_files
+        if smaps:
+            sc = min(100, 50 + len(recovered) * 10) if recovered else 40
+            signals.append(FAIRSignal(
+                name="sourcemap_exposure",
+                score=sc,
+                weight=0.9,
+                evidence=[
+                    f"{len(smaps)} sourcemap(s) found",
+                    f"{len(recovered)} source file(s) recovered",
+                ],
+            ))
 
     return _factor_from_signals(
         signals,
@@ -374,6 +438,70 @@ def _build_vulnerability(result: DomainResult) -> FAIRFactor:
             evidence=url_rep.detections[:5] or [f"{url_rep.url} is blacklisted"],
         ))
 
+    # Weak TLS protocol or cipher suite.
+    if ssl and ssl.tls_version:
+        ver = ssl.tls_version.upper()
+        cipher_upper = ssl.cipher.upper() if ssl.cipher else ""
+        tls_score = 0
+        if "1.0" in ver:
+            tls_score = 90
+        elif "1.1" in ver:
+            tls_score = 70
+        elif cipher_upper and any(w in cipher_upper for w in _WEAK_CIPHERS):
+            tls_score = 40
+        if tls_score:
+            signals.append(FAIRSignal(
+                name="weak_tls_protocol",
+                score=tls_score,
+                weight=0.8,
+                evidence=[f"TLS version: {ssl.tls_version}", f"Cipher: {ssl.cipher}"],
+            ))
+
+    # Certificate nearing expiry (days_until_expiry=0 means not checked).
+    if ssl and ssl.grade and ssl.days_until_expiry != 0 and ssl.days_until_expiry <= 60:
+        days = ssl.days_until_expiry
+        if days < 0:
+            exp_score, exp_msg = 90, "Certificate expired"
+        elif days <= 7:
+            exp_score, exp_msg = 75, f"{days} days until expiry"
+        elif days <= 30:
+            exp_score, exp_msg = 50, f"{days} days until expiry"
+        else:
+            exp_score, exp_msg = 25, f"{days} days until expiry"
+        signals.append(FAIRSignal(
+            name="cert_expiry_risk",
+            score=exp_score,
+            weight=0.6,
+            evidence=[exp_msg],
+        ))
+
+    # Server/X-Powered-By information leakage with version numbers.
+    if headers and (headers.server or headers.powered_by):
+        parts: list[str] = []
+        has_version = False
+        if headers.server:
+            parts.append(f"Server: {headers.server}")
+            if _HAS_VERSION.search(headers.server):
+                has_version = True
+        if headers.powered_by:
+            parts.append(f"X-Powered-By: {headers.powered_by}")
+            if _HAS_VERSION.search(headers.powered_by):
+                has_version = True
+        info_score = 0
+        if has_version and len(parts) == 2:
+            info_score = 60
+        elif has_version:
+            info_score = 40
+        elif parts:
+            info_score = 20
+        if info_score:
+            signals.append(FAIRSignal(
+                name="server_info_leak",
+                score=info_score,
+                weight=0.4,
+                evidence=parts,
+            ))
+
     return _factor_from_signals(
         signals,
         notes="Higher Vulnerability means a threat engagement is more likely to succeed.",
@@ -482,6 +610,57 @@ def _build_control_strength(result: DomainResult) -> FAIRFactor:
                 evidence=asn_names or ["Unknown hosting provider"],
             ))
 
+    # DNSSEC — protects against DNS cache poisoning.
+    dns = result.passive_intel.dns if result.passive_intel else None
+    if dns and dns.dnssec is not None:
+        signals.append(FAIRSignal(
+            name="dnssec_enabled",
+            score=80 if dns.dnssec else 15,
+            weight=0.7,
+            evidence=["DNSSEC enabled" if dns.dnssec else "DNSSEC not enabled"],
+        ))
+
+    # CAA records — restrict which CAs can issue certificates.
+    if dns and not dns.error:
+        if dns.caa_records:
+            signals.append(FAIRSignal(
+                name="caa_policy",
+                score=75,
+                weight=0.5,
+                evidence=[f"{len(dns.caa_records)} CAA record(s) restrict cert issuance"],
+            ))
+        else:
+            signals.append(FAIRSignal(
+                name="caa_policy",
+                score=20,
+                weight=0.5,
+                evidence=["No CAA records — any CA can issue certificates"],
+            ))
+
+    # Domain maturity from RDAP registration date.
+    rdap = result.passive_intel.rdap if result.passive_intel else None
+    if rdap and rdap.created and not rdap.error:
+        try:
+            created = datetime.fromisoformat(rdap.created.replace("Z", "+00:00"))
+            age_days = (datetime.now(timezone.utc) - created).days
+            age_years = age_days / 365.25
+            if age_years > 5:
+                mat_score = 70
+            elif age_years > 2:
+                mat_score = 55
+            elif age_years > 1:
+                mat_score = 35
+            else:
+                mat_score = 15
+            signals.append(FAIRSignal(
+                name="domain_maturity",
+                score=mat_score,
+                weight=0.4,
+                evidence=[f"Registered {rdap.created[:10]}, ~{age_years:.1f} years old"],
+            ))
+        except (ValueError, TypeError):
+            pass
+
     return _factor_from_signals(
         signals,
         notes="Higher Control Strength means stronger observed defences (WAF, TLS, headers, cookies, email auth).",
@@ -553,6 +732,61 @@ def _build_loss_magnitude(result: DomainResult) -> FAIRFactor:
                 "— larger public footprint amplifies reputational loss"
             ],
         ))
+
+    # Breach data type sensitivity — weight by what was actually exposed.
+    if result.breaches:
+        all_types: set[str] = set()
+        for b in result.breaches:
+            all_types.update(b.data_types)
+        sensitivity_score = min(
+            100, sum(_SENSITIVE_DATA_WEIGHTS.get(t, 3) for t in all_types)
+        )
+        if sensitivity_score > 30:
+            top_sensitive = sorted(
+                all_types,
+                key=lambda t: _SENSITIVE_DATA_WEIGHTS.get(t, 3),
+                reverse=True,
+            )
+            signals.append(FAIRSignal(
+                name="breach_data_sensitivity",
+                score=sensitivity_score,
+                weight=1.2,
+                evidence=[f"Exposed: {', '.join(top_sensitive[:5])}"],
+            ))
+
+    # Source code exposure from JS sourcemaps.
+    if result.js_intel:
+        recovered = result.js_intel.recovered_source_files
+        smaps = result.js_intel.sourcemaps_found
+        if recovered:
+            signals.append(FAIRSignal(
+                name="source_code_exposure",
+                score=min(100, 60 + len(recovered) * 8),
+                weight=1.3,
+                evidence=[f"{len(recovered)} source files recoverable from {len(smaps)} sourcemap(s)"],
+            ))
+        elif smaps:
+            signals.append(FAIRSignal(
+                name="source_code_exposure",
+                score=45,
+                weight=1.3,
+                evidence=[f"{len(smaps)} sourcemap(s) accessible but no files recovered"],
+            ))
+
+    # External dependency count — supply chain risk.
+    if result.external_links:
+        ext_domains = {
+            (_urlparse(l.url).hostname or "").lower()
+            for l in result.external_links
+        }
+        ext_domains.discard("")
+        if len(ext_domains) >= 5:
+            signals.append(FAIRSignal(
+                name="external_dependency_risk",
+                score=min(100, len(ext_domains) * 3),
+                weight=0.5,
+                evidence=[f"{len(ext_domains)} unique external domains loaded"],
+            ))
 
     return _factor_from_signals(
         signals,

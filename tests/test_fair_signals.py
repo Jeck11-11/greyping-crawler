@@ -11,15 +11,19 @@ from src.app import app
 from src.fair_signals import compute_fair_signals
 from src.models import (
     BreachRecord,
+    CAARecord,
     CookieFinding,
     CTResult,
     DNSResult,
     DomainResult,
+    EmailFinding,
+    ExternalLinkFinding,
     HeaderFinding,
     IoCFinding,
     JSIntelResult,
     PassiveIntelResult,
     RDAPResult,
+    RobotsTxtResult,
     SecretFinding,
     SecurityHeadersResult,
     SensitivePathFinding,
@@ -194,8 +198,12 @@ class TestFAIRBuilder:
         tef_names = {s.name for s in signals.threat_event_frequency.signals}
         assert "attack_surface_breadth" in tef_names
         assert "public_exposure_history" in tef_names
-        # No control-strength evidence from a passive scan.
-        assert signals.control_strength.signals == []
+        # Passive scans may have DNS-derived control signals (CAA, DNSSEC)
+        # but no active controls (WAF, headers, TLS, cookies).
+        ctrl_names = {s.name for s in signals.control_strength.signals}
+        assert "waf_or_cdn_detected" not in ctrl_names
+        assert "security_headers_posture" not in ctrl_names
+        assert "tls_posture" not in ctrl_names
         assert signals.confidence == "low"
 
     def test_iocs_increase_vulnerability_and_loss(self):
@@ -289,3 +297,396 @@ class TestFAIRIntegration:
         assert r["fair_signals"] is not None
         assert r["fair_signals"]["scan_mode"] == "lighttouch"
         assert r["fair_signals"]["confidence"] == "medium"
+
+
+# ---------------------------------------------------------------------------
+# Tests for new signals (12 additions)
+# ---------------------------------------------------------------------------
+
+class TestNewTEFSignals:
+    def test_internal_network_leak(self):
+        result = DomainResult(
+            target="https://example.com",
+            js_intel=JSIntelResult(
+                target="https://example.com",
+                scripts_scanned=5,
+                internal_hosts=["staging.internal.corp", "10.0.1.5", "db.prod.local"],
+            ),
+        )
+        signals = compute_fair_signals(result, scan_mode="full")
+        names = [s.name for s in signals.threat_event_frequency.signals]
+        assert "internal_network_leak" in names
+        sig = next(s for s in signals.threat_event_frequency.signals if s.name == "internal_network_leak")
+        assert sig.score == 60  # 3 * 20
+
+    def test_internal_network_leak_absent_when_empty(self):
+        result = DomainResult(
+            target="https://example.com",
+            js_intel=JSIntelResult(target="https://example.com", scripts_scanned=5),
+        )
+        signals = compute_fair_signals(result, scan_mode="full")
+        names = [s.name for s in signals.threat_event_frequency.signals]
+        assert "internal_network_leak" not in names
+
+    def test_robots_recon_value(self):
+        result = DomainResult(
+            target="https://example.com",
+            robots_txt=RobotsTxtResult(
+                found=True,
+                disallow_rules=["/admin/", "/api/v2/", "/.git/", "/images/"],
+            ),
+        )
+        signals = compute_fair_signals(result, scan_mode="full")
+        names = [s.name for s in signals.threat_event_frequency.signals]
+        assert "robots_recon_value" in names
+        sig = next(s for s in signals.threat_event_frequency.signals if s.name == "robots_recon_value")
+        assert sig.score == 60  # 3 sensitive (/admin, /api, /.git) * 20
+
+    def test_robots_recon_ignores_generic_rules(self):
+        result = DomainResult(
+            target="https://example.com",
+            robots_txt=RobotsTxtResult(
+                found=True,
+                disallow_rules=["/images/", "/search/", "/print/"],
+            ),
+        )
+        signals = compute_fair_signals(result, scan_mode="full")
+        names = [s.name for s in signals.threat_event_frequency.signals]
+        assert "robots_recon_value" not in names
+
+    def test_sourcemap_exposure_with_recovery(self):
+        result = DomainResult(
+            target="https://example.com",
+            js_intel=JSIntelResult(
+                target="https://example.com",
+                scripts_scanned=3,
+                sourcemaps_found=["app.js.map", "vendor.js.map"],
+                recovered_source_files=["src/App.tsx", "src/api.ts", "src/auth.ts"],
+            ),
+        )
+        signals = compute_fair_signals(result, scan_mode="full")
+        names = [s.name for s in signals.threat_event_frequency.signals]
+        assert "sourcemap_exposure" in names
+        sig = next(s for s in signals.threat_event_frequency.signals if s.name == "sourcemap_exposure")
+        assert sig.score == 80  # 50 + 3 * 10
+
+    def test_sourcemap_exposure_without_recovery(self):
+        result = DomainResult(
+            target="https://example.com",
+            js_intel=JSIntelResult(
+                target="https://example.com",
+                scripts_scanned=3,
+                sourcemaps_found=["app.js.map"],
+            ),
+        )
+        signals = compute_fair_signals(result, scan_mode="full")
+        sig = next(s for s in signals.threat_event_frequency.signals if s.name == "sourcemap_exposure")
+        assert sig.score == 40
+
+
+class TestNewVulnerabilitySignals:
+    def test_weak_tls_10(self):
+        result = DomainResult(
+            target="https://example.com",
+            ssl_certificate=SSLCertResult(
+                is_valid=True, grade="C",
+                tls_version="TLSv1.0", cipher="AES128-SHA",
+            ),
+        )
+        signals = compute_fair_signals(result, scan_mode="full")
+        names = [s.name for s in signals.vulnerability.signals]
+        assert "weak_tls_protocol" in names
+        sig = next(s for s in signals.vulnerability.signals if s.name == "weak_tls_protocol")
+        assert sig.score == 90
+
+    def test_weak_tls_11(self):
+        result = DomainResult(
+            target="https://example.com",
+            ssl_certificate=SSLCertResult(
+                is_valid=True, grade="B",
+                tls_version="TLSv1.1", cipher="AES256-SHA256",
+            ),
+        )
+        signals = compute_fair_signals(result, scan_mode="full")
+        sig = next(s for s in signals.vulnerability.signals if s.name == "weak_tls_protocol")
+        assert sig.score == 70
+
+    def test_weak_cipher_on_tls12(self):
+        result = DomainResult(
+            target="https://example.com",
+            ssl_certificate=SSLCertResult(
+                is_valid=True, grade="B",
+                tls_version="TLSv1.2", cipher="DES-CBC3-SHA",
+            ),
+        )
+        signals = compute_fair_signals(result, scan_mode="full")
+        sig = next(s for s in signals.vulnerability.signals if s.name == "weak_tls_protocol")
+        assert sig.score == 40
+
+    def test_strong_tls_no_signal(self):
+        result = DomainResult(
+            target="https://example.com",
+            ssl_certificate=SSLCertResult(
+                is_valid=True, grade="A",
+                tls_version="TLSv1.3", cipher="TLS_AES_256_GCM_SHA384",
+            ),
+        )
+        signals = compute_fair_signals(result, scan_mode="full")
+        names = [s.name for s in signals.vulnerability.signals]
+        assert "weak_tls_protocol" not in names
+
+    def test_cert_expiry_imminent(self):
+        result = DomainResult(
+            target="https://example.com",
+            ssl_certificate=SSLCertResult(
+                is_valid=True, grade="A", days_until_expiry=5,
+            ),
+        )
+        signals = compute_fair_signals(result, scan_mode="full")
+        sig = next(s for s in signals.vulnerability.signals if s.name == "cert_expiry_risk")
+        assert sig.score == 75
+
+    def test_cert_expiry_expired(self):
+        result = DomainResult(
+            target="https://example.com",
+            ssl_certificate=SSLCertResult(
+                is_valid=False, grade="F", days_until_expiry=-10,
+            ),
+        )
+        signals = compute_fair_signals(result, scan_mode="full")
+        sig = next(s for s in signals.vulnerability.signals if s.name == "cert_expiry_risk")
+        assert sig.score == 90
+
+    def test_cert_expiry_not_checked(self):
+        result = DomainResult(
+            target="https://example.com",
+            ssl_certificate=SSLCertResult(is_valid=True, grade="A", days_until_expiry=0),
+        )
+        signals = compute_fair_signals(result, scan_mode="full")
+        names = [s.name for s in signals.vulnerability.signals]
+        assert "cert_expiry_risk" not in names
+
+    def test_server_info_leak_with_version(self):
+        result = DomainResult(
+            target="https://example.com",
+            security_headers=SecurityHeadersResult(
+                grade="C", score=40,
+                server="Apache/2.4.49",
+                powered_by="PHP/7.4.3",
+            ),
+        )
+        signals = compute_fair_signals(result, scan_mode="full")
+        sig = next(s for s in signals.vulnerability.signals if s.name == "server_info_leak")
+        assert sig.score == 60  # both with versions
+
+    def test_server_info_leak_single_version(self):
+        result = DomainResult(
+            target="https://example.com",
+            security_headers=SecurityHeadersResult(
+                grade="B", score=70,
+                server="nginx/1.18.0",
+            ),
+        )
+        signals = compute_fair_signals(result, scan_mode="full")
+        sig = next(s for s in signals.vulnerability.signals if s.name == "server_info_leak")
+        assert sig.score == 40
+
+    def test_server_info_leak_no_version(self):
+        result = DomainResult(
+            target="https://example.com",
+            security_headers=SecurityHeadersResult(
+                grade="B", score=70,
+                server="nginx",
+            ),
+        )
+        signals = compute_fair_signals(result, scan_mode="full")
+        sig = next(s for s in signals.vulnerability.signals if s.name == "server_info_leak")
+        assert sig.score == 20
+
+
+class TestNewControlStrengthSignals:
+    def test_dnssec_enabled(self):
+        result = DomainResult(
+            target="https://example.com",
+            passive_intel=PassiveIntelResult(
+                dns=DNSResult(domain="example.com", dnssec=True),
+            ),
+        )
+        signals = compute_fair_signals(result, scan_mode="full")
+        sig = next(s for s in signals.control_strength.signals if s.name == "dnssec_enabled")
+        assert sig.score == 80
+
+    def test_dnssec_disabled(self):
+        result = DomainResult(
+            target="https://example.com",
+            passive_intel=PassiveIntelResult(
+                dns=DNSResult(domain="example.com", dnssec=False),
+            ),
+        )
+        signals = compute_fair_signals(result, scan_mode="full")
+        sig = next(s for s in signals.control_strength.signals if s.name == "dnssec_enabled")
+        assert sig.score == 15
+
+    def test_dnssec_not_checked(self):
+        result = DomainResult(
+            target="https://example.com",
+            passive_intel=PassiveIntelResult(
+                dns=DNSResult(domain="example.com", dnssec=None),
+            ),
+        )
+        signals = compute_fair_signals(result, scan_mode="full")
+        names = [s.name for s in signals.control_strength.signals]
+        assert "dnssec_enabled" not in names
+
+    def test_caa_present(self):
+        result = DomainResult(
+            target="https://example.com",
+            passive_intel=PassiveIntelResult(
+                dns=DNSResult(
+                    domain="example.com",
+                    caa_records=[
+                        CAARecord(flags=0, tag="issue", value="letsencrypt.org"),
+                    ],
+                ),
+            ),
+        )
+        signals = compute_fair_signals(result, scan_mode="full")
+        sig = next(s for s in signals.control_strength.signals if s.name == "caa_policy")
+        assert sig.score == 75
+
+    def test_caa_absent(self):
+        result = DomainResult(
+            target="https://example.com",
+            passive_intel=PassiveIntelResult(
+                dns=DNSResult(domain="example.com"),
+            ),
+        )
+        signals = compute_fair_signals(result, scan_mode="full")
+        sig = next(s for s in signals.control_strength.signals if s.name == "caa_policy")
+        assert sig.score == 20
+
+    def test_domain_maturity_old(self):
+        result = DomainResult(
+            target="https://example.com",
+            passive_intel=PassiveIntelResult(
+                rdap=RDAPResult(domain="example.com", created="2010-01-15T00:00:00Z"),
+            ),
+        )
+        signals = compute_fair_signals(result, scan_mode="full")
+        sig = next(s for s in signals.control_strength.signals if s.name == "domain_maturity")
+        assert sig.score == 70
+
+    def test_domain_maturity_new(self):
+        result = DomainResult(
+            target="https://example.com",
+            passive_intel=PassiveIntelResult(
+                rdap=RDAPResult(domain="example.com", created="2026-02-01T00:00:00Z"),
+            ),
+        )
+        signals = compute_fair_signals(result, scan_mode="full")
+        sig = next(s for s in signals.control_strength.signals if s.name == "domain_maturity")
+        assert sig.score == 15
+
+    def test_domain_maturity_skipped_without_rdap(self):
+        result = DomainResult(target="https://example.com")
+        signals = compute_fair_signals(result, scan_mode="full")
+        names = [s.name for s in signals.control_strength.signals]
+        assert "domain_maturity" not in names
+
+
+class TestNewLossMagnitudeSignals:
+    def test_breach_data_sensitivity_high(self):
+        result = DomainResult(
+            target="https://example.com",
+            breaches=[
+                BreachRecord(
+                    source="HIBP", breach_name="BigBreach",
+                    data_types=["Passwords", "Credit cards", "Email addresses"],
+                ),
+            ],
+        )
+        signals = compute_fair_signals(result, scan_mode="full")
+        names = [s.name for s in signals.loss_magnitude.signals]
+        assert "breach_data_sensitivity" in names
+        sig = next(s for s in signals.loss_magnitude.signals if s.name == "breach_data_sensitivity")
+        assert sig.score >= 50  # Passwords(25) + Credit cards(25) + Email(3) = 53
+
+    def test_breach_data_sensitivity_low_only(self):
+        result = DomainResult(
+            target="https://example.com",
+            breaches=[
+                BreachRecord(
+                    source="HIBP", breach_name="MinorBreach",
+                    data_types=["Email addresses", "Usernames"],
+                ),
+            ],
+        )
+        signals = compute_fair_signals(result, scan_mode="full")
+        names = [s.name for s in signals.loss_magnitude.signals]
+        assert "breach_data_sensitivity" not in names  # score=6, below threshold of 30
+
+    def test_source_code_exposure_with_recovery(self):
+        result = DomainResult(
+            target="https://example.com",
+            js_intel=JSIntelResult(
+                target="https://example.com",
+                scripts_scanned=5,
+                sourcemaps_found=["app.js.map"],
+                recovered_source_files=["App.tsx", "api.ts", "auth.ts", "utils.ts", "config.ts"],
+            ),
+        )
+        signals = compute_fair_signals(result, scan_mode="full")
+        sig = next(s for s in signals.loss_magnitude.signals if s.name == "source_code_exposure")
+        assert sig.score == 100  # 60 + 5*8 = 100
+
+    def test_source_code_exposure_sourcemaps_only(self):
+        result = DomainResult(
+            target="https://example.com",
+            js_intel=JSIntelResult(
+                target="https://example.com",
+                scripts_scanned=3,
+                sourcemaps_found=["app.js.map"],
+            ),
+        )
+        signals = compute_fair_signals(result, scan_mode="full")
+        sig = next(s for s in signals.loss_magnitude.signals if s.name == "source_code_exposure")
+        assert sig.score == 45
+
+    def test_source_code_exposure_absent(self):
+        result = DomainResult(
+            target="https://example.com",
+            js_intel=JSIntelResult(target="https://example.com", scripts_scanned=3),
+        )
+        signals = compute_fair_signals(result, scan_mode="full")
+        names = [s.name for s in signals.loss_magnitude.signals]
+        assert "source_code_exposure" not in names
+
+    def test_external_dependency_risk(self):
+        result = DomainResult(
+            target="https://example.com",
+            external_links=[
+                ExternalLinkFinding(url="https://cdn.jquery.com/lib.js"),
+                ExternalLinkFinding(url="https://fonts.googleapis.com/css"),
+                ExternalLinkFinding(url="https://analytics.google.com/g.js"),
+                ExternalLinkFinding(url="https://connect.facebook.net/sdk.js"),
+                ExternalLinkFinding(url="https://cdn.shopify.com/s/files/script.js"),
+                ExternalLinkFinding(url="https://maps.googleapis.com/api"),
+            ],
+        )
+        signals = compute_fair_signals(result, scan_mode="full")
+        names = [s.name for s in signals.loss_magnitude.signals]
+        assert "external_dependency_risk" in names
+        sig = next(s for s in signals.loss_magnitude.signals if s.name == "external_dependency_risk")
+        assert sig.score >= 15  # 5+ unique domains * 3
+
+    def test_external_dependency_risk_few_deps(self):
+        result = DomainResult(
+            target="https://example.com",
+            external_links=[
+                ExternalLinkFinding(url="https://cdn.jquery.com/lib.js"),
+                ExternalLinkFinding(url="https://fonts.googleapis.com/css"),
+            ],
+        )
+        signals = compute_fair_signals(result, scan_mode="full")
+        names = [s.name for s in signals.loss_magnitude.signals]
+        assert "external_dependency_risk" not in names  # < 5 unique domains
