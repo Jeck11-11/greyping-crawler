@@ -105,6 +105,12 @@ _SKIP_NAMES = frozenset({
     "nested_sitemaps",
     "status",
     "pages",
+    # Port scan — empty means no open ports / no banner
+    "open_ports",
+    "banner",
+    # Screenshots — empty means none taken / no base64 data
+    "screenshots",
+    "image_base64",
 })
 
 

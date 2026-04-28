@@ -635,6 +635,10 @@ class PrioritizedFinding(BaseModel):
     business_impact: str = Field(default="", description="E.g. 'Data breach risk', 'Compliance gap'.")
     evidence: list[str] = Field(default_factory=list)
     recommended_action: str = Field(default="", description="One-line remediation guidance.")
+    compliance: list[str] = Field(
+        default_factory=list,
+        description="Applicable compliance framework references.",
+    )
     source_field: str = Field(default="", description="Which DomainResult field this came from.")
 
 
@@ -784,6 +788,10 @@ class EASMReport(BaseModel):
     js_intel_summary: JSIntelSummary | None = None
     cookie_summary: CookieSummary | None = None
     tech_summary: TechSummary | None = None
+    compliance_summary: dict[str, int] = Field(
+        default_factory=dict,
+        description="Count of findings per compliance framework.",
+    )
     platform_detected: str = Field(default="", description="Primary platform if any: 'Wix', 'Shopify', etc.")
 
 
@@ -904,6 +912,48 @@ class EmailValidationResult(BaseModel):
     error: str | None = None
 
 
+class OpenPort(BaseModel):
+    port: int
+    service: str = ""
+    banner: str = ""
+    is_risky: bool = False
+
+
+class PortScanResult(BaseModel):
+    target: str
+    ip: str = ""
+    open_ports: list[OpenPort] = Field(default_factory=list)
+    ports_scanned: int = 0
+    scan_duration_seconds: float = 0
+    error: str | None = None
+
+
+class ScreenshotResult(BaseModel):
+    url: str
+    image_base64: str = ""
+    width: int = 0
+    height: int = 0
+    size_bytes: int = 0
+    error: str | None = None
+
+
+class CloudAssetFinding(BaseModel):
+    bucket_name: str
+    provider: str = ""
+    url: str = ""
+    status: str = ""  # "public", "exists_private"
+    evidence: list[str] = Field(default_factory=list)
+    severity: str = "critical"
+
+
+class CloudAssetResult(BaseModel):
+    domain: str
+    findings: list[CloudAssetFinding] = Field(default_factory=list)
+    buckets_checked: int = 0
+    scan_duration_seconds: float = 0
+    error: str | None = None
+
+
 class DomainSummary(BaseModel):
     """Quick-glance counts for a single target."""
 
@@ -933,6 +983,10 @@ class DomainSummary(BaseModel):
     ip_malicious: bool = Field(default=False, description="Whether the target IP is flagged as malicious.")
     url_blacklisted: bool = Field(default=False, description="Whether the target URL is blacklisted.")
     emails_validated: int = Field(default=0, description="Number of discovered emails validated.")
+    open_ports: int = 0
+    risky_ports: int = 0
+    cloud_buckets_found: int = 0
+    screenshots_taken: int = 0
 
 
 class DomainResult(BaseModel):
@@ -1048,6 +1102,9 @@ class DomainResult(BaseModel):
     email_validations: list[EmailValidationResult] = Field(
         default_factory=list, description="Deliverability validation for discovered emails.",
     )
+    port_scan: PortScanResult | None = Field(default=None, description="TCP port scan results.")
+    cloud_assets: CloudAssetResult | None = Field(default=None, description="Cloud storage bucket discovery results.")
+    screenshots: list[ScreenshotResult] = Field(default_factory=list, description="Visual proof screenshots.")
     metadata: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
 

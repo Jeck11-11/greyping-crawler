@@ -8,9 +8,13 @@ import logging
 from bs4 import BeautifulSoup
 from fastapi import APIRouter
 
+from urllib.parse import urlparse
+
 from .._http_utils import fetch_landing_page_full, validate_target
+from ..cloud_assets import discover_cloud_assets
 from ..js_miner import mine_javascript
 from ..models import (
+    CloudAssetResult,
     FaviconResult,
     JSIntelResult,
     NucleiResult,
@@ -171,6 +175,26 @@ async def recon_takeover(request: ReconRequest) -> list[SubdomainTakeoverResult]
                 enumeration=SubdomainEnumResult(domain=domain, error=str(exc)),
                 error=str(exc),
             )
+
+    results = await asyncio.gather(*(_one(t) for t in targets))
+    for r in results:
+        fill_not_found(r)
+    return results
+
+
+@router.post("/cloud-assets", response_model=list[CloudAssetResult])
+async def recon_cloud_assets(request: ReconRequest) -> list[CloudAssetResult]:
+    """Discover publicly accessible cloud storage buckets for each target."""
+    targets = [validate_target(t) for t in request.targets]
+
+    async def _one(target: str) -> CloudAssetResult:
+        hostname = urlparse(target).hostname or target
+        domain = hostname.lstrip("www.")
+        try:
+            return await discover_cloud_assets(domain)
+        except Exception as exc:
+            logger.warning("Cloud asset scan failed for %s: %s", target, exc)
+            return CloudAssetResult(domain=domain, error=str(exc))
 
     results = await asyncio.gather(*(_one(t) for t in targets))
     for r in results:

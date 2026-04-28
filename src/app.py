@@ -37,6 +37,9 @@ from .fair_signals import compute_fair_signals
 from .favicon import fetch_favicon
 from .nuclei_client import run_nuclei_scan
 from .subdomain_takeover import scan_subdomain_takeover
+from .cloud_assets import discover_cloud_assets
+from .port_scanner import scan_ports
+from .screenshot import take_screenshot
 from .c99_client import check_ip_reputation, check_url_reputation, validate_email
 from .postprocess import fill_not_found
 from .middleware import APIKeyMiddleware, RateLimitMiddleware
@@ -44,6 +47,7 @@ from .js_miner import mine_javascript
 from .extractors import extract_contacts, extract_links, extract_page_metadata
 from .ioc_scanner import scan_ioc
 from .models import (
+    CloudAssetResult,
     ContactInfo,
     CTResult,
     DNSResult,
@@ -61,11 +65,13 @@ from .models import (
     PageResult,
     PassiveIntelResult,
     PhoneFinding,
+    PortScanResult,
     RDAPResult,
     ReconRequest,
     ScanRequest,
     ScanResponse,
     ScanSummary,
+    ScreenshotResult,
     SecurityHeadersResult,
     SocialFinding,
     SSLCertResult,
@@ -168,13 +174,17 @@ async def _scan_single_target(
     wayback_task = query_wayback(domain, timeout=request.timeout)
     nuclei_task = run_nuclei_scan([target])
     favicon_task = fetch_favicon(target, timeout=request.timeout)
+    port_scan_task = scan_ports(domain)
+    cloud_assets_task = discover_cloud_assets(domain)
 
     (crawl_result, ssl_result, landing_result, paths_result,
      dns_result, ct_result, rdap_result, wayback_result,
-     nuclei_result, favicon_result) = await asyncio.gather(
+     nuclei_result, favicon_result,
+     port_scan_result, cloud_assets_result) = await asyncio.gather(
         crawl_task, ssl_task, landing_task, paths_task,
         dns_task, ct_task, rdap_task, wayback_task,
         nuclei_task, favicon_task,
+        port_scan_task, cloud_assets_task,
         return_exceptions=True,
     )
 
@@ -257,6 +267,16 @@ async def _scan_single_target(
     if isinstance(favicon_result, Exception):
         logger.warning("Favicon fetch failed for %s: %s", target, favicon_result)
         favicon_result = None
+
+    # Process port scan result
+    if isinstance(port_scan_result, Exception):
+        logger.warning("Port scan failed for %s: %s", target, port_scan_result)
+        port_scan_result = PortScanResult(target=domain, error=str(port_scan_result))
+
+    # Process cloud assets result
+    if isinstance(cloud_assets_result, Exception):
+        logger.warning("Cloud asset scan failed for %s: %s", target, cloud_assets_result)
+        cloud_assets_result = CloudAssetResult(domain=domain, error=str(cloud_assets_result))
 
     # Subdomain takeover scan (uses CT-discovered subdomains)
     ct_subdomains = (
@@ -446,6 +466,34 @@ async def _scan_single_target(
         except Exception as exc:
             logger.warning("Breach check failed for %s: %s", domain, exc)
 
+    # Screenshots — admin paths and takeover pages
+    from .config import SCREENSHOT_MAX_PER_SCAN
+    _ADMIN_PATHS = frozenset({
+        "/admin", "/wp-admin", "/wp-login.php", "/administrator",
+        "/login", "/dashboard", "/phpmyadmin", "/cpanel",
+    })
+    screenshot_urls: list[str] = []
+    for p in paths_result:
+        if p.path in _ADMIN_PATHS and p.status_code == 200:
+            screenshot_urls.append(p.url or f"{target.rstrip('/')}{p.path}")
+    if takeover_result:
+        for f in takeover_result.findings:
+            if f.status == "vulnerable":
+                screenshot_urls.append(f"https://{f.subdomain}")
+    screenshot_urls = screenshot_urls[:SCREENSHOT_MAX_PER_SCAN]
+    screenshots: list[ScreenshotResult] = []
+    if screenshot_urls:
+        try:
+            ss_tasks = [take_screenshot(u) for u in screenshot_urls]
+            ss_results = await asyncio.gather(*ss_tasks, return_exceptions=True)
+            for ss in ss_results:
+                if isinstance(ss, ScreenshotResult) and not ss.error:
+                    screenshots.append(ss)
+                elif isinstance(ss, ScreenshotResult):
+                    screenshots.append(ss)
+        except Exception as exc:
+            logger.warning("Screenshots failed for %s: %s", target, exc)
+
     finished = datetime.now(timezone.utc).isoformat()
 
     cookie_issues_count = sum(1 for c in cookie_findings if c.issues)
@@ -481,6 +529,10 @@ async def _scan_single_target(
         ip_malicious=ip_rep_result.malicious if ip_rep_result else False,
         url_blacklisted=url_rep_result.blacklisted if url_rep_result else False,
         emails_validated=len(email_validations),
+        open_ports=len(port_scan_result.open_ports) if port_scan_result else 0,
+        risky_ports=sum(1 for p in (port_scan_result.open_ports if port_scan_result else []) if p.is_risky),
+        cloud_buckets_found=len(cloud_assets_result.findings) if cloud_assets_result else 0,
+        screenshots_taken=len(screenshots),
     )
 
     result = DomainResult(
@@ -515,6 +567,9 @@ async def _scan_single_target(
         ip_reputation=ip_rep_result,
         url_reputation=url_rep_result,
         email_validations=email_validations,
+        port_scan=port_scan_result,
+        cloud_assets=cloud_assets_result,
+        screenshots=screenshots,
         metadata={
             "domain": domain,
             "render_js": request.render_js,

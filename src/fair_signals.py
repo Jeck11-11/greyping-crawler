@@ -428,6 +428,21 @@ def _build_vulnerability(result: DomainResult) -> FAIRFactor:
             evidence=ip_rep.detections[:5] or [f"IP {ip_rep.ip} flagged as malicious"],
         ))
 
+    # Exposed services — risky ports open to the internet.
+    if result.port_scan and result.port_scan.open_ports:
+        risky = [p for p in result.port_scan.open_ports if p.is_risky]
+        if risky:
+            score = min(100, 50 + 10 * len(risky))
+            signals.append(FAIRSignal(
+                name="exposed_services",
+                score=score,
+                weight=1.3,
+                evidence=[
+                    f"Port {p.port}/{p.service} open" + (f" — banner: {p.banner[:60]}" if p.banner else "")
+                    for p in risky[:5]
+                ],
+            ))
+
     # URL/domain reputation — blacklisted domain.
     url_rep = result.url_reputation
     if url_rep and url_rep.blacklisted:
@@ -437,6 +452,23 @@ def _build_vulnerability(result: DomainResult) -> FAIRFactor:
             weight=1.3,
             evidence=url_rep.detections[:5] or [f"{url_rep.url} is blacklisted"],
         ))
+
+    # Exposed cloud storage buckets.
+    if result.cloud_assets and result.cloud_assets.findings:
+        public_buckets = [
+            f for f in result.cloud_assets.findings if f.status == "public"
+        ]
+        if public_buckets:
+            score = min(100, 70 + 10 * len(public_buckets))
+            signals.append(FAIRSignal(
+                name="exposed_cloud_storage",
+                score=score,
+                weight=1.4,
+                evidence=[
+                    f"{b.provider}: {b.bucket_name} ({b.status})"
+                    for b in public_buckets[:5]
+                ],
+            ))
 
     # Weak TLS protocol or cipher suite.
     if ssl and ssl.tls_version:

@@ -34,6 +34,159 @@ from .models import (
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Compliance framework mapping — finding ID → applicable references
+# ---------------------------------------------------------------------------
+# Keys are the stable ``id`` values set on ``PrioritizedFinding`` objects in
+# the classifier functions below.  Values list the relevant PCI-DSS, GDPR
+# and ISO 27001 controls.  For *dynamic* IDs (e.g. ``secret_*``,
+# ``ioc_*``, ``breach_*``), a prefix-based lookup is used at application
+# time so we don't need to enumerate every possible suffix.
+
+_COMPLIANCE_MAP: dict[str, list[str]] = {
+    # -- Security headers --------------------------------------------------
+    "missing_strict_transport_security": [
+        "PCI-DSS 4.1",
+        "ISO 27001 A.14.1.2",
+    ],
+    "missing_content_security_policy": [
+        "PCI-DSS 6.5.7",
+        "ISO 27001 A.14.1.2",
+    ],
+    "missing_x_frame_options": [
+        "PCI-DSS 6.5.7",
+        "ISO 27001 A.14.1.2",
+    ],
+    "missing_x_content_type_options": [
+        "PCI-DSS 6.5.x",
+        "ISO 27001 A.14.1.2",
+    ],
+    "missing_referrer_policy": [
+        "ISO 27001 A.14.1.2",
+    ],
+    "missing_permissions_policy": [
+        "ISO 27001 A.14.1.2",
+    ],
+    "info_leak_server": [
+        "PCI-DSS 6.5.5",
+        "ISO 27001 A.12.6.1",
+    ],
+    "info_leak_x_powered_by": [
+        "PCI-DSS 6.5.5",
+        "ISO 27001 A.12.6.1",
+    ],
+    # -- SSL / TLS ---------------------------------------------------------
+    "ssl_invalid": [
+        "PCI-DSS 4.1",
+        "ISO 27001 A.10.1.1",
+    ],
+    "ssl_expiring_soon": [
+        "PCI-DSS 4.1",
+        "ISO 27001 A.10.1.1",
+    ],
+    # -- Email security ----------------------------------------------------
+    "email_no_spf": [
+        "ISO 27001 A.13.2.1",
+    ],
+    "email_weak_spf": [
+        "ISO 27001 A.13.2.1",
+    ],
+    "email_no_dmarc": [
+        "ISO 27001 A.13.2.1",
+    ],
+    "email_dmarc_none": [
+        "ISO 27001 A.13.2.1",
+    ],
+    "email_no_dkim": [
+        "ISO 27001 A.13.2.1",
+    ],
+    # -- DNS ---------------------------------------------------------------
+    "dns_no_dnssec": [
+        "ISO 27001 A.13.1.1",
+    ],
+    "dns_no_caa": [
+        "ISO 27001 A.13.1.1",
+    ],
+    "dns_no_ipv6": [],
+    # -- Robots / Sitemap --------------------------------------------------
+    "robots_sensitive_disallow": [
+        "PCI-DSS 6.5.8",
+    ],
+    "sitemap_large_surface": [],
+    # -- JS intel ----------------------------------------------------------
+    "js_internal_hosts": [
+        "ISO 27001 A.13.1.3",
+    ],
+    "js_sourcemap_exposure": [
+        "ISO 27001 A.14.1.2",
+    ],
+    "js_sourcemap_vendor": [],
+}
+
+# Prefix-based compliance tags for dynamic finding IDs (secret_*, ioc_*,
+# cookie_*, path_*, breach_*).  Looked up when an exact match is not found.
+_COMPLIANCE_PREFIX_MAP: dict[str, list[str]] = {
+    "secret_": [
+        "PCI-DSS 3.4",
+        "PCI-DSS 6.5.x",
+        "GDPR Art.32",
+        "ISO 27001 A.10.1.1",
+    ],
+    "ioc_cryptominer": [
+        "ISO 27001 A.12.2.1",
+    ],
+    "ioc_webshell_path": [
+        "PCI-DSS 11.5",
+        "ISO 27001 A.12.2.1",
+    ],
+    "ioc_credential_harvest": [
+        "PCI-DSS 6.5.10",
+        "ISO 27001 A.12.2.1",
+    ],
+    "ioc_hidden_iframe": [
+        "ISO 27001 A.12.2.1",
+    ],
+    "ioc_obfuscated_js": [
+        "ISO 27001 A.12.2.1",
+    ],
+    "ioc_seo_spam": [
+        "ISO 27001 A.12.2.1",
+    ],
+    "ioc_defacement": [
+        "ISO 27001 A.12.2.1",
+    ],
+    "ioc_suspicious_script": [
+        "ISO 27001 A.12.2.1",
+    ],
+    "cookie_": [
+        "PCI-DSS 6.5.10",
+        "ISO 27001 A.14.1.2",
+    ],
+    "path_": [
+        "PCI-DSS 6.5.8",
+        "ISO 27001 A.9.4.1",
+    ],
+    "breach_": [
+        "PCI-DSS 12.10",
+        "GDPR Art.33",
+        "GDPR Art.34",
+    ],
+}
+
+
+def _resolve_compliance(finding_id: str) -> list[str]:
+    """Return compliance tags for a finding ID (exact match, then prefix)."""
+    exact = _COMPLIANCE_MAP.get(finding_id)
+    if exact is not None:
+        return list(exact)
+    # Try prefix-based lookup — longest prefix first to prefer specific keys
+    # (e.g. ``ioc_cryptominer`` before ``ioc_``).
+    for prefix in sorted(_COMPLIANCE_PREFIX_MAP, key=len, reverse=True):
+        if finding_id.startswith(prefix) or finding_id == prefix.rstrip("_"):
+            return list(_COMPLIANCE_PREFIX_MAP[prefix])
+    return []
+
+
+# ---------------------------------------------------------------------------
 # Platform profiles — which cookies/headers are platform-managed
 # ---------------------------------------------------------------------------
 
@@ -1181,6 +1334,18 @@ def build_easm_report(
         all_findings.extend(js_findings)
 
         sorted_findings = _sort_findings(all_findings)
+
+        # Apply compliance framework tags
+        for finding in sorted_findings:
+            finding.compliance = _resolve_compliance(finding.id)
+
+        # Build compliance summary counts
+        framework_counts: dict[str, int] = {}
+        for f in sorted_findings:
+            for tag in f.compliance:
+                framework = tag.split(" ")[0]
+                framework_counts[framework] = framework_counts.get(framework, 0) + 1
+
         tech_summary = _build_tech_summary(result, platform)
         asset_context = _infer_asset_context(result, platform, profile)
         dns_posture = _build_dns_posture(result)
@@ -1212,6 +1377,7 @@ def build_easm_report(
             js_intel_summary=js_summary,
             cookie_summary=cookie_summary if cookie_summary.total else None,
             tech_summary=tech_summary,
+            compliance_summary=framework_counts,
             platform_detected=platform,
         )
     except Exception as exc:
