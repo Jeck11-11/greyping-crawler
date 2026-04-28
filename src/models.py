@@ -243,6 +243,23 @@ class SSLCertResult(BaseModel):
     tls_version: str = Field(default="", description="Negotiated TLS version (e.g. TLSv1.3).")
     cipher: str = Field(default="", description="Negotiated cipher suite.")
 
+    host: str = Field(default="", description="Hostname that was scanned.")
+    resolved_ip: str = Field(default="", description="IP address the hostname resolved to.")
+    issued_to: str = Field(default="", description="Certificate subject Common Name.")
+    issued_o: str = Field(default="", description="Certificate subject Organization.")
+    issuer_c: str = Field(default="", description="Issuer country code.")
+    issuer_o: str = Field(default="", description="Issuer organization.")
+    issuer_ou: str = Field(default="", description="Issuer organizational unit.")
+    issuer_cn: str = Field(default="", description="Issuer common name.")
+    cert_sha1: str = Field(default="", description="SHA-1 fingerprint of the DER-encoded certificate.")
+    cert_exp: bool = Field(default=False, description="Whether the certificate has expired.")
+    validity_days: int = Field(default=0, description="Total validity period in days.")
+    hsts_header_enabled: bool = Field(default=False, description="Whether HSTS header is present.")
+    is_expired: bool = Field(default=False, description="Alias for cert_exp.")
+    is_self_signed: bool = Field(default=False, description="Whether the certificate appears self-signed.")
+    is_wildcard: bool = Field(default=False, description="Whether the certificate covers a wildcard domain.")
+    final_url: str = Field(default="", description="Final URL after any redirects.")
+
 
 class SensitivePathFinding(BaseModel):
     """An exposed sensitive path discovered on the target."""

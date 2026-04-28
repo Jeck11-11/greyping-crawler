@@ -219,6 +219,11 @@ async def _scan_single_target(
     headers_result = analyze_headers(resp_headers)
     cookie_findings = analyze_cookies(resp_cookies)
 
+    # Enrich SSL result with HSTS and final URL
+    hsts_val = resp_headers.get("strict-transport-security", "")
+    ssl_result.hsts_header_enabled = bool(hsts_val)
+    ssl_result.final_url = target
+
     # Tech fingerprint + JS bundle mining (both derive from the landing HTML).
     tech_findings: list = []
     js_intel_result = None
@@ -758,6 +763,11 @@ async def _lighttouch_single_target(target: str, timeout: int) -> DomainResult:
 
     headers_result = analyze_headers(resp_headers)
     cookie_findings = analyze_cookies(resp_cookies)
+
+    # Enrich SSL result with HSTS and final URL
+    hsts_lt = resp_headers.get("strict-transport-security", "")
+    ssl_result.hsts_header_enabled = bool(hsts_lt)
+    ssl_result.final_url = target
 
     internal_links = sorted({l.url for l in links if l.link_type == "internal" and not is_asset_url(l.url)})
     ext_seen: dict[str, ExternalLinkFinding] = {}

@@ -111,6 +111,9 @@ _SKIP_NAMES = frozenset({
     # Screenshots — empty means none taken / no base64 data
     "screenshots",
     "image_base64",
+    # SSL cert detail fields — empty means not resolved / not applicable
+    "resolved_ip",
+    "cert_sha1",
 })
 
 
