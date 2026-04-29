@@ -87,7 +87,7 @@ _SKIP_NAMES = frozenset({
     "external_dependencies",
     "key_positives",
     "key_concerns",
-    "san",
+    "cert_sans",
     "san_domains",
     "ct_subdomains",
     "ct_issuers",

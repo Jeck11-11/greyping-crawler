@@ -29,16 +29,16 @@ class TestParseCert:
     def test_valid_cert_gets_grade_a(self):
         cert = self._make_cert()
         result = _parse_cert(cert, "example.com")
-        assert result.is_valid
+        assert result.cert_valid
         assert result.grade == "A"
-        assert result.issuer == "Let's Encrypt, Let's Encrypt"
-        assert result.subject == "example.com"
-        assert len(result.san) == 2
+        assert result.issuer_o == "Let's Encrypt"
+        assert result.issued_to == "example.com"
+        assert len(result.cert_sans) == 2
 
     def test_expired_cert_flagged(self):
         cert = self._make_cert(days_valid=-10)
         result = _parse_cert(cert, "example.com")
-        assert not result.is_valid
+        assert not result.cert_valid
         assert result.grade == "F"
         assert any("EXPIRED" in i for i in result.issues)
 
@@ -59,11 +59,11 @@ class TestCheckSSL:
     @pytest.mark.asyncio
     async def test_bad_hostname_returns_error(self):
         result = await check_ssl("https://this-does-not-exist-8374.test", timeout=3)
-        assert not result.is_valid
+        assert not result.cert_valid
         assert len(result.issues) > 0
 
     @pytest.mark.asyncio
     async def test_empty_url_returns_error(self):
         result = await check_ssl("", timeout=3)
-        assert not result.is_valid
+        assert not result.cert_valid
         assert any("hostname" in i.lower() for i in result.issues)

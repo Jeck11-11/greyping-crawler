@@ -43,7 +43,7 @@ async def recon_ssl(request: ReconRequest) -> list[SSLReconResult]:
             logger.warning("SSL check failed for %s: %s", target, exc)
             return SSLReconResult(
                 target=target,
-                ssl=SSLCertResult(is_valid=False, issues=[f"Check failed: {exc}"]),
+                ssl=SSLCertResult(cert_valid=False, issues=[f"Check failed: {exc}"]),
                 error=str(exc),
             )
 

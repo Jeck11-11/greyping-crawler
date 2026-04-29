@@ -30,7 +30,7 @@ class TestLightTouchScan:
     def test_lighttouch_does_one_get_and_skips_loud_probes(
         self, mock_ssl, mock_fetch,
     ):
-        mock_ssl.return_value = SSLCertResult(is_valid=True, grade="A")
+        mock_ssl.return_value = SSLCertResult(cert_valid=True, grade="A")
         html = (
             '<html><head><title>Hello</title>'
             '<meta name="generator" content="WordPress 6.4.1">'
@@ -74,7 +74,7 @@ class TestLightTouchScan:
     @patch("src.app.fetch_landing_page_full", new_callable=AsyncMock)
     @patch("src.app.check_ssl", new_callable=AsyncMock)
     def test_lighttouch_records_error_on_fetch_failure(self, mock_ssl, mock_fetch):
-        mock_ssl.return_value = SSLCertResult(is_valid=True, grade="A")
+        mock_ssl.return_value = SSLCertResult(cert_valid=True, grade="A")
         mock_fetch.return_value = ({}, httpx.Cookies(), "")  # empty body
         resp = client.post(
             "/scan/lighttouch",

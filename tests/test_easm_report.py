@@ -238,7 +238,7 @@ class TestExecutiveSummary:
     def test_clean_scan_low_risk(self):
         result = DomainResult(
             target="https://example.com",
-            ssl_certificate=SSLCertResult(is_valid=True, grade="A"),
+            ssl_certificate=SSLCertResult(cert_valid=True, grade="A"),
         )
         report = build_easm_report(result, scan_mode="full")
         assert report.executive_summary.risk_posture == "Low"

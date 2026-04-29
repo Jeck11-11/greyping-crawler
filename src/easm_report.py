@@ -409,10 +409,10 @@ def _classify_cookie_findings(
 def _classify_ssl_findings(result: DomainResult) -> list[PrioritizedFinding]:
     findings: list[PrioritizedFinding] = []
     ssl = result.ssl_certificate
-    if not ssl or (not ssl.grade and not ssl.issues and ssl.is_valid):
+    if not ssl or (not ssl.grade and not ssl.issues and ssl.cert_valid):
         return findings
 
-    if not ssl.is_valid:
+    if not ssl.cert_valid:
         findings.append(PrioritizedFinding(
             id="ssl_invalid",
             title="Invalid SSL/TLS certificate",
@@ -427,10 +427,10 @@ def _classify_ssl_findings(result: DomainResult) -> list[PrioritizedFinding]:
             recommended_action="Renew or replace the SSL certificate immediately.",
             source_field="ssl_certificate",
         ))
-    elif ssl.days_until_expiry and 0 < ssl.days_until_expiry <= 30:
+    elif ssl.days_left and 0 < ssl.days_left <= 30:
         findings.append(PrioritizedFinding(
             id="ssl_expiring_soon",
-            title=f"SSL certificate expires in {ssl.days_until_expiry} days",
+            title=f"SSL certificate expires in {ssl.days_left} days",
             category="ssl",
             severity="high",
             classification=FindingClassification.confirmed_issue,
@@ -438,7 +438,7 @@ def _classify_ssl_findings(result: DomainResult) -> list[PrioritizedFinding]:
             owner=FindingOwner.customer,
             why_it_matters="An expired certificate will trigger browser warnings and break HTTPS.",
             business_impact="Imminent service disruption",
-            evidence=[f"Expires: {ssl.not_after}, {ssl.days_until_expiry} days remaining"],
+            evidence=[f"Expires: {ssl.valid_till}, {ssl.days_left} days remaining"],
             recommended_action="Renew the certificate before expiry. Enable auto-renewal if possible.",
             source_field="ssl_certificate",
         ))
@@ -1059,18 +1059,18 @@ def _build_certificate_summary(result: DomainResult) -> CertificateSummary | Non
     ssl = result.ssl_certificate
     passive = result.passive_intel
 
-    has_ssl = ssl and (ssl.grade or ssl.issuer or ssl.issues)
+    has_ssl = ssl and (ssl.grade or ssl.issuer_o or ssl.issues)
     has_ct = passive and passive.ct and not passive.ct.error
     if not has_ssl and not has_ct:
         return None
 
     summary = CertificateSummary()
     if ssl:
-        summary.current_valid = ssl.is_valid
-        summary.current_issuer = ssl.issuer
+        summary.current_valid = ssl.cert_valid
+        summary.current_issuer = ssl.issuer_o
         summary.current_grade = ssl.grade
-        summary.days_until_expiry = ssl.days_until_expiry
-        summary.san_domains = ssl.san[:20]
+        summary.days_left = ssl.days_left
+        summary.san_domains = ssl.cert_sans[:20]
 
     if has_ct:
         summary.ct_subdomains = passive.ct.subdomains[:30]
@@ -1284,7 +1284,7 @@ def _build_executive_summary(
     if not result.breaches:
         positives.append("No breach history found")
     ssl = result.ssl_certificate
-    if ssl and ssl.is_valid and ssl.grade in ("A+", "A", "A-", "B+", "B"):
+    if ssl and ssl.cert_valid and ssl.grade in ("A+", "A", "A-", "B+", "B"):
         positives.append(f"SSL/TLS certificate is valid (grade {ssl.grade})")
     es = result.passive_intel.email_security if result.passive_intel else None
     if es and not es.error and es.dmarc.exists and es.dmarc.policy in ("reject", "quarantine"):

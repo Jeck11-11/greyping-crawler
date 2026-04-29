@@ -15,7 +15,7 @@ client = TestClient(app)
 class TestReconSSL:
     @patch("src.routers.network.check_ssl", new_callable=AsyncMock)
     def test_ssl_returns_per_target_grade(self, mock_ssl):
-        mock_ssl.return_value = SSLCertResult(is_valid=True, grade="A")
+        mock_ssl.return_value = SSLCertResult(cert_valid=True, grade="A")
         resp = client.post(
             "/recon/ssl", json={"targets": ["https://example.com"]},
         )

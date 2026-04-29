@@ -42,7 +42,7 @@ async def check_ssl(target_url: str, timeout: int = SSL_TIMEOUT) -> SSLCertResul
     port = parsed.port or 443
 
     if not hostname:
-        return SSLCertResult(is_valid=False, issues=["Could not parse hostname from URL."])
+        return SSLCertResult(cert_valid=False, issues=["Could not parse hostname from URL."])
 
     try:
         cert_dict, cert_der, tls_version, cipher_name, resolved_ip = await asyncio.to_thread(
@@ -50,7 +50,7 @@ async def check_ssl(target_url: str, timeout: int = SSL_TIMEOUT) -> SSLCertResul
         )
     except Exception as exc:
         return SSLCertResult(
-            is_valid=False, host=hostname,
+            cert_valid=False, host=hostname,
             issues=[f"TLS connection failed: {exc}"],
         )
 
@@ -146,42 +146,42 @@ def _parse_cert(
     # Dates
     not_before_raw = cert.get("notBefore", "")
     not_after_raw = cert.get("notAfter", "")
-    not_before = ""
-    not_after = ""
-    days_until_expiry = 0
+    valid_from = ""
+    valid_till = ""
+    days_left = 0
     validity_days = 0
     is_expired = False
 
     try:
         nb = datetime.strptime(not_before_raw, "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
         na = datetime.strptime(not_after_raw, "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
-        not_before = nb.isoformat()
-        not_after = na.isoformat()
+        valid_from = nb.isoformat()
+        valid_till = na.isoformat()
         now = datetime.now(timezone.utc)
-        days_until_expiry = (na - now).days
+        days_left = (na - now).days
         validity_days = (na - nb).days
 
         if na < now:
             is_expired = True
             issues.append(f"Certificate EXPIRED on {not_after_raw}.")
-        elif days_until_expiry <= 30:
-            issues.append(f"Certificate expiring soon: {days_until_expiry} days remaining.")
+        elif days_left <= 30:
+            issues.append(f"Certificate expiring soon: {days_left} days remaining.")
     except (ValueError, TypeError):
         issues.append("Could not parse certificate validity dates.")
 
     # SANs
-    san: list[str] = []
+    cert_sans: list[str] = []
     for typ, value in cert.get("subjectAltName", ()):
         if typ == "DNS":
-            san.append(value)
+            cert_sans.append(value)
 
-    is_wildcard = any(s.startswith("*.") for s in san) or (issued_to and issued_to.startswith("*."))
+    is_wildcard = any(s.startswith("*.") for s in cert_sans) or (issued_to and issued_to.startswith("*."))
 
     # Serial
-    serial = cert.get("serialNumber", "")
+    cert_sn = cert.get("serialNumber", "")
 
     # Version
-    version = cert.get("version", 0)
+    cert_ver = cert.get("version", 0)
 
     # SHA-1 fingerprint
     cert_sha1 = ""
@@ -190,12 +190,12 @@ def _parse_cert(
         cert_sha1 = ":".join(cert_sha1[i:i+2] for i in range(0, len(cert_sha1), 2))
 
     # Signature algorithm (from DER via cryptography lib, optional)
-    sig_alg = ""
+    cert_alg = ""
     if cert_der:
         try:
             from cryptography import x509
             parsed_cert = x509.load_der_x509_certificate(cert_der)
-            sig_alg = parsed_cert.signature_algorithm_oid._name
+            cert_alg = parsed_cert.signature_algorithm_oid._name
         except BaseException:
             pass
 
@@ -211,19 +211,18 @@ def _parse_cert(
                 issues.append(f"Weak cipher detected: {cipher}.")
                 break
 
-    is_valid = len(issues) == 0 or all("expiring soon" in i.lower() for i in issues)
+    cert_valid = len(issues) == 0 or all("expiring soon" in i.lower() for i in issues)
 
     return SSLCertResult(
-        is_valid=is_valid,
-        issuer=issuer,
-        subject=subject,
-        not_before=not_before,
-        not_after=not_after,
-        days_until_expiry=days_until_expiry,
-        version=version,
-        serial_number=serial,
-        signature_algorithm=sig_alg,
-        san=san,
+        cert_valid=cert_valid,
+        valid_from=valid_from,
+        valid_till=valid_till,
+        days_left=days_left,
+        valid_days_to_expire=days_left,
+        cert_ver=cert_ver,
+        cert_sn=cert_sn,
+        cert_alg=cert_alg,
+        cert_sans=cert_sans,
         issues=issues,
         grade=_grade_cert(issues),
         tls_version=tls_version,
@@ -239,7 +238,6 @@ def _parse_cert(
         cert_sha1=cert_sha1,
         cert_exp=is_expired,
         validity_days=validity_days,
-        is_expired=is_expired,
         is_self_signed=is_self_signed,
         is_wildcard=is_wildcard,
     )

@@ -207,7 +207,7 @@ async def _scan_single_target(
     # Process SSL result
     if isinstance(ssl_result, Exception):
         logger.warning("SSL check failed for %s: %s", target, ssl_result)
-        ssl_result = SSLCertResult(is_valid=False, issues=[f"Check failed: {ssl_result}"])
+        ssl_result = SSLCertResult(cert_valid=False, issues=[f"Check failed: {ssl_result}"])
 
     # Process headers + cookies + HTML body
     if isinstance(landing_result, Exception):
@@ -693,7 +693,7 @@ async def _lighttouch_single_target(target: str, timeout: int) -> DomainResult:
 
     if isinstance(ssl_result, Exception):
         logger.warning("SSL check failed for %s: %s", target, ssl_result)
-        ssl_result = SSLCertResult(is_valid=False, issues=[f"Check failed: {ssl_result}"])
+        ssl_result = SSLCertResult(cert_valid=False, issues=[f"Check failed: {ssl_result}"])
 
     def _pr(x, kind):
         if isinstance(x, Exception):

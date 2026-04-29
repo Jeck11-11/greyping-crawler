@@ -106,7 +106,7 @@ class TestFAIRBuilder:
                 ),
             ],
             ssl_certificate=SSLCertResult(
-                is_valid=False, grade="F", issues=["self-signed", "expired"],
+                cert_valid=False, grade="F", issues=["self-signed", "expired"],
             ),
             security_headers=SecurityHeadersResult(
                 grade="F", score=10,
@@ -148,7 +148,7 @@ class TestFAIRBuilder:
     def test_strong_controls_attenuate_risk(self):
         clean = DomainResult(
             target="https://clean.example.com",
-            ssl_certificate=SSLCertResult(is_valid=True, grade="A"),
+            ssl_certificate=SSLCertResult(cert_valid=True, grade="A"),
             security_headers=SecurityHeadersResult(grade="A", score=95),
             cookies=[
                 CookieFinding(
@@ -280,7 +280,7 @@ class TestFAIRIntegration:
     def test_lighttouch_scan_emits_fair_signals_with_medium_confidence(
         self, mock_ssl, mock_fetch,
     ):
-        mock_ssl.return_value = SSLCertResult(is_valid=True, grade="A")
+        mock_ssl.return_value = SSLCertResult(cert_valid=True, grade="A")
         html = (
             "<html><head><title>Hello</title></head>"
             "<body>hi@example.com</body></html>"
@@ -389,7 +389,7 @@ class TestNewVulnerabilitySignals:
         result = DomainResult(
             target="https://example.com",
             ssl_certificate=SSLCertResult(
-                is_valid=True, grade="C",
+                cert_valid=True, grade="C",
                 tls_version="TLSv1.0", cipher="AES128-SHA",
             ),
         )
@@ -403,7 +403,7 @@ class TestNewVulnerabilitySignals:
         result = DomainResult(
             target="https://example.com",
             ssl_certificate=SSLCertResult(
-                is_valid=True, grade="B",
+                cert_valid=True, grade="B",
                 tls_version="TLSv1.1", cipher="AES256-SHA256",
             ),
         )
@@ -415,7 +415,7 @@ class TestNewVulnerabilitySignals:
         result = DomainResult(
             target="https://example.com",
             ssl_certificate=SSLCertResult(
-                is_valid=True, grade="B",
+                cert_valid=True, grade="B",
                 tls_version="TLSv1.2", cipher="DES-CBC3-SHA",
             ),
         )
@@ -427,7 +427,7 @@ class TestNewVulnerabilitySignals:
         result = DomainResult(
             target="https://example.com",
             ssl_certificate=SSLCertResult(
-                is_valid=True, grade="A",
+                cert_valid=True, grade="A",
                 tls_version="TLSv1.3", cipher="TLS_AES_256_GCM_SHA384",
             ),
         )
@@ -439,7 +439,7 @@ class TestNewVulnerabilitySignals:
         result = DomainResult(
             target="https://example.com",
             ssl_certificate=SSLCertResult(
-                is_valid=True, grade="A", days_until_expiry=5,
+                cert_valid=True, grade="A", days_left=5,
             ),
         )
         signals = compute_fair_signals(result, scan_mode="full")
@@ -450,7 +450,7 @@ class TestNewVulnerabilitySignals:
         result = DomainResult(
             target="https://example.com",
             ssl_certificate=SSLCertResult(
-                is_valid=False, grade="F", days_until_expiry=-10,
+                cert_valid=False, grade="F", days_left=-10,
             ),
         )
         signals = compute_fair_signals(result, scan_mode="full")
@@ -460,7 +460,7 @@ class TestNewVulnerabilitySignals:
     def test_cert_expiry_not_checked(self):
         result = DomainResult(
             target="https://example.com",
-            ssl_certificate=SSLCertResult(is_valid=True, grade="A", days_until_expiry=0),
+            ssl_certificate=SSLCertResult(cert_valid=True, grade="A", days_left=0),
         )
         signals = compute_fair_signals(result, scan_mode="full")
         names = [s.name for s in signals.vulnerability.signals]

@@ -307,12 +307,12 @@ def _build_vulnerability(result: DomainResult) -> FAIRFactor:
 
     # SSL issues. Only emit if check_ssl actually ran (grade set) OR
     # there are concrete issues on record — the default SSLCertResult has
-    # is_valid=True and an empty grade, which shouldn't register as
+    # cert_valid=True and an empty grade, which shouldn't register as
     # "TLS weakness".
     ssl = result.ssl_certificate
-    if ssl and (ssl.issues or (ssl.grade and not ssl.is_valid)):
+    if ssl and (ssl.issues or (ssl.grade and not ssl.cert_valid)):
         inv = 100 - _grade_score(ssl.grade)
-        if not ssl.is_valid:
+        if not ssl.cert_valid:
             inv = max(inv, 80)
         signals.append(FAIRSignal(
             name="tls_weaknesses",
@@ -489,9 +489,9 @@ def _build_vulnerability(result: DomainResult) -> FAIRFactor:
                 evidence=[f"TLS version: {ssl.tls_version}", f"Cipher: {ssl.cipher}"],
             ))
 
-    # Certificate nearing expiry (days_until_expiry=0 means not checked).
-    if ssl and ssl.grade and ssl.days_until_expiry != 0 and ssl.days_until_expiry <= 60:
-        days = ssl.days_until_expiry
+    # Certificate nearing expiry (days_left=0 means not checked).
+    if ssl and ssl.grade and ssl.days_left != 0 and ssl.days_left <= 60:
+        days = ssl.days_left
         if days < 0:
             exp_score, exp_msg = 90, "Certificate expired"
         elif days <= 7:
@@ -574,18 +574,18 @@ def _build_control_strength(result: DomainResult) -> FAIRFactor:
         ))
 
     # TLS posture — only when check_ssl has produced a grade. The default
-    # SSLCertResult has is_valid=True and no grade, which shouldn't count
+    # SSLCertResult has cert_valid=True and no grade, which shouldn't count
     # as positive evidence of a defence.
     ssl = result.ssl_certificate
     if ssl and ssl.grade:
         score = _grade_score(ssl.grade)
-        if not ssl.is_valid:
+        if not ssl.cert_valid:
             score = min(score, 20)
         signals.append(FAIRSignal(
             name="tls_posture",
             score=score,
             weight=1.1,
-            evidence=[f"grade={ssl.grade}, valid={ssl.is_valid}"],
+            evidence=[f"grade={ssl.grade}, valid={ssl.cert_valid}"],
         ))
 
     # Cookie hardening — ratio of cookies that are clean.

@@ -114,7 +114,7 @@ class TestComplianceInReport:
                     severity="critical",
                 ),
             ],
-            ssl_certificate=SSLCertResult(is_valid=False, issues=["expired"]),
+            ssl_certificate=SSLCertResult(cert_valid=False, issues=["expired"]),
         )
         report = build_easm_report(result, scan_mode="full")
 
@@ -163,7 +163,7 @@ class TestComplianceInReport:
         """A clean scan produces an empty compliance_summary."""
         result = DomainResult(
             target="https://example.com",
-            ssl_certificate=SSLCertResult(is_valid=True, grade="A"),
+            ssl_certificate=SSLCertResult(cert_valid=True, grade="A"),
         )
         report = build_easm_report(result, scan_mode="full")
         assert report.compliance_summary == {}

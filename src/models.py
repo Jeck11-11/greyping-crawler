@@ -228,37 +228,34 @@ class CookieFinding(BaseModel):
 class SSLCertResult(BaseModel):
     """TLS certificate details and issues."""
 
-    is_valid: bool = True
-    issuer: str = ""
-    subject: str = ""
-    not_before: str = ""
-    not_after: str = ""
-    days_until_expiry: int = 0
-    version: int = 0
-    serial_number: str = ""
-    signature_algorithm: str = ""
-    san: list[str] = Field(default_factory=list, description="Subject Alternative Names.")
+    host: str = ""
+    resolved_ip: str = ""
+    issued_to: str = ""
+    issued_o: str = ""
+    issuer_c: str = ""
+    issuer_o: str = ""
+    issuer_ou: str = ""
+    issuer_cn: str = ""
+    cert_sn: str = ""
+    cert_sha1: str = ""
+    cert_alg: str = ""
+    cert_ver: int = 0
+    cert_sans: list[str] = Field(default_factory=list)
+    cert_exp: bool = False
+    cert_valid: bool = True
+    valid_from: str = ""
+    valid_till: str = ""
+    validity_days: int = 0
+    days_left: int = 0
+    valid_days_to_expire: int = 0
+    hsts_header_enabled: bool = False
+    is_self_signed: bool = False
+    is_wildcard: bool = False
+    final_url: str = ""
+    grade: str = Field(default="")
+    tls_version: str = Field(default="")
+    cipher: str = Field(default="")
     issues: list[str] = Field(default_factory=list)
-    grade: str = Field(default="", description="A, B, C, D, F based on issues found.")
-    tls_version: str = Field(default="", description="Negotiated TLS version (e.g. TLSv1.3).")
-    cipher: str = Field(default="", description="Negotiated cipher suite.")
-
-    host: str = Field(default="", description="Hostname that was scanned.")
-    resolved_ip: str = Field(default="", description="IP address the hostname resolved to.")
-    issued_to: str = Field(default="", description="Certificate subject Common Name.")
-    issued_o: str = Field(default="", description="Certificate subject Organization.")
-    issuer_c: str = Field(default="", description="Issuer country code.")
-    issuer_o: str = Field(default="", description="Issuer organization.")
-    issuer_ou: str = Field(default="", description="Issuer organizational unit.")
-    issuer_cn: str = Field(default="", description="Issuer common name.")
-    cert_sha1: str = Field(default="", description="SHA-1 fingerprint of the DER-encoded certificate.")
-    cert_exp: bool = Field(default=False, description="Whether the certificate has expired.")
-    validity_days: int = Field(default=0, description="Total validity period in days.")
-    hsts_header_enabled: bool = Field(default=False, description="Whether HSTS header is present.")
-    is_expired: bool = Field(default=False, description="Alias for cert_exp.")
-    is_self_signed: bool = Field(default=False, description="Whether the certificate appears self-signed.")
-    is_wildcard: bool = Field(default=False, description="Whether the certificate covers a wildcard domain.")
-    final_url: str = Field(default="", description="Final URL after any redirects.")
 
 
 class SensitivePathFinding(BaseModel):
@@ -743,7 +740,7 @@ class CertificateSummary(BaseModel):
     current_valid: bool = True
     current_issuer: str = ""
     current_grade: str = ""
-    days_until_expiry: int = 0
+    days_left: int = 0
     san_domains: list[str] = Field(default_factory=list, description="Subject Alternative Names on current cert.")
     ct_subdomains: list[str] = Field(default_factory=list, description="Subdomains seen in CT logs.")
     ct_issuers: list[str] = Field(default_factory=list, description="Unique CA issuers from CT history.")
