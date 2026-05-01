@@ -345,8 +345,8 @@ def _build_vulnerability(result: DomainResult) -> FAIRFactor:
 
     # Email authentication gaps — missing SPF/DMARC is a phishing vector.
     email_sec = (
-        result.passive_intel.email_security
-        if result.passive_intel else None
+        result.dns.email_security
+        if result.dns else None
     )
     if email_sec and not email_sec.error:
         issues: list[str] = []
@@ -601,8 +601,8 @@ def _build_control_strength(result: DomainResult) -> FAIRFactor:
 
     # Email authentication posture — SPF + DMARC + DKIM = strong phishing defence.
     email_sec = (
-        result.passive_intel.email_security
-        if result.passive_intel else None
+        result.dns.email_security
+        if result.dns else None
     )
     if email_sec and not email_sec.error and email_sec.grade:
         signals.append(FAIRSignal(
@@ -619,8 +619,8 @@ def _build_control_strength(result: DomainResult) -> FAIRFactor:
 
     # Hosting posture — major cloud/CDN = managed security controls in place.
     ip_enrich = (
-        result.passive_intel.ip_enrichment
-        if result.passive_intel else None
+        result.dns.ip_enrichment
+        if result.dns else None
     )
     if ip_enrich and not ip_enrich.error and ip_enrich.records:
         if ip_enrich.hosting_providers:
@@ -643,7 +643,7 @@ def _build_control_strength(result: DomainResult) -> FAIRFactor:
             ))
 
     # DNSSEC — protects against DNS cache poisoning.
-    dns = result.passive_intel.dns if result.passive_intel else None
+    dns = result.dns.records if result.dns else None
     if dns and dns.dnssec is not None:
         signals.append(FAIRSignal(
             name="dnssec_enabled",
@@ -671,6 +671,7 @@ def _build_control_strength(result: DomainResult) -> FAIRFactor:
 
     # Domain maturity from RDAP registration date.
     rdap = result.passive_intel.rdap if result.passive_intel else None
+    # rdap stays on passive_intel (not moved to dns group)
     if rdap and rdap.created and not rdap.error:
         try:
             created = datetime.fromisoformat(rdap.created.replace("Z", "+00:00"))

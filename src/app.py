@@ -48,8 +48,9 @@ from .extractors import extract_contacts, extract_links, extract_page_metadata
 from .ioc_scanner import scan_ioc
 from .models import (
     CloudAssetResult,
-    ContactInfo,
+    ContactsGroup,
     CTResult,
+    DNSGroup,
     DNSResult,
     DomainResult,
     DomainSummary,
@@ -60,22 +61,27 @@ from .models import (
     IPEnrichmentResult,
     IPReputationResult,
     JSIntelResult,
-    LinkInfo,
+    LinksGroup,
     NucleiResult,
     PageResult,
-    PassiveIntelResult,
+    PagesSummary,
+    PassiveIntelSlim,
     PhoneFinding,
     PortScanResult,
     RDAPResult,
     ReconRequest,
+    ReputationGroup,
+    RiskAssessmentGroup,
     ScanRequest,
     ScanResponse,
     ScanSummary,
     ScreenshotResult,
+    SecurityGroup,
     SecurityHeadersResult,
     SocialFinding,
     SSLCertResult,
     URLReputationResult,
+    VulnerabilitiesGroup,
     WaybackResult,
 )
 from .passive_intel import (
@@ -197,8 +203,10 @@ async def _scan_single_target(
             scan_finished_at=datetime.now(timezone.utc).isoformat(),
             error=str(crawl_result),
         )
-        failed.fair_signals = compute_fair_signals(failed, scan_mode="full")
-        failed.easm_report = build_easm_report(failed, scan_mode="full")
+        failed.risk_assessment = RiskAssessmentGroup(
+            fair_signals=compute_fair_signals(failed, scan_mode="full"),
+            easm_report=build_easm_report(failed, scan_mode="full"),
+        )
         fill_not_found(failed)
         return failed
 
@@ -345,9 +353,11 @@ async def _scan_single_target(
     except Exception as exc:
         ip_enrich = IPEnrichmentResult(domain=domain, error=str(exc))
 
-    passive = PassiveIntelResult(
-        dns=dns_result, ct=ct_result, rdap=rdap_result, wayback=wayback_result,
-        email_security=email_sec, ip_enrichment=ip_enrich, breaches=[],
+    dns_group = DNSGroup(
+        records=dns_result, email_security=email_sec, ip_enrichment=ip_enrich,
+    )
+    passive_slim = PassiveIntelSlim(
+        ct=ct_result, rdap=rdap_result, wayback=wayback_result,
     )
 
     # C99 reputation checks (IP + URL, run concurrently)
@@ -436,13 +446,6 @@ async def _scan_single_target(
             anchor_text=d["anchor_text"],
             found_on=unique_pages[:MAX_FOUND_ON],
         ))
-
-    # Flat contact list (backwards-compatible)
-    flat_contacts = ContactInfo(
-        emails=sorted(email_sources),
-        phone_numbers=sorted(phone_sources),
-        social_profiles=sorted(social_sources),
-    )
 
     # C99 email validation (up to 20 discovered emails)
     email_validations: list[EmailValidationResult] = []
@@ -540,49 +543,70 @@ async def _scan_single_target(
         screenshots_taken=len(screenshots),
     )
 
+    # Build page summary from the raw pages list
+    from urllib.parse import urlparse as _urlparse
+    _page_routes: set[str] = set()
+    _page_notable: list[str] = []
+    for _pg in pages:
+        _page_routes.add(_urlparse(_pg.url).path.rstrip("/") or "/")
+        if _pg.secrets or _pg.ioc_findings:
+            _page_notable.append(_pg.url)
+
     result = DomainResult(
         target=target,
         scan_started_at=started,
         scan_finished_at=finished,
         summary=domain_summary,
-        pages_scanned=len(pages),
-        pages=pages,
-        contacts=flat_contacts,
-        emails=email_findings,
-        phone_numbers=phone_findings,
-        social_profiles=social_findings,
-        internal_links=sorted(internal_links),
-        external_links=ext_link_findings,
-        secrets=all_secrets,
-        breaches=breaches,
-        security_headers=headers_result,
-        ssl_certificate=ssl_result,
-        cookies=cookie_findings,
-        sensitive_paths=paths_result,
-        robots_txt=robots_result,
-        sitemap=sitemap_result,
-        ioc_findings=all_iocs,
+        ssl=ssl_result,
+        dns=dns_group,
+        security=SecurityGroup(
+            headers=headers_result,
+            cookies=cookie_findings,
+            sensitive_paths=paths_result,
+            secrets=all_secrets,
+            ioc_findings=all_iocs,
+        ),
+        contacts=ContactsGroup(
+            emails=email_findings,
+            phone_numbers=phone_findings,
+            social_profiles=social_findings,
+        ),
+        links=LinksGroup(
+            internal=sorted(internal_links),
+            external=ext_link_findings,
+        ),
+        pages=PagesSummary(
+            total=len(pages),
+            notable=_page_notable[:10],
+            routes=sorted(_page_routes),
+        ),
         technologies=tech_findings,
+        breaches=breaches,
         js_intel=js_intel_result,
-        passive_intel=passive,
-        nuclei=nuclei_result,
-        cve_findings=cve_findings,
-        favicon=favicon_result,
-        subdomain_takeover=takeover_result,
-        ip_reputation=ip_rep_result,
-        url_reputation=url_rep_result,
-        email_validations=email_validations,
         port_scan=port_scan_result,
         cloud_assets=cloud_assets_result,
+        passive_intel=passive_slim,
+        vulnerabilities=VulnerabilitiesGroup(
+            nuclei=nuclei_result,
+            cve_findings=cve_findings,
+            subdomain_takeover=takeover_result,
+        ),
+        reputation=ReputationGroup(ip=ip_rep_result, url=url_rep_result),
+        email_validations=email_validations,
         screenshots=screenshots,
+        favicon=favicon_result,
+        robots_txt=robots_result,
+        sitemap=sitemap_result,
         metadata={
             "domain": domain,
             "render_js": request.render_js,
             "max_depth": request.max_depth,
         },
     )
-    result.fair_signals = compute_fair_signals(result, scan_mode="full")
-    result.easm_report = build_easm_report(result, scan_mode="full")
+    result.risk_assessment = RiskAssessmentGroup(
+        fair_signals=compute_fair_signals(result, scan_mode="full"),
+        easm_report=build_easm_report(result, scan_mode="full"),
+    )
     fill_not_found(result)
     return result
 
@@ -617,26 +641,21 @@ async def scan(request: ScanRequest) -> ScanResponse:
 
     finished = datetime.now(timezone.utc).isoformat()
 
-    total_pages = sum(r.summary.pages_scanned for r in domain_results)
-    total_secrets = sum(r.summary.secrets_found for r in domain_results)
-    total_breaches = sum(r.summary.breaches_found for r in domain_results)
-
     top_summary = ScanSummary(
         targets=len(targets),
-        pages_scanned=total_pages,
+        pages_scanned=sum(r.summary.pages_scanned for r in domain_results),
         emails_found=sum(r.summary.emails_found for r in domain_results),
         phone_numbers_found=sum(r.summary.phone_numbers_found for r in domain_results),
         social_profiles_found=sum(r.summary.social_profiles_found for r in domain_results),
         internal_links_found=sum(r.summary.internal_links_found for r in domain_results),
         external_links_found=sum(r.summary.external_links_found for r in domain_results),
-        secrets_found=total_secrets,
-        breaches_found=total_breaches,
+        secrets_found=sum(r.summary.secrets_found for r in domain_results),
+        breaches_found=sum(r.summary.breaches_found for r in domain_results),
         total_cookie_issues=sum(r.summary.cookie_issues for r in domain_results),
         total_sensitive_paths=sum(r.summary.sensitive_paths_found for r in domain_results),
         total_ioc_findings=sum(r.summary.ioc_findings for r in domain_results),
     )
 
-    # Determine overall status
     errors = [r for r in domain_results if r.error]
     if len(errors) == len(domain_results):
         status = "failed"
@@ -652,9 +671,6 @@ async def scan(request: ScanRequest) -> ScanResponse:
         finished_at=finished,
         summary=top_summary,
         total_targets=len(targets),
-        total_pages_scanned=total_pages,
-        total_secrets_found=total_secrets,
-        total_breaches_found=total_breaches,
         results=domain_results,
     )
 
@@ -725,9 +741,11 @@ async def _lighttouch_single_target(target: str, timeout: int) -> DomainResult:
     except Exception as exc:
         ip_enrich = IPEnrichmentResult(domain=domain, error=str(exc))
 
-    lt_passive = PassiveIntelResult(
-        dns=dns_result, ct=ct_result, rdap=rdap_result, wayback=wayback_result,
-        email_security=email_sec, ip_enrichment=ip_enrich, breaches=[],
+    lt_dns_group = DNSGroup(
+        records=dns_result, email_security=email_sec, ip_enrichment=ip_enrich,
+    )
+    lt_passive_slim = PassiveIntelSlim(
+        ct=ct_result, rdap=rdap_result, wayback=wayback_result,
     )
 
     if isinstance(landing_result, Exception) or not landing_result:
@@ -826,34 +844,44 @@ async def _lighttouch_single_target(target: str, timeout: int) -> DomainResult:
         js_endpoints_found=0,
     )
 
+    from urllib.parse import urlparse as _urlparse
+    _lt_routes = [_urlparse(page.url).path.rstrip("/") or "/"] if html else []
+
     result = DomainResult(
         target=target,
         scan_started_at=started,
         scan_finished_at=finished,
         summary=summary,
-        pages_scanned=1 if html else 0,
-        pages=[page] if html else [],
-        contacts=contacts,
-        emails=email_findings,
-        phone_numbers=phone_findings,
-        social_profiles=social_findings,
-        internal_links=internal_links,
-        external_links=ext_link_findings,
-        secrets=secrets,
-        breaches=[],
-        security_headers=headers_result,
-        ssl_certificate=ssl_result,
-        cookies=cookie_findings,
-        sensitive_paths=[],
-        ioc_findings=iocs,
+        ssl=ssl_result,
+        dns=lt_dns_group,
+        security=SecurityGroup(
+            headers=headers_result,
+            cookies=cookie_findings,
+            secrets=secrets,
+            ioc_findings=iocs,
+        ),
+        contacts=ContactsGroup(
+            emails=email_findings,
+            phone_numbers=phone_findings,
+            social_profiles=social_findings,
+        ),
+        links=LinksGroup(
+            internal=internal_links,
+            external=ext_link_findings,
+        ),
+        pages=PagesSummary(
+            total=1 if html else 0,
+            routes=_lt_routes,
+        ),
         technologies=tech_findings,
-        js_intel=None,
-        passive_intel=lt_passive,
+        passive_intel=lt_passive_slim,
         metadata={"domain": domain, "mode": "lighttouch"},
         error=None if html else "landing page fetch failed",
     )
-    result.fair_signals = compute_fair_signals(result, scan_mode="lighttouch")
-    result.easm_report = build_easm_report(result, scan_mode="lighttouch")
+    result.risk_assessment = RiskAssessmentGroup(
+        fair_signals=compute_fair_signals(result, scan_mode="lighttouch"),
+        easm_report=build_easm_report(result, scan_mode="lighttouch"),
+    )
     fill_not_found(result)
     return result
 
@@ -916,9 +944,6 @@ async def lighttouch_scan(request: LightTouchRequest) -> ScanResponse:
             total_ioc_findings=sum(r.summary.ioc_findings for r in domain_results),
         ),
         total_targets=len(targets),
-        total_pages_scanned=total_pages,
-        total_secrets_found=total_secrets,
-        total_breaches_found=0,
         results=domain_results,
     )
 
@@ -991,14 +1016,11 @@ async def _passive_single_target(
     except Exception as exc:
         ip_enrich = IPEnrichmentResult(domain=domain, error=str(exc))
 
-    passive = PassiveIntelResult(
-        dns=dns, ct=ct, rdap=rdap, wayback=wayback,
-        email_security=email_sec, ip_enrichment=ip_enrich, breaches=breaches,
+    p_dns_group = DNSGroup(
+        records=dns, email_security=email_sec, ip_enrichment=ip_enrich,
     )
+    p_passive_slim = PassiveIntelSlim(ct=ct, rdap=rdap, wayback=wayback)
 
-    # If every upstream source reported an error, surface that on
-    # DomainResult.error so the caller doesn't mistake an egress-blocked
-    # VPS for a blank target.
     if all(x.error for x in (dns, ct, rdap, wayback)):
         passive_error = (
             f"All passive sources failed for {domain}: "
@@ -1021,15 +1043,16 @@ async def _passive_single_target(
         scan_started_at=started,
         scan_finished_at=datetime.now(timezone.utc).isoformat(),
         summary=summary,
-        pages_scanned=0,
-        pages=[],
+        dns=p_dns_group,
         breaches=breaches,
-        passive_intel=passive,
+        passive_intel=p_passive_slim,
         metadata={"domain": domain, "mode": "passive"},
         error=passive_error,
     )
-    result.fair_signals = compute_fair_signals(result, scan_mode="passive")
-    result.easm_report = build_easm_report(result, scan_mode="passive")
+    result.risk_assessment = RiskAssessmentGroup(
+        fair_signals=compute_fair_signals(result, scan_mode="passive"),
+        easm_report=build_easm_report(result, scan_mode="passive"),
+    )
     fill_not_found(result)
     return result
 
@@ -1070,8 +1093,5 @@ async def passive_scan(request: PassiveRequest) -> ScanResponse:
             breaches_found=total_breaches,
         ),
         total_targets=len(targets),
-        total_pages_scanned=0,
-        total_secrets_found=0,
-        total_breaches_found=total_breaches,
         results=domain_results,
     )

@@ -14,21 +14,14 @@ from datetime import datetime, timezone
 
 from .models import (
     AssetContext,
-    CertificateSummary,
     CloudAsset,
-    CookieSummary,
-    DNSPostureSummary,
     DomainResult,
     EASMReport,
     ExecutiveSummary,
     FindingClassification,
     FindingOwner,
-    JSIntelSummary,
-    PageSummary,
     PrioritizedFinding,
     ReconArtifact,
-    SourcemapSummary,
-    TechSummary,
 )
 
 logger = logging.getLogger(__name__)
@@ -260,8 +253,8 @@ def _detect_primary_platform(result: DomainResult) -> tuple[str, PlatformProfile
             if pname.lower() in name.lower():
                 return pname, _PLATFORM_PROFILES[pname]
 
-    if result.passive_intel and result.passive_intel.ip_enrichment:
-        for provider in result.passive_intel.ip_enrichment.hosting_providers:
+    if result.dns and result.dns.ip_enrichment:
+        for provider in result.dns.ip_enrichment.hosting_providers:
             if provider in _PLATFORM_PROFILES:
                 return provider, _PLATFORM_PROFILES[provider]
 
@@ -356,20 +349,17 @@ def _classify_header_findings(
 
 def _classify_cookie_findings(
     result: DomainResult, platform: str, profile: PlatformProfile,
-) -> tuple[list[PrioritizedFinding], CookieSummary]:
+) -> list[PrioritizedFinding]:
     findings: list[PrioritizedFinding] = []
-    summary = CookieSummary(total=len(result.cookies))
 
     for cookie in result.cookies:
         if not cookie.issues:
             continue
-        summary.with_issues += 1
 
         is_platform = cookie.name in profile.known_cookies
         is_xsrf = cookie.name.upper().startswith("XSRF")
 
         if is_platform or is_xsrf:
-            summary.platform_standard += 1
             findings.append(PrioritizedFinding(
                 id=f"cookie_{cookie.name}",
                 title=f"Cookie '{cookie.name}' has issues",
@@ -387,8 +377,6 @@ def _classify_cookie_findings(
                 source_field="cookies",
             ))
         else:
-            summary.customer_actionable += 1
-            summary.notable.append(cookie.name)
             findings.append(PrioritizedFinding(
                 id=f"cookie_{cookie.name}",
                 title=f"Insecure cookie '{cookie.name}'",
@@ -403,7 +391,7 @@ def _classify_cookie_findings(
                 recommended_action="Set Secure, HttpOnly, and SameSite=Lax/Strict flags.",
                 source_field="cookies",
             ))
-    return findings, summary
+    return findings
 
 
 def _classify_ssl_findings(result: DomainResult) -> list[PrioritizedFinding]:
@@ -529,9 +517,9 @@ def _classify_ioc_findings(result: DomainResult) -> list[PrioritizedFinding]:
 
 def _classify_email_security(result: DomainResult) -> list[PrioritizedFinding]:
     findings: list[PrioritizedFinding] = []
-    if not result.passive_intel or not result.passive_intel.email_security:
+    if not result.dns or not result.dns.email_security:
         return findings
-    es = result.passive_intel.email_security
+    es = result.dns.email_security
     if es.error:
         return findings
 
@@ -617,9 +605,9 @@ def _classify_email_security(result: DomainResult) -> list[PrioritizedFinding]:
 
 def _classify_dns_findings(result: DomainResult) -> list[PrioritizedFinding]:
     findings: list[PrioritizedFinding] = []
-    if not result.passive_intel or not result.passive_intel.dns:
+    if not result.dns or not result.dns.records:
         return findings
-    dns = result.passive_intel.dns
+    dns = result.dns.records
     if dns.error:
         return findings
 
@@ -755,10 +743,10 @@ _VENDOR_PREFIXES = (
 )
 
 
-def _classify_js_intel(result: DomainResult) -> tuple[list[PrioritizedFinding], JSIntelSummary | None]:
+def _classify_js_intel(result: DomainResult) -> list[PrioritizedFinding]:
     findings: list[PrioritizedFinding] = []
     if not result.js_intel:
-        return findings, None
+        return findings
 
     ji = result.js_intel
     vendor_count = 0
@@ -769,15 +757,6 @@ def _classify_js_intel(result: DomainResult) -> tuple[list[PrioritizedFinding], 
         else:
             first_party_count += 1
 
-    if vendor_count and first_party_count:
-        ownership = "mixed"
-    elif first_party_count:
-        ownership = "first_party"
-    elif vendor_count:
-        ownership = "vendor"
-    else:
-        ownership = "unknown"
-
     if first_party_count > 10:
         prop_exposure = "high"
     elif first_party_count > 0:
@@ -785,29 +764,10 @@ def _classify_js_intel(result: DomainResult) -> tuple[list[PrioritizedFinding], 
     else:
         prop_exposure = "none"
 
-    sm_summary = SourcemapSummary(
-        detected=bool(ji.sourcemaps_found),
-        count=len(ji.sourcemaps_found),
-        ownership=ownership,
-        proprietary_exposure=prop_exposure,
-    )
-
-    _NOTABLE_PREFIXES = (
-        "/api", "/graphql", "/webhook", "/admin", "/health",
-        "/.well-known/", "/v1/", "/v2/", "/v3/",
-    )
-    notable = [
-        e for e in ji.api_endpoints
-        if any(e.startswith(p) for p in _NOTABLE_PREFIXES)
-    ][:10]
-
-    summary = JSIntelSummary(
-        scripts_scanned=ji.scripts_scanned,
-        api_endpoints_count=len(ji.api_endpoints),
-        internal_hosts_count=len(ji.internal_hosts),
-        sourcemaps=sm_summary,
-        notable_endpoints=notable,
-    )
+    if vendor_count and not first_party_count:
+        ownership = "vendor"
+    else:
+        ownership = ""
 
     if ji.internal_hosts:
         findings.append(PrioritizedFinding(
@@ -840,7 +800,7 @@ def _classify_js_intel(result: DomainResult) -> tuple[list[PrioritizedFinding], 
             recommended_action="Disable sourcemap generation in production builds.",
             source_field="js_intel",
         ))
-    elif sm_summary.detected and ownership == "vendor":
+    elif ji.sourcemaps_found and ownership == "vendor":
         findings.append(PrioritizedFinding(
             id="js_sourcemap_vendor",
             title="Sourcemaps detected (vendor/framework only)",
@@ -856,19 +816,7 @@ def _classify_js_intel(result: DomainResult) -> tuple[list[PrioritizedFinding], 
             source_field="js_intel",
         ))
 
-    return findings, summary
-
-
-# ---------------------------------------------------------------------------
-# Tech summary condensation
-# ---------------------------------------------------------------------------
-
-def _build_tech_summary(result: DomainResult, platform: str) -> TechSummary | None:
-    if not result.technologies:
-        return None
-    high = [t.name for t in result.technologies if t.confidence == "high"]
-    other = sum(1 for t in result.technologies if t.confidence != "high")
-    return TechSummary(platform=platform, high_confidence=high, other_count=other)
+    return findings
 
 
 # ---------------------------------------------------------------------------
@@ -917,8 +865,8 @@ def _infer_asset_context(result: DomainResult, platform: str, profile: PlatformP
     if profile.owns_infrastructure:
         hosting = "managed_platform"
         evidence.append(f"Fully managed on {platform}")
-    elif result.passive_intel and result.passive_intel.ip_enrichment:
-        providers = result.passive_intel.ip_enrichment.hosting_providers
+    elif result.dns and result.dns.ip_enrichment:
+        providers = result.dns.ip_enrichment.hosting_providers
         if providers:
             hosting = "cloud_hosted"
             evidence.append(f"Hosted on {', '.join(providers[:2])}")
@@ -947,137 +895,6 @@ def _infer_asset_context(result: DomainResult, platform: str, profile: PlatformP
         business_criticality=criticality,
         inferred_from=evidence,
     )
-
-
-# ---------------------------------------------------------------------------
-# DNS posture summary
-# ---------------------------------------------------------------------------
-
-def _build_dns_posture(result: DomainResult) -> DNSPostureSummary | None:
-    if not result.passive_intel:
-        return None
-    dns = result.passive_intel.dns
-    es = result.passive_intel.email_security
-    ip_enrich = result.passive_intel.ip_enrichment
-    if not dns and not es:
-        return None
-
-    summary = DNSPostureSummary()
-    if dns and not dns.error:
-        summary.a_records = [r.address for r in dns.a_records]
-        summary.aaaa_records = [r.address for r in dns.aaaa_records]
-        summary.a_record_count = len(dns.a_records)
-        summary.has_ipv6 = bool(dns.aaaa_records)
-        summary.nameservers = [ns.host for ns in dns.ns_records[:5]] if dns.ns_records else ["not_found"]
-        summary.cname_chain = [c.target for c in dns.cname_records]
-        summary.txt_records = [t.data for t in dns.txt_records]
-        summary.mx_hosts = [f"{mx.priority} {mx.host}" for mx in dns.mx_records]
-
-        if dns.soa_record:
-            summary.soa_primary_ns = dns.soa_record.primary_ns
-            summary.soa_admin_email = dns.soa_record.admin_email
-            summary.soa_serial = dns.soa_record.serial
-            summary.soa_refresh = dns.soa_record.refresh
-            summary.soa_retry = dns.soa_record.retry
-            summary.soa_expire = dns.soa_record.expire
-            summary.soa_minimum_ttl = dns.soa_record.minimum_ttl
-        else:
-            summary.soa_primary_ns = "not_found"
-            summary.soa_admin_email = "not_found"
-
-        if dns.srv_records:
-            summary.srv_services = sorted({r.service for r in dns.srv_records})
-        else:
-            summary.srv_services = ["not_found"]
-
-        if dns.caa_records:
-            summary.caa_records = dns.caa_records
-            summary.caa_restricted = any("issue" in c.lower() for c in dns.caa_records)
-        else:
-            summary.caa_records = ["not_found"]
-            summary.caa_restricted = False
-
-        summary.ptr_records = dns.ptr_records[:10] if dns.ptr_records else ["not_found"]
-
-        if dns.dnssec is True:
-            summary.dnssec_enabled = True
-        elif dns.dnssec is False:
-            summary.dnssec_enabled = False
-        else:
-            summary.dnssec_enabled = None
-
-    if ip_enrich and not ip_enrich.error:
-        summary.ip_asn_map = [
-            {
-                "ip": r.ip,
-                "asn": r.asn,
-                "asn_name": r.asn_name,
-                "prefix": r.prefix,
-                "country_code": r.country_code,
-            }
-            for r in ip_enrich.records
-        ]
-        summary.hosting_providers = ip_enrich.hosting_providers or ["not_found"]
-        summary.hosting_countries = ip_enrich.countries or ["not_found"]
-
-    if es and not es.error:
-        summary.email_grade = es.grade or "not_found"
-        summary.mail_providers = es.mail_providers if es.mail_providers else ["not_found"]
-
-        if not es.spf.exists:
-            summary.spf_status = "not_found"
-        elif es.spf.all_qualifier == "-all":
-            summary.spf_status = "pass"
-        elif es.spf.all_qualifier == "~all":
-            summary.spf_status = "soft_fail"
-        else:
-            summary.spf_status = "weak"
-
-        if not es.dmarc.exists:
-            summary.dmarc_status = "not_found"
-        elif es.dmarc.policy in ("reject", "quarantine"):
-            summary.dmarc_status = "enforce"
-        else:
-            summary.dmarc_status = "monitor"
-
-        summary.dkim_status = "found" if es.dkim.selectors_found else "not_found"
-    else:
-        summary.spf_status = "not_found"
-        summary.dmarc_status = "not_found"
-        summary.dkim_status = "not_found"
-        summary.email_grade = "not_found"
-        summary.mail_providers = ["not_found"]
-
-    return summary
-
-
-# ---------------------------------------------------------------------------
-# Certificate summary
-# ---------------------------------------------------------------------------
-
-def _build_certificate_summary(result: DomainResult) -> CertificateSummary | None:
-    ssl = result.ssl_certificate
-    passive = result.passive_intel
-
-    has_ssl = ssl and (ssl.grade or ssl.issuer_o or ssl.issues)
-    has_ct = passive and passive.ct and not passive.ct.error
-    if not has_ssl and not has_ct:
-        return None
-
-    summary = CertificateSummary()
-    if ssl:
-        summary.current_valid = ssl.cert_valid
-        summary.current_issuer = ssl.issuer_o
-        summary.current_grade = ssl.grade
-        summary.days_left = ssl.days_left
-        summary.san_domains = ssl.cert_sans[:20]
-
-    if has_ct:
-        summary.ct_subdomains = passive.ct.subdomains[:30]
-        summary.ct_issuers = passive.ct.issuers[:10]
-        summary.certificates_seen = passive.ct.certificates_seen
-
-    return summary
 
 
 # ---------------------------------------------------------------------------
@@ -1122,10 +939,6 @@ def _detect_cloud_assets(result: DomainResult) -> list[CloudAsset]:
     if result.js_intel:
         for ep in result.js_intel.api_endpoints:
             all_urls.append((ep, "js"))
-    for page in result.pages:
-        for link in page.links:
-            if link.link_type == "external":
-                all_urls.append((link.url, "html"))
 
     for url, source in all_urls:
         for pattern, asset_type in _CLOUD_PATTERNS:
@@ -1151,48 +964,6 @@ def _detect_cloud_assets(result: DomainResult) -> list[CloudAsset]:
             pass
 
     return assets
-
-
-# ---------------------------------------------------------------------------
-# Page summary — condense verbose page data
-# ---------------------------------------------------------------------------
-
-def _build_page_summary(result: DomainResult) -> PageSummary | None:
-    if not result.pages:
-        return None
-
-    from urllib.parse import urlparse
-    routes: set[str] = set()
-    notable: list[str] = []
-    ext_domains: dict[str, int] = {}
-
-    for page in result.pages:
-        parsed = urlparse(page.url)
-        path = parsed.path.rstrip("/") or "/"
-        routes.add(path)
-        if page.secrets or page.ioc_findings:
-            notable.append(page.url)
-
-    for link in result.external_links:
-        try:
-            host = urlparse(link.url).hostname or ""
-            host = host.lower().lstrip("www.")
-            if host:
-                ext_domains[host] = ext_domains.get(host, 0) + 1
-        except Exception:
-            pass
-
-    top_ext = sorted(ext_domains, key=ext_domains.get, reverse=True)[:10]
-
-    return PageSummary(
-        total_pages=len(result.pages),
-        unique_routes=sorted(routes),
-        notable_pages=notable[:10],
-        unique_emails=len(result.emails),
-        unique_phones=len(result.phone_numbers),
-        unique_socials=len(result.social_profiles),
-        external_dependencies=top_ext,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -1286,7 +1057,7 @@ def _build_executive_summary(
     ssl = result.ssl_certificate
     if ssl and ssl.cert_valid and ssl.grade in ("A+", "A", "A-", "B+", "B"):
         positives.append(f"SSL/TLS certificate is valid (grade {ssl.grade})")
-    es = result.passive_intel.email_security if result.passive_intel else None
+    es = result.dns.email_security if result.dns else None
     if es and not es.error and es.dmarc.exists and es.dmarc.policy in ("reject", "quarantine"):
         positives.append(f"DMARC enforcement active (p={es.dmarc.policy})")
     waf_names = [t.name for t in result.technologies if t.name in (
@@ -1320,8 +1091,7 @@ def build_easm_report(
 
         all_findings: list[PrioritizedFinding] = []
         all_findings.extend(_classify_header_findings(result, platform, profile))
-        cookie_findings, cookie_summary = _classify_cookie_findings(result, platform, profile)
-        all_findings.extend(cookie_findings)
+        all_findings.extend(_classify_cookie_findings(result, platform, profile))
         all_findings.extend(_classify_ssl_findings(result))
         all_findings.extend(_classify_secret_findings(result))
         all_findings.extend(_classify_path_findings(result))
@@ -1330,8 +1100,7 @@ def build_easm_report(
         all_findings.extend(_classify_dns_findings(result))
         all_findings.extend(_classify_breach_findings(result))
         all_findings.extend(_classify_robots_sitemap(result))
-        js_findings, js_summary = _classify_js_intel(result)
-        all_findings.extend(js_findings)
+        all_findings.extend(_classify_js_intel(result))
 
         sorted_findings = _sort_findings(all_findings)
 
@@ -1346,12 +1115,8 @@ def build_easm_report(
                 framework = tag.split(" ")[0]
                 framework_counts[framework] = framework_counts.get(framework, 0) + 1
 
-        tech_summary = _build_tech_summary(result, platform)
         asset_context = _infer_asset_context(result, platform, profile)
-        dns_posture = _build_dns_posture(result)
-        cert_summary = _build_certificate_summary(result)
         cloud_assets = _detect_cloud_assets(result)
-        page_summary = _build_page_summary(result)
         recon_artifacts = _extract_recon_artifacts(result)
         executive = _build_executive_summary(sorted_findings, result, platform, scan_mode)
 
@@ -1364,19 +1129,13 @@ def build_easm_report(
             scan_mode=scan_mode,
             executive_summary=executive,
             asset_context=asset_context,
-            dns_posture=dns_posture,
-            certificate_summary=cert_summary,
             cloud_assets=cloud_assets,
-            page_summary=page_summary,
             recon_artifacts=recon_artifacts,
             prioritized_findings=sorted_findings,
             total_findings=len(sorted_findings),
             confirmed_issues=confirmed,
             platform_behaviors=plat_beh,
             informational_count=info_ct,
-            js_intel_summary=js_summary,
-            cookie_summary=cookie_summary if cookie_summary.total else None,
-            tech_summary=tech_summary,
             compliance_summary=framework_counts,
             platform_detected=platform,
         )

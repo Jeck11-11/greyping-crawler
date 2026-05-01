@@ -9,11 +9,12 @@ from src.models import (
     CTResult,
     DKIMResult,
     DMARCResult,
+    DNSGroup,
     DNSResult,
     DomainResult,
     EmailSecurityResult,
     MXRecord,
-    PassiveIntelResult,
+    PassiveIntelSlim,
     RDAPResult,
     SPFResult,
     WaybackResult,
@@ -170,15 +171,13 @@ class TestFAIREmailSignals:
     def test_missing_email_auth_creates_vulnerability_signal(self):
         result = DomainResult(
             target="https://no-email-auth.example.com",
-            passive_intel=PassiveIntelResult(
-                email_security=EmailSecurityResult(
-                    domain="no-email-auth.example.com",
-                    spf=SPFResult(exists=False, issues=["No SPF record"]),
-                    dmarc=DMARCResult(exists=False, issues=["No DMARC record"]),
-                    dkim=DKIMResult(issues=["No DKIM selectors found"]),
-                    grade="F",
-                ),
-            ),
+            dns=DNSGroup(email_security=EmailSecurityResult(
+                domain="no-email-auth.example.com",
+                spf=SPFResult(exists=False, issues=["No SPF record"]),
+                dmarc=DMARCResult(exists=False, issues=["No DMARC record"]),
+                dkim=DKIMResult(issues=["No DKIM selectors found"]),
+                grade="F",
+            )),
         )
         signals = compute_fair_signals(result, scan_mode="passive")
         vuln_names = {s.name for s in signals.vulnerability.signals}
@@ -187,15 +186,13 @@ class TestFAIREmailSignals:
     def test_strong_email_auth_creates_control_signal(self):
         result = DomainResult(
             target="https://strong-email.example.com",
-            passive_intel=PassiveIntelResult(
-                email_security=EmailSecurityResult(
-                    domain="strong-email.example.com",
-                    spf=SPFResult(exists=True, all_qualifier="-all"),
-                    dmarc=DMARCResult(exists=True, policy="reject"),
-                    dkim=DKIMResult(selectors_found=["google"]),
-                    grade="A",
-                ),
-            ),
+            dns=DNSGroup(email_security=EmailSecurityResult(
+                domain="strong-email.example.com",
+                spf=SPFResult(exists=True, all_qualifier="-all"),
+                dmarc=DMARCResult(exists=True, policy="reject"),
+                dkim=DKIMResult(selectors_found=["google"]),
+                grade="A",
+            )),
         )
         signals = compute_fair_signals(result, scan_mode="passive")
         ctrl_names = {s.name for s in signals.control_strength.signals}
@@ -263,7 +260,7 @@ class TestEmailSecurityIntegration:
         assert resp.status_code == 200
         r = resp.json()["results"][0]
 
-        es = r["passive_intel"]["email_security"]
+        es = r["dns"]["email_security"]
         assert es is not None
         assert es["grade"] == "A"
         assert es["spf"]["exists"] is True
@@ -271,6 +268,6 @@ class TestEmailSecurityIntegration:
         assert "Google Workspace" in es["mail_providers"]
 
         # FAIR should pick up the email signals.
-        fair = r["fair_signals"]
+        fair = r["risk_assessment"]["fair_signals"]
         ctrl_names = [s["name"] for s in fair["control_strength"]["signals"]]
         assert "email_security_posture" in ctrl_names

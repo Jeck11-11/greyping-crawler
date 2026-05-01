@@ -105,6 +105,11 @@ _SKIP_NAMES = frozenset({
     "nested_sitemaps",
     "status",
     "pages",
+    # Pages summary — empty means no pages crawled
+    "routes",
+    # Links group — empty means none found
+    "internal",
+    "external",
     # Port scan — empty means no open ports / no banner
     "open_ports",
     "banner",

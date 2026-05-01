@@ -424,6 +424,7 @@ class TestFAIRIntegration:
             SubdomainEnumResult,
             SubdomainTakeoverFinding,
             SubdomainTakeoverResult,
+            VulnerabilitiesGroup,
         )
         from src.fair_signals import compute_fair_signals
 
@@ -446,7 +447,7 @@ class TestFAIRIntegration:
         result = DomainResult(
             target="https://example.com",
             summary=DomainSummary(),
-            subdomain_takeover=takeover,
+            vulnerabilities=VulnerabilitiesGroup(subdomain_takeover=takeover),
         )
         signals = compute_fair_signals(result, scan_mode="full")
         vuln_signals = signals.vulnerability.signals
@@ -462,6 +463,7 @@ class TestFAIRIntegration:
             DomainSummary,
             SubdomainEnumResult,
             SubdomainTakeoverResult,
+            VulnerabilitiesGroup,
         )
         from src.fair_signals import compute_fair_signals
 
@@ -474,7 +476,7 @@ class TestFAIRIntegration:
         result = DomainResult(
             target="https://example.com",
             summary=DomainSummary(),
-            subdomain_takeover=takeover,
+            vulnerabilities=VulnerabilitiesGroup(subdomain_takeover=takeover),
         )
         signals = compute_fair_signals(result, scan_mode="full")
         names = [s.name for s in signals.vulnerability.signals]
@@ -487,6 +489,7 @@ class TestFAIRIntegration:
             SubdomainEnumResult,
             SubdomainTakeoverFinding,
             SubdomainTakeoverResult,
+            VulnerabilitiesGroup,
         )
         from src.fair_signals import compute_fair_signals
 
@@ -506,7 +509,7 @@ class TestFAIRIntegration:
         result = DomainResult(
             target="https://example.com",
             summary=DomainSummary(),
-            subdomain_takeover=takeover,
+            vulnerabilities=VulnerabilitiesGroup(subdomain_takeover=takeover),
         )
         signals = compute_fair_signals(result, scan_mode="full")
         takeover_sig = next(

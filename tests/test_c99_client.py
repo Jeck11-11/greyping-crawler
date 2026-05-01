@@ -231,14 +231,16 @@ class TestValidateEmail:
 
 class TestFAIRReputation:
     def test_malicious_ip_signal(self):
-        from src.models import DomainResult, DomainSummary, IPReputationResult
+        from src.models import DomainResult, DomainSummary, IPReputationResult, ReputationGroup
         from src.fair_signals import compute_fair_signals
 
         result = DomainResult(
             target="https://example.com",
             summary=DomainSummary(),
-            ip_reputation=IPReputationResult(
-                ip="1.2.3.4", malicious=True, detections=["spam list"],
+            reputation=ReputationGroup(
+                ip=IPReputationResult(
+                    ip="1.2.3.4", malicious=True, detections=["spam list"],
+                ),
             ),
         )
         signals = compute_fair_signals(result, scan_mode="full")
@@ -246,30 +248,34 @@ class TestFAIRReputation:
         assert "ip_reputation_malicious" in names
 
     def test_clean_ip_no_signal(self):
-        from src.models import DomainResult, DomainSummary, IPReputationResult
+        from src.models import DomainResult, DomainSummary, IPReputationResult, ReputationGroup
         from src.fair_signals import compute_fair_signals
 
         result = DomainResult(
             target="https://example.com",
             summary=DomainSummary(),
-            ip_reputation=IPReputationResult(ip="1.2.3.4", malicious=False),
+            reputation=ReputationGroup(
+                ip=IPReputationResult(ip="1.2.3.4", malicious=False),
+            ),
         )
         signals = compute_fair_signals(result, scan_mode="full")
         names = [s.name for s in signals.vulnerability.signals]
         assert "ip_reputation_malicious" not in names
 
     def test_blacklisted_url_signal(self):
-        from src.models import DomainResult, DomainSummary, URLReputationResult
+        from src.models import DomainResult, DomainSummary, URLReputationResult, ReputationGroup
         from src.fair_signals import compute_fair_signals
 
         result = DomainResult(
             target="https://example.com",
             summary=DomainSummary(),
-            url_reputation=URLReputationResult(
-                url="https://example.com",
-                blacklisted=True,
-                detections=["google_safebrowsing: blacklisted"],
-                sources_checked=5,
+            reputation=ReputationGroup(
+                url=URLReputationResult(
+                    url="https://example.com",
+                    blacklisted=True,
+                    detections=["google_safebrowsing: blacklisted"],
+                    sources_checked=5,
+                ),
             ),
         )
         signals = compute_fair_signals(result, scan_mode="full")
@@ -277,14 +283,16 @@ class TestFAIRReputation:
         assert "url_blacklisted" in names
 
     def test_clean_url_no_signal(self):
-        from src.models import DomainResult, DomainSummary, URLReputationResult
+        from src.models import DomainResult, DomainSummary, URLReputationResult, ReputationGroup
         from src.fair_signals import compute_fair_signals
 
         result = DomainResult(
             target="https://example.com",
             summary=DomainSummary(),
-            url_reputation=URLReputationResult(
-                url="https://example.com", blacklisted=False, sources_checked=5,
+            reputation=ReputationGroup(
+                url=URLReputationResult(
+                    url="https://example.com", blacklisted=False, sources_checked=5,
+                ),
             ),
         )
         signals = compute_fair_signals(result, scan_mode="full")

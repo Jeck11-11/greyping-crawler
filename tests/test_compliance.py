@@ -4,15 +4,16 @@ from src.easm_report import build_easm_report, _resolve_compliance
 from src.models import (
     BreachRecord,
     CookieFinding,
+    DNSGroup,
     DomainResult,
     FindingClassification,
     HeaderFinding,
     IoCFinding,
     SecretFinding,
+    SecurityGroup,
     SecurityHeadersResult,
     SensitivePathFinding,
     SSLCertResult,
-    PassiveIntelResult,
     EmailSecurityResult,
     SPFResult,
     DMARCResult,
@@ -105,16 +106,18 @@ class TestComplianceInReport:
         """Findings in the built report have compliance lists populated."""
         result = DomainResult(
             target="https://example.com",
-            secrets=[
-                SecretFinding(
-                    secret_type="aws_access_key",
-                    matched_pattern="aws_access_key",
-                    value_preview="AKIA...1234",
-                    location="script",
-                    severity="critical",
-                ),
-            ],
-            ssl_certificate=SSLCertResult(cert_valid=False, issues=["expired"]),
+            security=SecurityGroup(
+                secrets=[
+                    SecretFinding(
+                        secret_type="aws_access_key",
+                        matched_pattern="aws_access_key",
+                        value_preview="AKIA...1234",
+                        location="script",
+                        severity="critical",
+                    ),
+                ],
+            ),
+            ssl=SSLCertResult(cert_valid=False, issues=["expired"]),
         )
         report = build_easm_report(result, scan_mode="full")
 
@@ -131,22 +134,24 @@ class TestComplianceInReport:
         """compliance_summary counts findings per framework correctly."""
         result = DomainResult(
             target="https://example.com",
-            secrets=[
-                SecretFinding(
-                    secret_type="aws_access_key",
-                    matched_pattern="aws_access_key",
-                    value_preview="AKIA...1234",
-                    location="script",
-                    severity="critical",
-                ),
-            ],
-            security_headers=SecurityHeadersResult(
-                grade="F",
-                score=0,
-                findings=[
-                    HeaderFinding(header="Strict-Transport-Security", status="missing", severity="high"),
-                    HeaderFinding(header="Content-Security-Policy", status="missing", severity="high"),
+            security=SecurityGroup(
+                secrets=[
+                    SecretFinding(
+                        secret_type="aws_access_key",
+                        matched_pattern="aws_access_key",
+                        value_preview="AKIA...1234",
+                        location="script",
+                        severity="critical",
+                    ),
                 ],
+                headers=SecurityHeadersResult(
+                    grade="F",
+                    score=0,
+                    findings=[
+                        HeaderFinding(header="Strict-Transport-Security", status="missing", severity="high"),
+                        HeaderFinding(header="Content-Security-Policy", status="missing", severity="high"),
+                    ],
+                ),
             ),
         )
         report = build_easm_report(result, scan_mode="full")
@@ -163,7 +168,7 @@ class TestComplianceInReport:
         """A clean scan produces an empty compliance_summary."""
         result = DomainResult(
             target="https://example.com",
-            ssl_certificate=SSLCertResult(cert_valid=True, grade="A"),
+            ssl=SSLCertResult(cert_valid=True, grade="A"),
         )
         report = build_easm_report(result, scan_mode="full")
         assert report.compliance_summary == {}
@@ -171,9 +176,9 @@ class TestComplianceInReport:
     def test_cookie_finding_compliance(self):
         result = DomainResult(
             target="https://example.com",
-            cookies=[
+            security=SecurityGroup(cookies=[
                 CookieFinding(name="session_id", issues=["Secure flag not set"], severity="high"),
-            ],
+            ]),
         )
         report = build_easm_report(result, scan_mode="full")
         cookie_f = [f for f in report.prioritized_findings if f.id == "cookie_session_id"]
@@ -202,15 +207,13 @@ class TestComplianceInReport:
     def test_email_security_compliance(self):
         result = DomainResult(
             target="https://example.com",
-            passive_intel=PassiveIntelResult(
-                email_security=EmailSecurityResult(
-                    domain="example.com",
-                    spf=SPFResult(exists=False),
-                    dmarc=DMARCResult(exists=False),
-                    dkim=DKIMResult(),
-                    grade="F",
-                ),
-            ),
+            dns=DNSGroup(email_security=EmailSecurityResult(
+                domain="example.com",
+                spf=SPFResult(exists=False),
+                dmarc=DMARCResult(exists=False),
+                dkim=DKIMResult(),
+                grade="F",
+            )),
         )
         report = build_easm_report(result, scan_mode="passive")
         spf_f = [f for f in report.prioritized_findings if f.id == "email_no_spf"]
@@ -220,13 +223,13 @@ class TestComplianceInReport:
     def test_ioc_finding_compliance(self):
         result = DomainResult(
             target="https://example.com",
-            ioc_findings=[
+            security=SecurityGroup(ioc_findings=[
                 IoCFinding(
                     ioc_type="cryptominer",
                     description="CoinHive miner detected",
                     severity="critical",
                 ),
-            ],
+            ]),
         )
         report = build_easm_report(result, scan_mode="full")
         ioc_f = [f for f in report.prioritized_findings if f.id == "ioc_cryptominer"]
@@ -236,7 +239,7 @@ class TestComplianceInReport:
     def test_path_finding_compliance(self):
         result = DomainResult(
             target="https://example.com",
-            sensitive_paths=[
+            security=SecurityGroup(sensitive_paths=[
                 SensitivePathFinding(
                     path="/admin",
                     url="https://example.com/admin",
@@ -244,7 +247,7 @@ class TestComplianceInReport:
                     severity="high",
                     risk="Admin panel exposed",
                 ),
-            ],
+            ]),
         )
         report = build_easm_report(result, scan_mode="full")
         path_f = [f for f in report.prioritized_findings if f.id.startswith("path_")]
@@ -256,7 +259,7 @@ class TestComplianceInReport:
         """Verify that framework_counts increments once per tag, not per finding."""
         result = DomainResult(
             target="https://example.com",
-            secrets=[
+            security=SecurityGroup(secrets=[
                 SecretFinding(
                     secret_type="aws_access_key",
                     matched_pattern="aws_access_key",
@@ -271,7 +274,7 @@ class TestComplianceInReport:
                     location="script",
                     severity="high",
                 ),
-            ],
+            ]),
         )
         report = build_easm_report(result, scan_mode="full")
         cs = report.compliance_summary

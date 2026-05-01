@@ -787,10 +787,7 @@ class EASMReport(BaseModel):
     scan_mode: str = ""
     executive_summary: ExecutiveSummary = Field(default_factory=ExecutiveSummary)
     asset_context: AssetContext | None = None
-    dns_posture: DNSPostureSummary | None = None
-    certificate_summary: CertificateSummary | None = None
     cloud_assets: list[CloudAsset] = Field(default_factory=list)
-    page_summary: PageSummary | None = None
     recon_artifacts: list[ReconArtifact] = Field(default_factory=list)
     prioritized_findings: list[PrioritizedFinding] = Field(
         default_factory=list, description="Sorted by severity desc, confidence desc, actionability desc.",
@@ -799,9 +796,6 @@ class EASMReport(BaseModel):
     confirmed_issues: int = 0
     platform_behaviors: int = 0
     informational_count: int = 0
-    js_intel_summary: JSIntelSummary | None = None
-    cookie_summary: CookieSummary | None = None
-    tech_summary: TechSummary | None = None
     compliance_summary: dict[str, int] = Field(
         default_factory=dict,
         description="Count of findings per compliance framework.",
@@ -1003,124 +997,180 @@ class DomainSummary(BaseModel):
     screenshots_taken: int = 0
 
 
+# ---------------------------------------------------------------------------
+# Grouping models — logical sections inside DomainResult
+# ---------------------------------------------------------------------------
+
+class DNSGroup(BaseModel):
+    """DNS records, email security, and IP enrichment."""
+    records: DNSResult | None = None
+    email_security: EmailSecurityResult | None = None
+    ip_enrichment: IPEnrichmentResult | None = None
+
+
+class SecurityGroup(BaseModel):
+    """Security posture: headers, cookies, paths, secrets, IoCs."""
+    headers: SecurityHeadersResult = Field(default_factory=SecurityHeadersResult)
+    cookies: list[CookieFinding] = Field(default_factory=list)
+    sensitive_paths: list[SensitivePathFinding] = Field(default_factory=list)
+    secrets: list[SecretFinding] = Field(default_factory=list)
+    ioc_findings: list[IoCFinding] = Field(default_factory=list)
+
+
+class ContactsGroup(BaseModel):
+    """Contacts with provenance."""
+    emails: list[EmailFinding] = Field(default_factory=list)
+    phone_numbers: list[PhoneFinding] = Field(default_factory=list)
+    social_profiles: list[SocialFinding] = Field(default_factory=list)
+
+
+class LinksGroup(BaseModel):
+    """Internal and external links."""
+    internal: list[str] = Field(default_factory=list)
+    external: list[ExternalLinkFinding] = Field(default_factory=list)
+
+
+class PagesSummary(BaseModel):
+    """Condensed page crawl summary (replaces full page list in JSON)."""
+    total: int = 0
+    notable: list[str] = Field(default_factory=list, description="Admin panels, error pages, pages with findings.")
+    routes: list[str] = Field(default_factory=list, description="Unique URL paths crawled.")
+
+
+class PassiveIntelSlim(BaseModel):
+    """Passive intel remaining after DNS/email/IP moved to dns group."""
+    ct: CTResult | None = None
+    rdap: RDAPResult | None = None
+    wayback: WaybackResult | None = None
+
+
+class VulnerabilitiesGroup(BaseModel):
+    """Vulnerability scan results."""
+    nuclei: NucleiResult | None = None
+    cve_findings: list[CVEFinding] = Field(default_factory=list)
+    subdomain_takeover: SubdomainTakeoverResult | None = None
+
+
+class ReputationGroup(BaseModel):
+    """IP and URL reputation checks."""
+    ip: IPReputationResult | None = None
+    url: URLReputationResult | None = None
+
+
+class RiskAssessmentGroup(BaseModel):
+    """Risk scoring and EASM report."""
+    fair_signals: FAIRSignals | None = None
+    easm_report: EASMReport | None = None
+
+
 class DomainResult(BaseModel):
     """Aggregated results for a single target domain."""
 
     target: str
     scan_started_at: str = ""
     scan_finished_at: str = ""
-    summary: DomainSummary = Field(
-        default_factory=DomainSummary,
-        description="Quick-glance counts before the detailed data.",
-    )
-    pages_scanned: int = 0
-    pages: list[PageResult] = Field(default_factory=list)
-    contacts: ContactInfo = Field(
-        default_factory=ContactInfo,
-        description="Aggregated contacts across all pages (flat list, backwards-compat).",
-    )
-    emails: list[EmailFinding] = Field(
-        default_factory=list,
-        description="Emails with the page URLs where each was found.",
-    )
-    phone_numbers: list[PhoneFinding] = Field(
-        default_factory=list,
-        description="Phone numbers with the page URLs where each was found.",
-    )
-    social_profiles: list[SocialFinding] = Field(
-        default_factory=list,
-        description="Social profiles with the page URLs where each was found.",
-    )
-    internal_links: list[str] = Field(default_factory=list)
-    external_links: list[ExternalLinkFinding] = Field(
-        default_factory=list,
-        description="External links with the page URLs where each was found.",
-    )
-    secrets: list[SecretFinding] = Field(
-        default_factory=list,
-        description="Aggregated secrets across all pages.",
-    )
-    breaches: list[BreachRecord] = Field(default_factory=list)
-    security_headers: SecurityHeadersResult = Field(
-        default_factory=SecurityHeadersResult,
-        description="Security headers audit for the landing page.",
-    )
-    ssl_certificate: SSLCertResult = Field(
-        default_factory=SSLCertResult,
-        description="TLS certificate analysis.",
-    )
-    cookies: list[CookieFinding] = Field(
-        default_factory=list,
-        description="Cookie security audit.",
-    )
-    sensitive_paths: list[SensitivePathFinding] = Field(
-        default_factory=list,
-        description="Exposed sensitive paths.",
-    )
-    robots_txt: RobotsTxtResult | None = Field(
-        default=None, description="Parsed robots.txt intelligence.",
-    )
-    sitemap: SitemapResult | None = Field(
-        default=None, description="Parsed sitemap.xml intelligence.",
-    )
-    ioc_findings: list[IoCFinding] = Field(
-        default_factory=list,
-        description="Aggregated indicators of compromise across all pages.",
-    )
-    technologies: list[TechFinding] = Field(
-        default_factory=list,
-        description="Technologies identified on the landing page.",
-    )
-    js_intel: JSIntelResult | None = Field(
-        default=None,
-        description="JavaScript bundle mining results (endpoints, sourcemaps, internal hosts).",
-    )
-    passive_intel: PassiveIntelResult | None = Field(
-        default=None,
-        description="Third-party-sourced intel (DNS, CT logs, RDAP, Wayback, breaches).",
-    )
-    fair_signals: FAIRSignals | None = Field(
-        default=None,
-        description=(
-            "FAIR-aligned risk signals (TEF, Vulnerability, Control Strength, "
-            "Loss Magnitude) derived from the evidence in this result. Use "
-            "these signals to build a risk profile in a downstream system."
-        ),
-    )
-    easm_report: EASMReport | None = Field(
-        default=None,
-        description=(
-            "Business-grade EASM report with classified findings, executive "
-            "summary, and prioritization. Generated as a post-processing "
-            "step over the raw scanner output."
-        ),
-    )
-    nuclei: NucleiResult | None = Field(
-        default=None, description="Nuclei vulnerability scan findings.",
-    )
-    cve_findings: list[CVEFinding] = Field(
-        default_factory=list, description="CVEs correlated from detected tech versions.",
-    )
-    favicon: FaviconResult | None = Field(
-        default=None, description="Favicon hash for Shodan/Censys pivoting.",
-    )
-    subdomain_takeover: SubdomainTakeoverResult | None = Field(
-        default=None, description="Subdomain enumeration and takeover detection results.",
-    )
-    ip_reputation: IPReputationResult | None = Field(
-        default=None, description="IP reputation check from blacklists.",
-    )
-    url_reputation: URLReputationResult | None = Field(
-        default=None, description="URL/domain reputation check from blacklists.",
-    )
-    email_validations: list[EmailValidationResult] = Field(
-        default_factory=list, description="Deliverability validation for discovered emails.",
-    )
-    port_scan: PortScanResult | None = Field(default=None, description="TCP port scan results.")
-    cloud_assets: CloudAssetResult | None = Field(default=None, description="Cloud storage bucket discovery results.")
-    screenshots: list[ScreenshotResult] = Field(default_factory=list, description="Visual proof screenshots.")
-    metadata: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    summary: DomainSummary = Field(default_factory=DomainSummary)
+
+    ssl: SSLCertResult = Field(default_factory=SSLCertResult)
+    dns: DNSGroup | None = None
+    security: SecurityGroup = Field(default_factory=SecurityGroup)
+    contacts: ContactsGroup = Field(default_factory=ContactsGroup)
+    links: LinksGroup = Field(default_factory=LinksGroup)
+    pages: PagesSummary = Field(default_factory=PagesSummary)
+    technologies: list[TechFinding] = Field(default_factory=list)
+    breaches: list[BreachRecord] = Field(default_factory=list)
+    js_intel: JSIntelResult | None = None
+    port_scan: PortScanResult | None = None
+    cloud_assets: CloudAssetResult | None = None
+    passive_intel: PassiveIntelSlim | None = None
+    vulnerabilities: VulnerabilitiesGroup | None = None
+    reputation: ReputationGroup | None = None
+    email_validations: list[EmailValidationResult] = Field(default_factory=list)
+    screenshots: list[ScreenshotResult] = Field(default_factory=list)
+    favicon: FaviconResult | None = None
+    robots_txt: RobotsTxtResult | None = None
+    sitemap: SitemapResult | None = None
+    risk_assessment: RiskAssessmentGroup | None = None
+
+    # --- Backward-compat read-only properties (not serialized to JSON) ---
+
+    @property
+    def ssl_certificate(self) -> SSLCertResult:
+        return self.ssl
+
+    @property
+    def security_headers(self) -> SecurityHeadersResult:
+        return self.security.headers
+
+    @property
+    def cookies(self) -> list[CookieFinding]:
+        return self.security.cookies
+
+    @property
+    def sensitive_paths(self) -> list[SensitivePathFinding]:
+        return self.security.sensitive_paths
+
+    @property
+    def secrets(self) -> list[SecretFinding]:
+        return self.security.secrets
+
+    @property
+    def ioc_findings(self) -> list[IoCFinding]:
+        return self.security.ioc_findings
+
+    @property
+    def emails(self) -> list[EmailFinding]:
+        return self.contacts.emails
+
+    @property
+    def phone_numbers(self) -> list[PhoneFinding]:
+        return self.contacts.phone_numbers
+
+    @property
+    def social_profiles(self) -> list[SocialFinding]:
+        return self.contacts.social_profiles
+
+    @property
+    def internal_links(self) -> list[str]:
+        return self.links.internal
+
+    @property
+    def external_links(self) -> list[ExternalLinkFinding]:
+        return self.links.external
+
+    @property
+    def pages_scanned(self) -> int:
+        return self.pages.total
+
+    @property
+    def nuclei(self) -> NucleiResult | None:
+        return self.vulnerabilities.nuclei if self.vulnerabilities else None
+
+    @property
+    def cve_findings(self) -> list[CVEFinding]:
+        return self.vulnerabilities.cve_findings if self.vulnerabilities else []
+
+    @property
+    def subdomain_takeover(self) -> SubdomainTakeoverResult | None:
+        return self.vulnerabilities.subdomain_takeover if self.vulnerabilities else None
+
+    @property
+    def ip_reputation(self) -> IPReputationResult | None:
+        return self.reputation.ip if self.reputation else None
+
+    @property
+    def url_reputation(self) -> URLReputationResult | None:
+        return self.reputation.url if self.reputation else None
+
+    @property
+    def fair_signals(self) -> FAIRSignals | None:
+        return self.risk_assessment.fair_signals if self.risk_assessment else None
+
+    @property
+    def easm_report(self) -> EASMReport | None:
+        return self.risk_assessment.easm_report if self.risk_assessment else None
 
 
 # ---------------------------------------------------------------------------
@@ -1159,9 +1209,6 @@ class ScanResponse(BaseModel):
         description="Quick-glance totals across all targets.",
     )
     total_targets: int = 0
-    total_pages_scanned: int = 0
-    total_secrets_found: int = 0
-    total_breaches_found: int = 0
     results: list[DomainResult] = Field(default_factory=list)
 
 

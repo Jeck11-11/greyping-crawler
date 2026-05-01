@@ -14,6 +14,7 @@ from src.models import (
     CAARecord,
     CookieFinding,
     CTResult,
+    DNSGroup,
     DNSResult,
     DomainResult,
     EmailFinding,
@@ -21,10 +22,12 @@ from src.models import (
     HeaderFinding,
     IoCFinding,
     JSIntelResult,
-    PassiveIntelResult,
+    LinksGroup,
+    PassiveIntelSlim,
     RDAPResult,
     RobotsTxtResult,
     SecretFinding,
+    SecurityGroup,
     SecurityHeadersResult,
     SensitivePathFinding,
     SSLCertResult,
@@ -71,7 +74,7 @@ class TestFAIRBuilder:
                     "/api/v1/payments", "/api/v1/secrets",
                 ],
             ),
-            passive_intel=PassiveIntelResult(
+            passive_intel=PassiveIntelSlim(
                 ct=CTResult(
                     domain="rotten.example.com",
                     subdomains=[
@@ -82,44 +85,46 @@ class TestFAIRBuilder:
                     domain="rotten.example.com", snapshot_count=200,
                 ),
             ),
-            secrets=[
-                SecretFinding(
-                    secret_type="aws_access_key",
-                    matched_pattern="AKIA",
-                    value_preview="AKIA...MPLE",
-                    location="script",
-                    severity="critical",
-                ),
-                SecretFinding(
-                    secret_type="private_key",
-                    matched_pattern="RSA",
-                    value_preview="-----...KEY-----",
-                    location="html_comment",
-                    severity="critical",
-                ),
-            ],
-            sensitive_paths=[
-                SensitivePathFinding(
-                    path="/.env", url="https://rotten.example.com/.env",
-                    status_code=200, content_length=1024,
-                    risk="Environment file exposed", severity="critical",
-                ),
-            ],
-            ssl_certificate=SSLCertResult(
-                cert_valid=False, grade="F", issues=["self-signed", "expired"],
-            ),
-            security_headers=SecurityHeadersResult(
-                grade="F", score=10,
-                findings=[
-                    HeaderFinding(
-                        header="Strict-Transport-Security", status="missing",
-                        severity="high",
+            security=SecurityGroup(
+                secrets=[
+                    SecretFinding(
+                        secret_type="aws_access_key",
+                        matched_pattern="AKIA",
+                        value_preview="AKIA...MPLE",
+                        location="script",
+                        severity="critical",
                     ),
-                    HeaderFinding(
-                        header="Content-Security-Policy", status="missing",
-                        severity="high",
+                    SecretFinding(
+                        secret_type="private_key",
+                        matched_pattern="RSA",
+                        value_preview="-----...KEY-----",
+                        location="html_comment",
+                        severity="critical",
                     ),
                 ],
+                sensitive_paths=[
+                    SensitivePathFinding(
+                        path="/.env", url="https://rotten.example.com/.env",
+                        status_code=200, content_length=1024,
+                        risk="Environment file exposed", severity="critical",
+                    ),
+                ],
+                headers=SecurityHeadersResult(
+                    grade="F", score=10,
+                    findings=[
+                        HeaderFinding(
+                            header="Strict-Transport-Security", status="missing",
+                            severity="high",
+                        ),
+                        HeaderFinding(
+                            header="Content-Security-Policy", status="missing",
+                            severity="high",
+                        ),
+                    ],
+                ),
+            ),
+            ssl=SSLCertResult(
+                cert_valid=False, grade="F", issues=["self-signed", "expired"],
             ),
             breaches=[
                 BreachRecord(
@@ -148,14 +153,16 @@ class TestFAIRBuilder:
     def test_strong_controls_attenuate_risk(self):
         clean = DomainResult(
             target="https://clean.example.com",
-            ssl_certificate=SSLCertResult(cert_valid=True, grade="A"),
-            security_headers=SecurityHeadersResult(grade="A", score=95),
-            cookies=[
-                CookieFinding(
-                    name="session", secure=True, http_only=True,
-                    same_site="Strict",
-                ),
-            ],
+            ssl=SSLCertResult(cert_valid=True, grade="A"),
+            security=SecurityGroup(
+                headers=SecurityHeadersResult(grade="A", score=95),
+                cookies=[
+                    CookieFinding(
+                        name="session", secure=True, http_only=True,
+                        same_site="Strict",
+                    ),
+                ],
+            ),
             technologies=[
                 TechFinding(name="Cloudflare", categories=["cdn"]),
             ],
@@ -174,9 +181,11 @@ class TestFAIRBuilder:
     def test_passive_only_populates_passive_derived_factors(self):
         result = DomainResult(
             target="https://lurker.example.com",
-            passive_intel=PassiveIntelResult(
-                dns=DNSResult(domain="lurker.example.com",
-                              a_records=[ARecord(address="93.184.216.34")]),
+            dns=DNSGroup(
+                records=DNSResult(domain="lurker.example.com",
+                                  a_records=[ARecord(address="93.184.216.34")]),
+            ),
+            passive_intel=PassiveIntelSlim(
                 ct=CTResult(
                     domain="lurker.example.com",
                     subdomains=[
@@ -190,7 +199,6 @@ class TestFAIRBuilder:
                     domain="lurker.example.com", snapshot_count=120,
                 ),
                 rdap=RDAPResult(domain="lurker.example.com"),
-                breaches=[],
             ),
         )
         signals = compute_fair_signals(result, scan_mode="passive")
@@ -209,20 +217,22 @@ class TestFAIRBuilder:
     def test_iocs_increase_vulnerability_and_loss(self):
         result = DomainResult(
             target="https://compromised.example.com",
-            ioc_findings=[
-                IoCFinding(
-                    ioc_type="credential_harvest",
-                    description="Fake login form",
-                    evidence="<form action='evil.com'>",
-                    severity="critical",
-                ),
-                IoCFinding(
-                    ioc_type="webshell_path",
-                    description="Suspicious /shell.php reference",
-                    evidence="/shell.php",
-                    severity="high",
-                ),
-            ],
+            security=SecurityGroup(
+                ioc_findings=[
+                    IoCFinding(
+                        ioc_type="credential_harvest",
+                        description="Fake login form",
+                        evidence="<form action='evil.com'>",
+                        severity="critical",
+                    ),
+                    IoCFinding(
+                        ioc_type="webshell_path",
+                        description="Suspicious /shell.php reference",
+                        evidence="/shell.php",
+                        severity="high",
+                    ),
+                ],
+            ),
         )
         signals = compute_fair_signals(result, scan_mode="standard")
         assert any(s.name == "ioc_presence"
@@ -270,10 +280,10 @@ class TestFAIRIntegration:
         )
         assert resp.status_code == 200
         r = resp.json()["results"][0]
-        assert r["fair_signals"] is not None
-        assert r["fair_signals"]["scan_mode"] == "passive"
-        assert r["fair_signals"]["confidence"] == "low"
-        assert r["fair_signals"]["risk_tier"] in {"low", "medium", "high", "critical"}
+        assert r["risk_assessment"]["fair_signals"] is not None
+        assert r["risk_assessment"]["fair_signals"]["scan_mode"] == "passive"
+        assert r["risk_assessment"]["fair_signals"]["confidence"] == "low"
+        assert r["risk_assessment"]["fair_signals"]["risk_tier"] in {"low", "medium", "high", "critical"}
 
     @patch("src.app.fetch_landing_page_full", new_callable=AsyncMock)
     @patch("src.app.check_ssl", new_callable=AsyncMock)
@@ -294,9 +304,9 @@ class TestFAIRIntegration:
         )
         assert resp.status_code == 200
         r = resp.json()["results"][0]
-        assert r["fair_signals"] is not None
-        assert r["fair_signals"]["scan_mode"] == "lighttouch"
-        assert r["fair_signals"]["confidence"] == "medium"
+        assert r["risk_assessment"]["fair_signals"] is not None
+        assert r["risk_assessment"]["fair_signals"]["scan_mode"] == "lighttouch"
+        assert r["risk_assessment"]["fair_signals"]["confidence"] == "medium"
 
 
 # ---------------------------------------------------------------------------
@@ -388,7 +398,7 @@ class TestNewVulnerabilitySignals:
     def test_weak_tls_10(self):
         result = DomainResult(
             target="https://example.com",
-            ssl_certificate=SSLCertResult(
+            ssl=SSLCertResult(
                 cert_valid=True, grade="C",
                 tls_version="TLSv1.0", cipher="AES128-SHA",
             ),
@@ -402,7 +412,7 @@ class TestNewVulnerabilitySignals:
     def test_weak_tls_11(self):
         result = DomainResult(
             target="https://example.com",
-            ssl_certificate=SSLCertResult(
+            ssl=SSLCertResult(
                 cert_valid=True, grade="B",
                 tls_version="TLSv1.1", cipher="AES256-SHA256",
             ),
@@ -414,7 +424,7 @@ class TestNewVulnerabilitySignals:
     def test_weak_cipher_on_tls12(self):
         result = DomainResult(
             target="https://example.com",
-            ssl_certificate=SSLCertResult(
+            ssl=SSLCertResult(
                 cert_valid=True, grade="B",
                 tls_version="TLSv1.2", cipher="DES-CBC3-SHA",
             ),
@@ -426,7 +436,7 @@ class TestNewVulnerabilitySignals:
     def test_strong_tls_no_signal(self):
         result = DomainResult(
             target="https://example.com",
-            ssl_certificate=SSLCertResult(
+            ssl=SSLCertResult(
                 cert_valid=True, grade="A",
                 tls_version="TLSv1.3", cipher="TLS_AES_256_GCM_SHA384",
             ),
@@ -438,7 +448,7 @@ class TestNewVulnerabilitySignals:
     def test_cert_expiry_imminent(self):
         result = DomainResult(
             target="https://example.com",
-            ssl_certificate=SSLCertResult(
+            ssl=SSLCertResult(
                 cert_valid=True, grade="A", days_left=5,
             ),
         )
@@ -449,7 +459,7 @@ class TestNewVulnerabilitySignals:
     def test_cert_expiry_expired(self):
         result = DomainResult(
             target="https://example.com",
-            ssl_certificate=SSLCertResult(
+            ssl=SSLCertResult(
                 cert_valid=False, grade="F", days_left=-10,
             ),
         )
@@ -460,7 +470,7 @@ class TestNewVulnerabilitySignals:
     def test_cert_expiry_not_checked(self):
         result = DomainResult(
             target="https://example.com",
-            ssl_certificate=SSLCertResult(cert_valid=True, grade="A", days_left=0),
+            ssl=SSLCertResult(cert_valid=True, grade="A", days_left=0),
         )
         signals = compute_fair_signals(result, scan_mode="full")
         names = [s.name for s in signals.vulnerability.signals]
@@ -469,11 +479,11 @@ class TestNewVulnerabilitySignals:
     def test_server_info_leak_with_version(self):
         result = DomainResult(
             target="https://example.com",
-            security_headers=SecurityHeadersResult(
+            security=SecurityGroup(headers=SecurityHeadersResult(
                 grade="C", score=40,
                 server="Apache/2.4.49",
                 powered_by="PHP/7.4.3",
-            ),
+            )),
         )
         signals = compute_fair_signals(result, scan_mode="full")
         sig = next(s for s in signals.vulnerability.signals if s.name == "server_info_leak")
@@ -482,10 +492,10 @@ class TestNewVulnerabilitySignals:
     def test_server_info_leak_single_version(self):
         result = DomainResult(
             target="https://example.com",
-            security_headers=SecurityHeadersResult(
+            security=SecurityGroup(headers=SecurityHeadersResult(
                 grade="B", score=70,
                 server="nginx/1.18.0",
-            ),
+            )),
         )
         signals = compute_fair_signals(result, scan_mode="full")
         sig = next(s for s in signals.vulnerability.signals if s.name == "server_info_leak")
@@ -494,10 +504,10 @@ class TestNewVulnerabilitySignals:
     def test_server_info_leak_no_version(self):
         result = DomainResult(
             target="https://example.com",
-            security_headers=SecurityHeadersResult(
+            security=SecurityGroup(headers=SecurityHeadersResult(
                 grade="B", score=70,
                 server="nginx",
-            ),
+            )),
         )
         signals = compute_fair_signals(result, scan_mode="full")
         sig = next(s for s in signals.vulnerability.signals if s.name == "server_info_leak")
@@ -508,9 +518,7 @@ class TestNewControlStrengthSignals:
     def test_dnssec_enabled(self):
         result = DomainResult(
             target="https://example.com",
-            passive_intel=PassiveIntelResult(
-                dns=DNSResult(domain="example.com", dnssec=True),
-            ),
+            dns=DNSGroup(records=DNSResult(domain="example.com", dnssec=True)),
         )
         signals = compute_fair_signals(result, scan_mode="full")
         sig = next(s for s in signals.control_strength.signals if s.name == "dnssec_enabled")
@@ -519,9 +527,7 @@ class TestNewControlStrengthSignals:
     def test_dnssec_disabled(self):
         result = DomainResult(
             target="https://example.com",
-            passive_intel=PassiveIntelResult(
-                dns=DNSResult(domain="example.com", dnssec=False),
-            ),
+            dns=DNSGroup(records=DNSResult(domain="example.com", dnssec=False)),
         )
         signals = compute_fair_signals(result, scan_mode="full")
         sig = next(s for s in signals.control_strength.signals if s.name == "dnssec_enabled")
@@ -530,9 +536,7 @@ class TestNewControlStrengthSignals:
     def test_dnssec_not_checked(self):
         result = DomainResult(
             target="https://example.com",
-            passive_intel=PassiveIntelResult(
-                dns=DNSResult(domain="example.com", dnssec=None),
-            ),
+            dns=DNSGroup(records=DNSResult(domain="example.com", dnssec=None)),
         )
         signals = compute_fair_signals(result, scan_mode="full")
         names = [s.name for s in signals.control_strength.signals]
@@ -541,14 +545,12 @@ class TestNewControlStrengthSignals:
     def test_caa_present(self):
         result = DomainResult(
             target="https://example.com",
-            passive_intel=PassiveIntelResult(
-                dns=DNSResult(
-                    domain="example.com",
-                    caa_records=[
-                        CAARecord(flags=0, tag="issue", value="letsencrypt.org"),
-                    ],
-                ),
-            ),
+            dns=DNSGroup(records=DNSResult(
+                domain="example.com",
+                caa_records=[
+                    CAARecord(flags=0, tag="issue", value="letsencrypt.org"),
+                ],
+            )),
         )
         signals = compute_fair_signals(result, scan_mode="full")
         sig = next(s for s in signals.control_strength.signals if s.name == "caa_policy")
@@ -557,9 +559,7 @@ class TestNewControlStrengthSignals:
     def test_caa_absent(self):
         result = DomainResult(
             target="https://example.com",
-            passive_intel=PassiveIntelResult(
-                dns=DNSResult(domain="example.com"),
-            ),
+            dns=DNSGroup(records=DNSResult(domain="example.com")),
         )
         signals = compute_fair_signals(result, scan_mode="full")
         sig = next(s for s in signals.control_strength.signals if s.name == "caa_policy")
@@ -568,7 +568,7 @@ class TestNewControlStrengthSignals:
     def test_domain_maturity_old(self):
         result = DomainResult(
             target="https://example.com",
-            passive_intel=PassiveIntelResult(
+            passive_intel=PassiveIntelSlim(
                 rdap=RDAPResult(domain="example.com", created="2010-01-15T00:00:00Z"),
             ),
         )
@@ -579,7 +579,7 @@ class TestNewControlStrengthSignals:
     def test_domain_maturity_new(self):
         result = DomainResult(
             target="https://example.com",
-            passive_intel=PassiveIntelResult(
+            passive_intel=PassiveIntelSlim(
                 rdap=RDAPResult(domain="example.com", created="2026-02-01T00:00:00Z"),
             ),
         )
@@ -664,14 +664,14 @@ class TestNewLossMagnitudeSignals:
     def test_external_dependency_risk(self):
         result = DomainResult(
             target="https://example.com",
-            external_links=[
+            links=LinksGroup(external=[
                 ExternalLinkFinding(url="https://cdn.jquery.com/lib.js"),
                 ExternalLinkFinding(url="https://fonts.googleapis.com/css"),
                 ExternalLinkFinding(url="https://analytics.google.com/g.js"),
                 ExternalLinkFinding(url="https://connect.facebook.net/sdk.js"),
                 ExternalLinkFinding(url="https://cdn.shopify.com/s/files/script.js"),
                 ExternalLinkFinding(url="https://maps.googleapis.com/api"),
-            ],
+            ]),
         )
         signals = compute_fair_signals(result, scan_mode="full")
         names = [s.name for s in signals.loss_magnitude.signals]
@@ -682,10 +682,10 @@ class TestNewLossMagnitudeSignals:
     def test_external_dependency_risk_few_deps(self):
         result = DomainResult(
             target="https://example.com",
-            external_links=[
+            links=LinksGroup(external=[
                 ExternalLinkFinding(url="https://cdn.jquery.com/lib.js"),
                 ExternalLinkFinding(url="https://fonts.googleapis.com/css"),
-            ],
+            ]),
         )
         signals = compute_fair_signals(result, scan_mode="full")
         names = [s.name for s in signals.loss_magnitude.signals]
