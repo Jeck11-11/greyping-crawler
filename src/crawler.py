@@ -104,7 +104,17 @@ async def crawl_page(
     try:
         pw_available = await _check_playwright()
         if render_js and pw_available:
-            html, status_code = await _fetch_rendered(url, timeout=timeout)
+            try:
+                html, status_code = await _fetch_rendered(url, timeout=timeout)
+            except Exception as pw_exc:
+                logger.warning(
+                    "Playwright failed for %s (%s), falling back to static fetch",
+                    url, pw_exc,
+                )
+                html, status_code, redirect_chain = await _fetch_static(
+                    url, follow_redirects=follow_redirects, timeout=timeout,
+                )
+                notes = f"JS render failed ({pw_exc}), used static fallback"
         else:
             html, status_code, redirect_chain = await _fetch_static(
                 url, follow_redirects=follow_redirects, timeout=timeout,

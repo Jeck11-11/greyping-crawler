@@ -95,6 +95,39 @@ class TestResponseSizeLimit:
             assert html == body
 
 
+class TestPlaywrightFallback:
+    @pytest.mark.asyncio
+    async def test_falls_back_to_static_when_playwright_fails(self):
+        mock_resp = MagicMock()
+        mock_resp.text = (
+            '<html><head><title>Fallback</title></head>'
+            '<body>Contact: info@example.com</body></html>'
+        )
+        mock_resp.content = mock_resp.text.encode()
+        mock_resp.status_code = 200
+        mock_resp.history = []
+
+        with patch("src.crawler.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get.return_value = mock_resp
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            with patch("src.crawler._check_playwright", return_value=True):
+                with patch(
+                    "src.crawler._fetch_rendered",
+                    side_effect=RuntimeError("TLS connection failed: timed out"),
+                ):
+                    page = await crawl_page(
+                        "https://example.com", render_js=True,
+                    )
+                    assert page.error is None
+                    assert page.title == "Fallback"
+                    assert "info@example.com" in page.contacts.emails
+                    assert "static fallback" in page.notes
+
+
 class TestCrawlPageRedirectChain:
     @pytest.mark.asyncio
     async def test_redirect_chain_in_page_result(self):
