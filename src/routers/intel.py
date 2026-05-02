@@ -10,7 +10,13 @@ from fastapi import APIRouter
 
 from .._http_utils import validate_target
 from ..breach_checker import check_breaches
-from ..models import BreachReconRequest, BreachReconResult
+from ..c99_client import validate_email
+from ..models import (
+    BreachReconRequest,
+    BreachReconResult,
+    EmailValidationRequest,
+    EmailValidationResult,
+)
 from ..postprocess import fill_not_found
 
 logger = logging.getLogger(__name__)
@@ -40,4 +46,34 @@ async def recon_breaches(request: BreachReconRequest) -> list[BreachReconResult]
     results = await asyncio.gather(*(_one(t) for t in targets))
     for r in results:
         fill_not_found(r)
+    return results
+
+
+@router.post("/email-validation", response_model=list[EmailValidationResult])
+async def recon_email_validation(
+    request: EmailValidationRequest,
+) -> list[EmailValidationResult]:
+    """Validate email addresses via C99 API."""
+    results: list[EmailValidationResult] = []
+
+    async def _one(email: str) -> EmailValidationResult:
+        try:
+            data = await validate_email(email, timeout=request.timeout)
+            if data is None:
+                return EmailValidationResult(
+                    email=email, error="Email validation unavailable"
+                )
+            result = EmailValidationResult(
+                email=data.get("email", email),
+                valid=data.get("valid"),
+                disposable=data.get("disposable", False),
+                role_account=data.get("role_account", False),
+                free_provider=data.get("free_provider", False),
+            )
+            fill_not_found(result)
+            return result
+        except Exception as exc:
+            return EmailValidationResult(email=email, error=str(exc))
+
+    results = await asyncio.gather(*(_one(e) for e in request.emails))
     return results

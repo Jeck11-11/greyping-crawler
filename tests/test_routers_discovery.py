@@ -1,4 +1,4 @@
-"""Tests for /recon/paths, /recon/tech, /recon/js-intel."""
+"""Tests for /recon/paths, /recon/tech, /recon/js-intel, /recon/subdomains."""
 
 from unittest.mock import AsyncMock, patch
 
@@ -6,7 +6,7 @@ import httpx
 from fastapi.testclient import TestClient
 
 from src.app import app
-from src.models import JSIntelResult, SensitivePathFinding
+from src.models import CTResult, JSIntelResult, SensitivePathFinding, SubdomainEnumResult
 
 
 client = TestClient(app)
@@ -92,3 +92,48 @@ class TestReconJSIntel:
         body = resp.json()[0]
         assert body["scripts_scanned"] == 3
         assert body["api_endpoints"] == ["/api/v1/users"]
+
+
+class TestReconSubdomains:
+    @patch("src.routers.discovery.enumerate_subdomains", new_callable=AsyncMock)
+    @patch("src.routers.discovery.query_ct_logs", new_callable=AsyncMock)
+    def test_subdomains_returns_live_list(self, mock_ct, mock_enum):
+        mock_ct.return_value = CTResult(
+            domain="example.com",
+            subdomains=["api.example.com", "mail.example.com"],
+        )
+        mock_enum.return_value = {
+            "domain": "example.com",
+            "live_subdomains": ["api.example.com", "mail.example.com", "www.example.com"],
+            "sources": {
+                "ct_candidates": 2,
+                "c99_candidates": 0,
+                "permutation_candidates": 10000,
+                "ct_live": 2,
+                "c99_live": 0,
+                "permutation_live": 1,
+            },
+        }
+        resp = client.post(
+            "/recon/subdomains", json={"targets": ["https://example.com"]},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body[0]["domain"] == "example.com"
+        assert len(body[0]["live_subdomains"]) == 3
+        assert "api.example.com" in body[0]["live_subdomains"]
+        assert body[0]["sources"]["ct_live"] == 2
+
+    @patch("src.routers.discovery.enumerate_subdomains", new_callable=AsyncMock)
+    @patch("src.routers.discovery.query_ct_logs", new_callable=AsyncMock)
+    def test_subdomains_handles_enumeration_failure(self, mock_ct, mock_enum):
+        mock_ct.return_value = CTResult(domain="example.com")
+        mock_enum.side_effect = RuntimeError("Enumeration failed")
+        resp = client.post(
+            "/recon/subdomains", json={"targets": ["https://example.com"]},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body[0]["domain"] == "example.com"
+        assert body[0]["error"] is not None
+        assert "Enumeration failed" in body[0]["error"]

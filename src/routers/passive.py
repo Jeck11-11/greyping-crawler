@@ -16,6 +16,7 @@ from .._http_utils import validate_target
 from ..models import (
     CTResult,
     DNSResult,
+    EmailSecurityResult,
     RDAPResult,
     ReconRequest,
     WaybackResult,
@@ -23,6 +24,7 @@ from ..models import (
 from ..passive_intel import (
     query_ct_logs,
     query_dns,
+    query_email_security,
     query_rdap,
     query_wayback,
 )
@@ -83,4 +85,26 @@ async def recon_wayback(request: ReconRequest) -> list[WaybackResult]:
     )
     for r in results:
         fill_not_found(r)
+    return results
+
+
+@router.post("/email-security", response_model=list[EmailSecurityResult])
+async def recon_email_security(request: ReconRequest) -> list[EmailSecurityResult]:
+    """Audit email authentication (SPF/DKIM/DMARC) via DNS lookups."""
+    targets = [validate_target(t) for t in request.targets]
+    results: list[EmailSecurityResult] = []
+
+    for t in targets:
+        domain = _domain_of(t)
+        try:
+            dns_result = await query_dns(domain, timeout=request.timeout)
+            mx_records = dns_result.mx_records if dns_result else None
+            result = await query_email_security(
+                domain, mx_records=mx_records, timeout=request.timeout
+            )
+            fill_not_found(result)
+            results.append(result)
+        except Exception as exc:
+            results.append(EmailSecurityResult(domain=domain, error=str(exc)))
+
     return results

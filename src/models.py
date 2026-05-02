@@ -93,6 +93,23 @@ class BreachReconRequest(ReconRequest):
     )
 
 
+class EmailValidationRequest(BaseModel):
+    """Payload for /recon/email-validation."""
+
+    emails: list[str] = Field(
+        ...,
+        min_length=1,
+        max_length=20,
+        description="One or more email addresses to validate.",
+    )
+    timeout: int = Field(
+        default=30,
+        ge=5,
+        le=120,
+        description="Per-request timeout in seconds.",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Sub-models used inside the scan result
 # ---------------------------------------------------------------------------
