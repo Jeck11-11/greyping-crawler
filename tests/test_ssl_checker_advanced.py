@@ -40,7 +40,7 @@ class TestTLSVersionDetection:
         cert = _make_cert()
         result = _parse_cert(cert, "example.com", tls_version="TLSv1.1")
         assert any("Deprecated TLS" in i for i in result.issues)
-        assert not result.is_valid
+        assert not result.cert_valid
 
     def test_tls10_flagged_deprecated(self):
         cert = _make_cert()

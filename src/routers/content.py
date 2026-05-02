@@ -8,10 +8,11 @@ import logging
 from fastapi import APIRouter
 
 from .._http_utils import validate_target
-from .._link_utils import normalise_ext_url, is_social_url, MAX_FOUND_ON
+from .._link_utils import is_asset_url, normalise_ext_url, is_social_url, MAX_FOUND_ON
 from .._social_utils import detect_platform
 from ..crawler import crawl_domain
 from ..postprocess import fill_not_found
+from ..screenshot import take_screenshot
 from ..models import (
     ContactReconResult,
     CrawlReconRequest,
@@ -21,6 +22,8 @@ from ..models import (
     IoCReconResult,
     LinkReconResult,
     PhoneFinding,
+    ReconRequest,
+    ScreenshotResult,
     SecretsReconResult,
     SocialFinding,
 )
@@ -122,7 +125,8 @@ async def recon_links(request: CrawlReconRequest) -> list[LinkReconResult]:
             for page in pages:
                 for link in page.links:
                     if link.link_type == "internal":
-                        internal.add(link.url)
+                        if not is_asset_url(link.url):
+                            internal.add(link.url)
                     elif not is_social_url(link.url):
                         norm = normalise_ext_url(link.url)
                         entry = ext.setdefault(
@@ -205,3 +209,18 @@ async def recon_ioc(request: CrawlReconRequest) -> list[IoCReconResult]:
     for r in results:
         fill_not_found(r)
     return results
+
+
+@router.post("/screenshot", response_model=list[ScreenshotResult])
+async def recon_screenshot(request: ReconRequest) -> list[ScreenshotResult]:
+    """Take screenshots of provided target URLs."""
+    targets = [validate_target(t) for t in request.targets]
+
+    async def _one(target: str) -> ScreenshotResult:
+        try:
+            return await take_screenshot(target)
+        except Exception as exc:
+            logger.warning("Screenshot failed for %s: %s", target, exc)
+            return ScreenshotResult(url=target, error=str(exc))
+
+    return await asyncio.gather(*(_one(t) for t in targets))

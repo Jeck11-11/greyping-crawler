@@ -27,7 +27,7 @@ if [ "$#" -eq 0 ] || [ "$1" = "scan" ]; then
   if [ "$#" -gt 0 ]; then
     shift
   fi
-  set -- nuclei -passive -project -project-path "${PROJECT_DIR}" -output "${OUTPUT_FILE}" -config "${CONFIG_FILE}"
+  set -- nuclei -project -project-path "${PROJECT_DIR}" -output "${OUTPUT_FILE}" -config "${CONFIG_FILE}"
 
   if [ "${SILENT_MODE}" = "true" ]; then
     set -- "$@" -silent

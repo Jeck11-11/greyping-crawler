@@ -7,16 +7,20 @@ import logging
 
 from fastapi import APIRouter
 
+from urllib.parse import urlparse
+
 from .._http_utils import fetch_landing_page, validate_target
 from ..cookie_checker import analyze_cookies
 from ..models import (
     CookiesReconResult,
     HeadersReconResult,
+    PortScanResult,
     ReconRequest,
     SecurityHeadersResult,
     SSLCertResult,
     SSLReconResult,
 )
+from ..port_scanner import scan_ports
 from ..security_headers import analyze_headers
 from ..postprocess import fill_not_found
 from ..ssl_checker import check_ssl
@@ -39,7 +43,7 @@ async def recon_ssl(request: ReconRequest) -> list[SSLReconResult]:
             logger.warning("SSL check failed for %s: %s", target, exc)
             return SSLReconResult(
                 target=target,
-                ssl=SSLCertResult(is_valid=False, issues=[f"Check failed: {exc}"]),
+                ssl=SSLCertResult(cert_valid=False, issues=[f"Check failed: {exc}"]),
                 error=str(exc),
             )
 
@@ -84,6 +88,25 @@ async def recon_cookies(request: ReconRequest) -> list[CookiesReconResult]:
         except Exception as exc:
             logger.warning("Cookie audit failed for %s: %s", target, exc)
             return CookiesReconResult(target=target, cookies=[], error=str(exc))
+
+    results = await asyncio.gather(*(_one(t) for t in targets))
+    for r in results:
+        fill_not_found(r)
+    return results
+
+
+@router.post("/ports", response_model=list[PortScanResult])
+async def recon_ports(request: ReconRequest) -> list[PortScanResult]:
+    """Scan the top TCP ports for each target."""
+    targets = [validate_target(t) for t in request.targets]
+
+    async def _one(target: str) -> PortScanResult:
+        hostname = urlparse(target).hostname or target
+        try:
+            return await scan_ports(hostname)
+        except Exception as exc:
+            logger.warning("Port scan failed for %s: %s", target, exc)
+            return PortScanResult(target=hostname, error=str(exc))
 
     results = await asyncio.gather(*(_one(t) for t in targets))
     for r in results:

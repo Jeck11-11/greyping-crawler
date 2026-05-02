@@ -30,7 +30,7 @@ class TestLightTouchScan:
     def test_lighttouch_does_one_get_and_skips_loud_probes(
         self, mock_ssl, mock_fetch,
     ):
-        mock_ssl.return_value = SSLCertResult(is_valid=True, grade="A")
+        mock_ssl.return_value = SSLCertResult(cert_valid=True, grade="A")
         html = (
             '<html><head><title>Hello</title>'
             '<meta name="generator" content="WordPress 6.4.1">'
@@ -54,8 +54,8 @@ class TestLightTouchScan:
         r = data["results"][0]
 
         # Verified: single page, no path probe, no JS mine, no breach
-        assert r["pages_scanned"] == 1
-        assert r["sensitive_paths"] == []
+        assert r["pages"]["total"] == 1
+        assert r["security"]["sensitive_paths"] == []
         assert r["js_intel"] is None
         assert r["breaches"] == []
 
@@ -63,9 +63,9 @@ class TestLightTouchScan:
         tech_names = {t["name"] for t in r["technologies"]}
         assert "WordPress" in tech_names
         assert "Nginx" in tech_names
-        assert r["ssl_certificate"]["grade"] == "A"
-        assert r["internal_links"] == ["https://example.com/about"]
-        assert any(e["email"] == "hi@example.com" for e in r["emails"])
+        assert r["ssl"]["grade"] == "A"
+        assert r["links"]["internal"] == ["https://example.com/about"]
+        assert any(e["email"] == "hi@example.com" for e in r["contacts"]["emails"])
 
         # Stealth flag was set
         _args, kwargs = mock_fetch.call_args
@@ -74,7 +74,7 @@ class TestLightTouchScan:
     @patch("src.app.fetch_landing_page_full", new_callable=AsyncMock)
     @patch("src.app.check_ssl", new_callable=AsyncMock)
     def test_lighttouch_records_error_on_fetch_failure(self, mock_ssl, mock_fetch):
-        mock_ssl.return_value = SSLCertResult(is_valid=True, grade="A")
+        mock_ssl.return_value = SSLCertResult(cert_valid=True, grade="A")
         mock_fetch.return_value = ({}, httpx.Cookies(), "")  # empty body
         resp = client.post(
             "/scan/lighttouch",
@@ -82,7 +82,7 @@ class TestLightTouchScan:
         )
         assert resp.status_code == 200
         r = resp.json()["results"][0]
-        assert r["pages_scanned"] == 0
+        assert r["pages"]["total"] == 0
         assert r["error"] is not None
 
 
@@ -122,19 +122,18 @@ class TestPassiveScan:
         )
         assert resp.status_code == 200
         r = resp.json()["results"][0]
-        pi = r["passive_intel"]
 
-        assert len(pi["dns"]["a_records"]) == 1
-        assert pi["dns"]["a_records"][0]["address"] == "93.184.216.34"
-        assert pi["ct"]["certificates_seen"] == 5
-        assert pi["rdap"]["registrar"] == "Example Registrar"
-        assert pi["wayback"]["snapshot_count"] == 42
+        assert len(r["dns"]["records"]["a_records"]) == 1
+        assert r["dns"]["records"]["a_records"][0]["address"] == "93.184.216.34"
+        assert r["passive_intel"]["ct"]["certificates_seen"] == 5
+        assert r["passive_intel"]["rdap"]["registrar"] == "Example Registrar"
+        assert r["passive_intel"]["wayback"]["snapshot_count"] == 42
 
         # Passive mode never fetches the landing page — these fields stay default.
-        assert r["pages_scanned"] == 0
-        assert r["pages"] == []
+        assert r["pages"]["total"] == 0
+        assert r["pages"]["routes"] == []
         assert r["technologies"] == []
-        assert r["sensitive_paths"] == []
+        assert r["security"]["sensitive_paths"] == []
 
         # Quick-glance summary counts make it through.
         assert r["summary"]["subdomains_found"] == 2
@@ -164,8 +163,8 @@ class TestPassiveScan:
         # so callers don't need to null-check every sub-field.
         assert r["passive_intel"]["ct"] is not None
         assert "crt.sh down" in r["passive_intel"]["ct"]["error"]
-        assert r["passive_intel"]["dns"] is not None
-        assert r["passive_intel"]["dns"]["error"] is None
+        assert r["dns"]["records"] is not None
+        assert r["dns"]["records"]["error"] is None
         # Only a subset failed → the top-level result.error stays clean.
         assert r["error"] is None
 
@@ -196,6 +195,8 @@ class TestPassiveScan:
         r = resp.json()["results"][0]
         assert r["passive_intel"]["ct"]["error"] == "RuntimeError"
 
+
+
     @patch("src.app.check_breaches", new_callable=AsyncMock)
     @patch("src.app.query_wayback", new_callable=AsyncMock)
     @patch("src.app.query_rdap", new_callable=AsyncMock)
@@ -219,7 +220,7 @@ class TestPassiveScan:
         assert resp.status_code == 200
         r = resp.json()["results"][0]
         # Every sub-source carries its own error.
-        assert "DNS resolution timed out" in r["passive_intel"]["dns"]["error"]
+        assert "DNS resolution timed out" in r["dns"]["records"]["error"]
         assert "crt.sh unreachable" in r["passive_intel"]["ct"]["error"]
         assert "rdap.org unreachable" in r["passive_intel"]["rdap"]["error"]
         assert "archive.org unreachable" in r["passive_intel"]["wayback"]["error"]

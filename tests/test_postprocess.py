@@ -14,6 +14,7 @@ class Outer(BaseModel):
     title: str = ""
     inner: Inner = Field(default_factory=Inner)
     tags: list[str] = Field(default_factory=list)
+    labels: list[str] = Field(default_factory=list)
     items: list[Inner] = Field(default_factory=list)
     error: str = ""
 
@@ -45,9 +46,14 @@ class TestFillNotFound:
         assert obj.inner.name == "not_found"
 
     def test_empty_list_of_strings_filled(self):
+        obj = Outer(labels=[])
+        fill_not_found(obj)
+        assert obj.labels == ["not_found"]
+
+    def test_skipped_list_stays_empty(self):
         obj = Outer(tags=[])
         fill_not_found(obj)
-        assert obj.tags == ["not_found"]
+        assert obj.tags == []
 
     def test_nonempty_list_preserved(self):
         obj = Outer(tags=["a", "b"])

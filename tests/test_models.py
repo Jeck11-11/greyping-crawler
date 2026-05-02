@@ -58,5 +58,5 @@ class TestDomainResult:
     def test_defaults(self):
         result = DomainResult(target="https://example.com")
         assert result.pages_scanned == 0
-        assert result.pages == []
+        assert result.pages.total == 0
         assert result.breaches == []
