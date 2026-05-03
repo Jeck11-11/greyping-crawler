@@ -33,7 +33,7 @@ C99_TIMEOUT = int(os.getenv("C99_TIMEOUT", "20"))
 
 # Nuclei integration
 NUCLEI_API_URL = os.getenv("NUCLEI_API_URL", "")
-NUCLEI_TIMEOUT = int(os.getenv("NUCLEI_TIMEOUT", "120"))
+NUCLEI_TIMEOUT = int(os.getenv("NUCLEI_TIMEOUT", "300"))
 
 # CVE lookup
 CVE_LOOKUP_TIMEOUT = int(os.getenv("CVE_LOOKUP_TIMEOUT", "10"))

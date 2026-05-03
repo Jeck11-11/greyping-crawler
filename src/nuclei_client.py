@@ -80,11 +80,12 @@ async def run_nuclei_scan(
             data = resp.json()
     except Exception as exc:
         elapsed = time.monotonic() - start
-        logger.warning("Nuclei scan failed: %s", exc)
+        error_msg = str(exc) or type(exc).__name__
+        logger.warning("Nuclei scan failed: %s", error_msg)
         return NucleiResult(
             target=targets[0] if targets else "",
             scan_duration_seconds=round(elapsed, 2),
-            error=str(exc),
+            error=error_msg,
         )
 
     elapsed = time.monotonic() - start
