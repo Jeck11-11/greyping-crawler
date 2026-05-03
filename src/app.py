@@ -35,7 +35,6 @@ from .cve_lookup import lookup_cves
 from .easm_report import build_easm_report
 from .fair_signals import compute_fair_signals
 from .favicon import fetch_favicon
-from .nuclei_client import run_nuclei_scan
 from .subdomain_takeover import scan_subdomain_takeover
 from .cloud_assets import discover_cloud_assets
 from .port_scanner import scan_ports
@@ -163,7 +162,7 @@ async def _scan_single_target(
     started = datetime.now(timezone.utc).isoformat()
 
     # Run crawl, SSL check, landing-page fetch, sensitive-path scan,
-    # passive intel (DNS, CT, RDAP, Wayback), nuclei, and favicon concurrently.
+    # passive intel (DNS, CT, RDAP, Wayback), and favicon concurrently.
     crawl_task = crawl_domain(
         target,
         render_js=request.render_js,
@@ -178,21 +177,23 @@ async def _scan_single_target(
     ct_task = query_ct_logs(domain, timeout=request.timeout)
     rdap_task = query_rdap(domain, timeout=request.timeout)
     wayback_task = query_wayback(domain, timeout=request.timeout)
-    nuclei_task = run_nuclei_scan([target])
     favicon_task = fetch_favicon(target, timeout=request.timeout)
     port_scan_task = scan_ports(domain)
     cloud_assets_task = discover_cloud_assets(domain)
 
     (crawl_result, ssl_result, landing_result, paths_result,
      dns_result, ct_result, rdap_result, wayback_result,
-     nuclei_result, favicon_result,
+     favicon_result,
      port_scan_result, cloud_assets_result) = await asyncio.gather(
         crawl_task, ssl_task, landing_task, paths_task,
         dns_task, ct_task, rdap_task, wayback_task,
-        nuclei_task, favicon_task,
+        favicon_task,
         port_scan_task, cloud_assets_task,
         return_exceptions=True,
     )
+
+    # Nuclei is a separate scan — use /recon/nuclei endpoint directly.
+    nuclei_result = NucleiResult(target=target)
 
     # Handle crawl failure
     if isinstance(crawl_result, Exception):
@@ -269,12 +270,6 @@ async def _scan_single_target(
         except Exception as exc:
             logger.warning("CVE lookup failed for %s: %s", target, exc)
 
-    # Process nuclei result
-    if isinstance(nuclei_result, Exception):
-        logger.warning("Nuclei scan failed for %s: %s", target, nuclei_result)
-        nuclei_result = NucleiResult(target=target, error=str(nuclei_result))
-    elif nuclei_result and nuclei_result.error:
-        logger.debug("Nuclei unavailable for %s: %s", target, nuclei_result.error)
 
     # Process favicon result
     if isinstance(favicon_result, Exception):
