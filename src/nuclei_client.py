@@ -53,7 +53,7 @@ def _read_output_file(path: str) -> list[NucleiFinding]:
 async def run_nuclei_scan(
     targets: list[str],
     *,
-    severity: str = "info,low,medium,high,critical",
+    severity: str = "medium,high,critical",
     tags: str = "",
     timeout: int = NUCLEI_TIMEOUT,
 ) -> NucleiResult:
@@ -74,7 +74,11 @@ async def run_nuclei_scan(
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
             resp = await client.post(
                 f"{nuclei_url.rstrip('/')}/scan",
-                json={"targets": targets, "additional_args": extra_args},
+                json={
+                    "targets": targets,
+                    "additional_args": extra_args,
+                    "timeout": timeout,
+                },
             )
             resp.raise_for_status()
             data = resp.json()
