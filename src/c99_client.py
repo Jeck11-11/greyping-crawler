@@ -94,7 +94,7 @@ async def validate_email(email: str, *, timeout: int = C99_TIMEOUT) -> dict[str,
     data = await _c99_get("emailvalidator", {"email": email}, timeout=timeout)
     if not data:
         return {"email": email, "valid": None, "error": "C99 API unavailable"}
-    logger.debug("C99 emailvalidator response for %s: %s", email, data)
+    logger.info("C99 emailvalidator raw response for %s: %s", email, data)
     if not data.get("success"):
         return {"email": email, "valid": None, "error": data.get("error", "lookup failed")}
     result = data.get("result") or data
