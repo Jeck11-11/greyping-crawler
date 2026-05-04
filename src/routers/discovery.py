@@ -20,14 +20,16 @@ from ..models import (
     NucleiResult,
     PathsReconResult,
     ReconRequest,
+    SubdomainEnumResult,
     SubdomainTakeoverResult,
     TechIntelResult,
 )
 from ..favicon import fetch_favicon
 from ..nuclei_client import run_nuclei_scan
+from ..passive_intel import query_ct_logs
 from ..path_scanner import scan_sensitive_paths
 from ..postprocess import fill_not_found
-from ..subdomain_takeover import scan_subdomain_takeover
+from ..subdomain_takeover import enumerate_subdomains, scan_subdomain_takeover
 from ..tech_fingerprint import fingerprint_tech
 
 logger = logging.getLogger(__name__)
@@ -179,6 +181,46 @@ async def recon_takeover(request: ReconRequest) -> list[SubdomainTakeoverResult]
     results = await asyncio.gather(*(_one(t) for t in targets))
     for r in results:
         fill_not_found(r)
+    return results
+
+
+@router.post("/subdomains", response_model=list[SubdomainEnumResult])
+async def recon_subdomains(request: ReconRequest) -> list[SubdomainEnumResult]:
+    """Enumerate subdomains via DNS brute-force and CT logs seeding."""
+    targets = [validate_target(t) for t in request.targets]
+
+    async def _one(target: str) -> SubdomainEnumResult:
+        hostname = urlparse(target).hostname or target
+        domain = hostname.lstrip("www.")
+        try:
+            ct_result = None
+            try:
+                ct_result = await query_ct_logs(domain, timeout=request.timeout)
+            except Exception:
+                pass
+            ct_subdomains = (
+                ct_result.subdomains if ct_result else []
+            )
+            enum_result = await enumerate_subdomains(
+                domain,
+                known_subdomains=ct_subdomains or None,
+                timeout=request.timeout,
+            )
+            if isinstance(enum_result, dict):
+                result = SubdomainEnumResult(
+                    domain=domain,
+                    live_subdomains=enum_result.get("live_subdomains", []),
+                    sources=enum_result.get("sources", []),
+                )
+            else:
+                result = enum_result
+            fill_not_found(result)
+            return result
+        except Exception as exc:
+            logger.warning("Subdomain enumeration failed for %s: %s", target, exc)
+            return SubdomainEnumResult(domain=domain, error=str(exc))
+
+    results = await asyncio.gather(*(_one(t) for t in targets))
     return results
 
 

@@ -1,11 +1,22 @@
-"""Tests for /recon/dns, /recon/ct, /recon/whois, /recon/wayback."""
+"""Tests for /recon/dns, /recon/ct, /recon/whois, /recon/wayback, /recon/email-security."""
 
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
 from src.app import app
-from src.models import ARecord, AAAARecord, CTResult, DNSResult, RDAPResult, WaybackResult
+from src.models import (
+    ARecord,
+    AAAARecord,
+    CTResult,
+    DKIMResult,
+    DMARCResult,
+    DNSResult,
+    EmailSecurityResult,
+    RDAPResult,
+    SPFResult,
+    WaybackResult,
+)
 
 
 client = TestClient(app)
@@ -81,3 +92,53 @@ class TestReconWayback:
         assert resp.status_code == 200
         body = resp.json()
         assert body[0]["snapshot_count"] == 17
+
+
+class TestReconEmailSecurity:
+    @patch("src.routers.passive.query_email_security", new_callable=AsyncMock)
+    @patch("src.routers.passive.query_dns", new_callable=AsyncMock)
+    def test_email_security_returns_spf_dmarc_dkim(self, mock_dns, mock_email):
+        mock_dns.return_value = DNSResult(
+            domain="example.com",
+            mx_records=[],
+        )
+        mock_email.return_value = EmailSecurityResult(
+            domain="example.com",
+            spf=SPFResult(
+                raw="v=spf1 include:_spf.google.com -all",
+                exists=True,
+                all_qualifier="-all",
+            ),
+            dmarc=DMARCResult(
+                raw="v=DMARC1; p=reject; rua=mailto:d@example.com",
+                exists=True,
+                policy="reject",
+                rua=["mailto:d@example.com"],
+            ),
+            dkim=DKIMResult(selectors_found=["google"]),
+            grade="A",
+        )
+        resp = client.post(
+            "/recon/email-security", json={"targets": ["https://example.com"]},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body[0]["domain"] == "example.com"
+        assert body[0]["spf"]["exists"] is True
+        assert body[0]["spf"]["all_qualifier"] == "-all"
+        assert body[0]["dmarc"]["policy"] == "reject"
+        assert body[0]["dkim"]["selectors_found"] == ["google"]
+        assert body[0]["grade"] == "A"
+
+    @patch("src.routers.passive.query_email_security", new_callable=AsyncMock)
+    @patch("src.routers.passive.query_dns", new_callable=AsyncMock)
+    def test_email_security_handles_failure(self, mock_dns, mock_email):
+        mock_dns.side_effect = RuntimeError("DNS lookup failed")
+        resp = client.post(
+            "/recon/email-security", json={"targets": ["https://example.com"]},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body[0]["domain"] == "example.com"
+        assert body[0]["error"] is not None
+        assert "DNS lookup failed" in body[0]["error"]

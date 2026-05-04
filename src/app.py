@@ -35,12 +35,10 @@ from .cve_lookup import lookup_cves
 from .easm_report import build_easm_report
 from .fair_signals import compute_fair_signals
 from .favicon import fetch_favicon
-from .nuclei_client import run_nuclei_scan
-from .subdomain_takeover import scan_subdomain_takeover
 from .cloud_assets import discover_cloud_assets
 from .port_scanner import scan_ports
 from .screenshot import take_screenshot
-from .c99_client import check_ip_reputation, check_url_reputation, validate_email
+from .c99_client import check_ip_reputation, check_url_reputation, find_subdomains, validate_email
 from .postprocess import fill_not_found
 from .middleware import APIKeyMiddleware, RateLimitMiddleware
 from .js_miner import mine_javascript
@@ -163,7 +161,7 @@ async def _scan_single_target(
     started = datetime.now(timezone.utc).isoformat()
 
     # Run crawl, SSL check, landing-page fetch, sensitive-path scan,
-    # passive intel (DNS, CT, RDAP, Wayback), nuclei, and favicon concurrently.
+    # passive intel (DNS, CT, RDAP, Wayback), and favicon concurrently.
     crawl_task = crawl_domain(
         target,
         render_js=request.render_js,
@@ -178,21 +176,24 @@ async def _scan_single_target(
     ct_task = query_ct_logs(domain, timeout=request.timeout)
     rdap_task = query_rdap(domain, timeout=request.timeout)
     wayback_task = query_wayback(domain, timeout=request.timeout)
-    nuclei_task = run_nuclei_scan([target])
     favicon_task = fetch_favicon(target, timeout=request.timeout)
     port_scan_task = scan_ports(domain)
     cloud_assets_task = discover_cloud_assets(domain)
+    c99_subs_task = find_subdomains(domain)
 
     (crawl_result, ssl_result, landing_result, paths_result,
      dns_result, ct_result, rdap_result, wayback_result,
-     nuclei_result, favicon_result,
-     port_scan_result, cloud_assets_result) = await asyncio.gather(
+     favicon_result,
+     port_scan_result, cloud_assets_result, c99_subs_result) = await asyncio.gather(
         crawl_task, ssl_task, landing_task, paths_task,
         dns_task, ct_task, rdap_task, wayback_task,
-        nuclei_task, favicon_task,
-        port_scan_task, cloud_assets_task,
+        favicon_task,
+        port_scan_task, cloud_assets_task, c99_subs_task,
         return_exceptions=True,
     )
+
+    # Nuclei is a separate scan — use /recon/nuclei endpoint directly.
+    nuclei_result = NucleiResult(target=target)
 
     # Handle crawl failure
     if isinstance(crawl_result, Exception):
@@ -269,12 +270,6 @@ async def _scan_single_target(
         except Exception as exc:
             logger.warning("CVE lookup failed for %s: %s", target, exc)
 
-    # Process nuclei result
-    if isinstance(nuclei_result, Exception):
-        logger.warning("Nuclei scan failed for %s: %s", target, nuclei_result)
-        nuclei_result = NucleiResult(target=target, error=str(nuclei_result))
-    elif nuclei_result and nuclei_result.error:
-        logger.debug("Nuclei unavailable for %s: %s", target, nuclei_result.error)
 
     # Process favicon result
     if isinstance(favicon_result, Exception):
@@ -292,18 +287,8 @@ async def _scan_single_target(
         cloud_assets_result = CloudAssetResult(domain=domain, error=str(cloud_assets_result))
 
     # Subdomain takeover scan (uses CT-discovered subdomains)
-    ct_subdomains = (
-        ct_result.subdomains
-        if not isinstance(ct_result, Exception) and ct_result and not ct_result.error
-        else []
-    )
-    try:
-        takeover_result = await scan_subdomain_takeover(
-            domain, known_subdomains=ct_subdomains,
-        )
-    except Exception as exc:
-        logger.warning("Takeover scan failed for %s: %s", target, exc)
-        takeover_result = None
+    # Subdomain takeover is a separate scan — use /recon/takeover directly.
+    takeover_result = None
 
     # Process sensitive paths
     if isinstance(paths_result, Exception):
@@ -332,26 +317,37 @@ async def _scan_single_target(
     rdap_result = _passive_result(rdap_result, RDAPResult)
     wayback_result = _passive_result(wayback_result, WaybackResult)
 
-    # Email security + IP enrichment (depend on DNS data)
+    # Merge C99 subdomains into CT result
+    c99_subs = c99_subs_result if isinstance(c99_subs_result, list) else []
+    if c99_subs and ct_result and not ct_result.error:
+        merged = set(ct_result.subdomains or [])
+        merged.update(c99_subs)
+        ct_result.subdomains = sorted(merged)
+
+    # Email security + IP enrichment (depend on DNS data, run concurrently)
     mx_records = dns_result.mx_records if not dns_result.error else []
     a_records = dns_result.a_records if not dns_result.error else []
     a_ips = [r.address for r in a_records] if a_records else []
 
-    try:
-        email_sec = await asyncio.wait_for(
+    email_sec_raw, ip_enrich_raw = await asyncio.gather(
+        asyncio.wait_for(
             query_email_security(domain, mx_records, timeout=request.timeout),
             timeout=request.timeout,
-        )
-    except Exception as exc:
-        email_sec = EmailSecurityResult(domain=domain, error=str(exc))
-
-    try:
-        ip_enrich = await asyncio.wait_for(
+        ),
+        asyncio.wait_for(
             query_ip_enrichment(domain, a_ips, timeout=request.timeout),
             timeout=request.timeout,
-        )
-    except Exception as exc:
-        ip_enrich = IPEnrichmentResult(domain=domain, error=str(exc))
+        ),
+        return_exceptions=True,
+    )
+    email_sec = (
+        email_sec_raw if not isinstance(email_sec_raw, Exception)
+        else EmailSecurityResult(domain=domain, error=str(email_sec_raw))
+    )
+    ip_enrich = (
+        ip_enrich_raw if not isinstance(ip_enrich_raw, Exception)
+        else IPEnrichmentResult(domain=domain, error=str(ip_enrich_raw))
+    )
 
     dns_group = DNSGroup(
         records=dns_result, email_security=email_sec, ip_enrichment=ip_enrich,

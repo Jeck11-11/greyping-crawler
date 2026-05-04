@@ -51,7 +51,7 @@ async def _probe_port(
         try:
             data = await asyncio.wait_for(reader.read(1024), timeout=2)
             if data:
-                banner = data.decode("utf-8", errors="replace").strip()
+                banner = data.decode("utf-8", errors="replace").replace("\x00", "").strip()
         except (asyncio.TimeoutError, OSError):
             pass
         finally:
