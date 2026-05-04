@@ -92,16 +92,27 @@ async def check_url_reputation(url: str, *, timeout: int = C99_TIMEOUT) -> dict[
 async def validate_email(email: str, *, timeout: int = C99_TIMEOUT) -> dict[str, Any]:
     """Validate whether an email address is deliverable."""
     data = await _c99_get("emailvalidator", {"email": email}, timeout=timeout)
-    if not data or not data.get("success"):
-        return {"email": email, "valid": None, "error": "lookup failed"}
+    if not data:
+        return {"email": email, "valid": None, "error": "C99 API unavailable"}
+    logger.debug("C99 emailvalidator response for %s: %s", email, data)
+    if not data.get("success"):
+        return {"email": email, "valid": None, "error": data.get("error", "lookup failed")}
     result = data.get("result") or data
+    if isinstance(result, str):
+        is_valid = result.lower() in ("valid", "true", "ok", "deliverable")
+        return {"email": email, "valid": is_valid}
+    if isinstance(result, bool):
+        return {"email": email, "valid": result}
     if isinstance(result, dict):
+        valid_val = result.get("valid", result.get("is_valid", result.get("deliverable")))
+        if isinstance(valid_val, str):
+            valid_val = valid_val.lower() in ("true", "valid", "ok", "deliverable", "1")
         return {
             "email": email,
-            "valid": result.get("valid", result.get("is_valid")),
+            "valid": valid_val,
             "disposable": result.get("disposable", False),
-            "role_account": result.get("role", False),
-            "free_provider": result.get("free", False),
+            "role_account": result.get("role", result.get("role_account", False)),
+            "free_provider": result.get("free", result.get("free_provider", False)),
             "details": result,
         }
     return {"email": email, "valid": None, "details": result}
