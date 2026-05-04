@@ -17,7 +17,7 @@ C99_TIMEOUT = int(os.getenv("C99_TIMEOUT", "20"))
 
 async def _c99_get(endpoint: str, params: dict[str, str], timeout: int = C99_TIMEOUT) -> dict | None:
     if not C99_API_KEY:
-        logger.warning("C99 %s skipped — no API key configured", endpoint)
+        print(f"[C99] {endpoint} skipped — no API key", flush=True)
         return None
     params["key"] = C99_API_KEY
     params["json"] = ""
@@ -26,9 +26,10 @@ async def _c99_get(endpoint: str, params: dict[str, str], timeout: int = C99_TIM
             resp = await client.get(f"{C99_BASE_URL}/{endpoint}", params=params)
             resp.raise_for_status()
             data = resp.json()
-            logger.info("C99 %s response (status=%s): %s", endpoint, resp.status_code, str(data)[:500])
+            print(f"[C99] {endpoint} response (status={resp.status_code}): {str(data)[:500]}", flush=True)
             return data
     except Exception as exc:
+        print(f"[C99] {endpoint} failed: {exc}", flush=True)
         logger.warning("C99 %s failed: %s", endpoint, exc)
         return None
 
