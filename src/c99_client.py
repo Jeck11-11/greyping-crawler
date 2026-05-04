@@ -17,6 +17,7 @@ C99_TIMEOUT = int(os.getenv("C99_TIMEOUT", "20"))
 
 async def _c99_get(endpoint: str, params: dict[str, str], timeout: int = C99_TIMEOUT) -> dict | None:
     if not C99_API_KEY:
+        logger.warning("C99 %s skipped — no API key configured", endpoint)
         return None
     params["key"] = C99_API_KEY
     params["json"] = ""
@@ -24,7 +25,9 @@ async def _c99_get(endpoint: str, params: dict[str, str], timeout: int = C99_TIM
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
             resp = await client.get(f"{C99_BASE_URL}/{endpoint}", params=params)
             resp.raise_for_status()
-            return resp.json()
+            data = resp.json()
+            logger.info("C99 %s response (status=%s): %s", endpoint, resp.status_code, str(data)[:500])
+            return data
     except Exception as exc:
         logger.warning("C99 %s failed: %s", endpoint, exc)
         return None
@@ -94,7 +97,6 @@ async def validate_email(email: str, *, timeout: int = C99_TIMEOUT) -> dict[str,
     data = await _c99_get("emailvalidator", {"email": email}, timeout=timeout)
     if not data:
         return {"email": email, "valid": None, "error": "C99 API unavailable"}
-    logger.info("C99 emailvalidator raw response for %s: %s", email, data)
     if not data.get("success"):
         return {"email": email, "valid": None, "error": data.get("error", "lookup failed")}
     result = data.get("result") or data
