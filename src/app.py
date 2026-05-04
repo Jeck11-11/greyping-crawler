@@ -180,15 +180,18 @@ async def _scan_single_target(
     port_scan_task = scan_ports(domain)
     cloud_assets_task = discover_cloud_assets(domain)
     c99_subs_task = find_subdomains(domain)
+    robots_task = fetch_and_parse_robots_sitemap(target, timeout=request.timeout)
 
     (crawl_result, ssl_result, landing_result, paths_result,
      dns_result, ct_result, rdap_result, wayback_result,
      favicon_result,
-     port_scan_result, cloud_assets_result, c99_subs_result) = await asyncio.gather(
+     port_scan_result, cloud_assets_result, c99_subs_result,
+     robots_sitemap_result) = await asyncio.gather(
         crawl_task, ssl_task, landing_task, paths_task,
         dns_task, ct_task, rdap_task, wayback_task,
         favicon_task,
         port_scan_task, cloud_assets_task, c99_subs_task,
+        robots_task,
         return_exceptions=True,
     )
 
@@ -255,20 +258,24 @@ async def _scan_single_target(
     except Exception as exc:
         logger.warning("Tech fingerprint failed for %s: %s", target, exc)
 
-    try:
-        js_intel_result = await mine_javascript(
-            target, landing_html, timeout=request.timeout,
-        )
-    except Exception as exc:
-        logger.warning("JS mining failed for %s: %s", target, exc)
-
-    # CVE correlation from detected tech versions
+    # JS mining + CVE lookup run in parallel (independent of each other)
     cve_findings: list = []
-    if tech_findings:
-        try:
-            cve_findings = await lookup_cves(tech_findings, timeout=request.timeout)
-        except Exception as exc:
-            logger.warning("CVE lookup failed for %s: %s", target, exc)
+    js_coro = mine_javascript(target, landing_html, timeout=request.timeout)
+    cve_coro = lookup_cves(tech_findings, timeout=request.timeout) if tech_findings else None
+    if cve_coro:
+        js_raw, cve_raw = await asyncio.gather(js_coro, cve_coro, return_exceptions=True)
+    else:
+        js_raw = await asyncio.gather(js_coro, return_exceptions=True)
+        js_raw = js_raw[0]
+        cve_raw = []
+    if isinstance(js_raw, Exception):
+        logger.warning("JS mining failed for %s: %s", target, js_raw)
+    else:
+        js_intel_result = js_raw
+    if isinstance(cve_raw, Exception):
+        logger.warning("CVE lookup failed for %s: %s", target, cve_raw)
+    elif isinstance(cve_raw, list):
+        cve_findings = cve_raw
 
 
     # Process favicon result
@@ -295,14 +302,12 @@ async def _scan_single_target(
         logger.warning("Path scan failed for %s: %s", target, paths_result)
         paths_result = []
 
-    # Fetch and parse robots.txt + sitemap.xml
+    # Unpack robots/sitemap from parallel gather
     robots_result, sitemap_result = None, None
-    try:
-        robots_result, sitemap_result = await fetch_and_parse_robots_sitemap(
-            target, timeout=request.timeout,
-        )
-    except Exception as exc:
-        logger.warning("robots/sitemap parse failed for %s: %s", target, exc)
+    if isinstance(robots_sitemap_result, tuple):
+        robots_result, sitemap_result = robots_sitemap_result
+    elif isinstance(robots_sitemap_result, Exception):
+        logger.warning("robots/sitemap parse failed for %s: %s", target, robots_sitemap_result)
 
     # Process passive intel results
     def _passive_result(x, kind):
@@ -443,32 +448,44 @@ async def _scan_single_target(
             found_on=unique_pages[:MAX_FOUND_ON],
         ))
 
-    # C99 email validation (up to 20 discovered emails)
+    # Email validation + breach checks run in parallel
     email_validations: list[EmailValidationResult] = []
-    discovered_emails = sorted(email_sources)[:20]
-    if discovered_emails:
-        try:
-            val_tasks = [validate_email(e) for e in discovered_emails]
-            val_results = await asyncio.gather(*val_tasks, return_exceptions=True)
-            for raw in val_results:
-                if isinstance(raw, dict):
-                    email_validations.append(EmailValidationResult(
-                        email=raw.get("email", ""),
-                        valid=raw.get("valid"),
-                        disposable=raw.get("disposable", False),
-                        role_account=raw.get("role_account", False),
-                        free_provider=raw.get("free_provider", False),
-                    ))
-        except Exception as exc:
-            logger.warning("Email validation failed for %s: %s", domain, exc)
-
-    # Breach checks
     breaches = []
-    if request.check_breaches:
-        try:
-            breaches = await check_breaches(domain, list(email_sources))
-        except Exception as exc:
-            logger.warning("Breach check failed for %s: %s", domain, exc)
+    discovered_emails = sorted(email_sources)[:20]
+
+    async def _do_email_validation() -> list[EmailValidationResult]:
+        if not discovered_emails:
+            return []
+        val_tasks = [validate_email(e) for e in discovered_emails]
+        val_results = await asyncio.gather(*val_tasks, return_exceptions=True)
+        results = []
+        for raw in val_results:
+            if isinstance(raw, dict):
+                results.append(EmailValidationResult(
+                    email=raw.get("email", ""),
+                    valid=raw.get("valid"),
+                    disposable=raw.get("disposable", False),
+                    role_account=raw.get("role_account", False),
+                    free_provider=raw.get("free_provider", False),
+                ))
+        return results
+
+    async def _do_breach_check() -> list:
+        if not request.check_breaches:
+            return []
+        return await check_breaches(domain, list(email_sources))
+
+    val_raw, breach_raw = await asyncio.gather(
+        _do_email_validation(), _do_breach_check(), return_exceptions=True,
+    )
+    if isinstance(val_raw, Exception):
+        logger.warning("Email validation failed for %s: %s", domain, val_raw)
+    else:
+        email_validations = val_raw
+    if isinstance(breach_raw, Exception):
+        logger.warning("Breach check failed for %s: %s", domain, breach_raw)
+    else:
+        breaches = breach_raw
 
     # Screenshots — admin paths and takeover pages
     from .config import SCREENSHOT_MAX_PER_SCAN
