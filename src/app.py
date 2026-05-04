@@ -38,7 +38,7 @@ from .favicon import fetch_favicon
 from .cloud_assets import discover_cloud_assets
 from .port_scanner import scan_ports
 from .screenshot import take_screenshot
-from .c99_client import check_ip_reputation, check_url_reputation, validate_email
+from .c99_client import check_ip_reputation, check_url_reputation, find_subdomains, validate_email
 from .postprocess import fill_not_found
 from .middleware import APIKeyMiddleware, RateLimitMiddleware
 from .js_miner import mine_javascript
@@ -179,15 +179,16 @@ async def _scan_single_target(
     favicon_task = fetch_favicon(target, timeout=request.timeout)
     port_scan_task = scan_ports(domain)
     cloud_assets_task = discover_cloud_assets(domain)
+    c99_subs_task = find_subdomains(domain)
 
     (crawl_result, ssl_result, landing_result, paths_result,
      dns_result, ct_result, rdap_result, wayback_result,
      favicon_result,
-     port_scan_result, cloud_assets_result) = await asyncio.gather(
+     port_scan_result, cloud_assets_result, c99_subs_result) = await asyncio.gather(
         crawl_task, ssl_task, landing_task, paths_task,
         dns_task, ct_task, rdap_task, wayback_task,
         favicon_task,
-        port_scan_task, cloud_assets_task,
+        port_scan_task, cloud_assets_task, c99_subs_task,
         return_exceptions=True,
     )
 
@@ -315,6 +316,13 @@ async def _scan_single_target(
     ct_result = _passive_result(ct_result, CTResult)
     rdap_result = _passive_result(rdap_result, RDAPResult)
     wayback_result = _passive_result(wayback_result, WaybackResult)
+
+    # Merge C99 subdomains into CT result
+    c99_subs = c99_subs_result if isinstance(c99_subs_result, list) else []
+    if c99_subs and ct_result and not ct_result.error:
+        merged = set(ct_result.subdomains or [])
+        merged.update(c99_subs)
+        ct_result.subdomains = sorted(merged)
 
     # Email security + IP enrichment (depend on DNS data, run concurrently)
     mx_records = dns_result.mx_records if not dns_result.error else []
