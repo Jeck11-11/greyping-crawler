@@ -35,7 +35,6 @@ from .cve_lookup import lookup_cves
 from .easm_report import build_easm_report
 from .fair_signals import compute_fair_signals
 from .favicon import fetch_favicon
-from .subdomain_takeover import scan_subdomain_takeover
 from .cloud_assets import discover_cloud_assets
 from .port_scanner import scan_ports
 from .screenshot import take_screenshot
@@ -287,18 +286,8 @@ async def _scan_single_target(
         cloud_assets_result = CloudAssetResult(domain=domain, error=str(cloud_assets_result))
 
     # Subdomain takeover scan (uses CT-discovered subdomains)
-    ct_subdomains = (
-        ct_result.subdomains
-        if not isinstance(ct_result, Exception) and ct_result and not ct_result.error
-        else []
-    )
-    try:
-        takeover_result = await scan_subdomain_takeover(
-            domain, known_subdomains=ct_subdomains,
-        )
-    except Exception as exc:
-        logger.warning("Takeover scan failed for %s: %s", target, exc)
-        takeover_result = None
+    # Subdomain takeover is a separate scan — use /recon/takeover directly.
+    takeover_result = None
 
     # Process sensitive paths
     if isinstance(paths_result, Exception):
@@ -327,26 +316,30 @@ async def _scan_single_target(
     rdap_result = _passive_result(rdap_result, RDAPResult)
     wayback_result = _passive_result(wayback_result, WaybackResult)
 
-    # Email security + IP enrichment (depend on DNS data)
+    # Email security + IP enrichment (depend on DNS data, run concurrently)
     mx_records = dns_result.mx_records if not dns_result.error else []
     a_records = dns_result.a_records if not dns_result.error else []
     a_ips = [r.address for r in a_records] if a_records else []
 
-    try:
-        email_sec = await asyncio.wait_for(
+    email_sec_raw, ip_enrich_raw = await asyncio.gather(
+        asyncio.wait_for(
             query_email_security(domain, mx_records, timeout=request.timeout),
             timeout=request.timeout,
-        )
-    except Exception as exc:
-        email_sec = EmailSecurityResult(domain=domain, error=str(exc))
-
-    try:
-        ip_enrich = await asyncio.wait_for(
+        ),
+        asyncio.wait_for(
             query_ip_enrichment(domain, a_ips, timeout=request.timeout),
             timeout=request.timeout,
-        )
-    except Exception as exc:
-        ip_enrich = IPEnrichmentResult(domain=domain, error=str(exc))
+        ),
+        return_exceptions=True,
+    )
+    email_sec = (
+        email_sec_raw if not isinstance(email_sec_raw, Exception)
+        else EmailSecurityResult(domain=domain, error=str(email_sec_raw))
+    )
+    ip_enrich = (
+        ip_enrich_raw if not isinstance(ip_enrich_raw, Exception)
+        else IPEnrichmentResult(domain=domain, error=str(ip_enrich_raw))
+    )
 
     dns_group = DNSGroup(
         records=dns_result, email_security=email_sec, ip_enrichment=ip_enrich,
