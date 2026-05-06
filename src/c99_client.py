@@ -34,21 +34,30 @@ async def _c99_get(endpoint: str, params: dict[str, str], timeout: int = C99_TIM
         return None
 
 
-async def find_subdomains(domain: str, *, timeout: int = C99_TIMEOUT) -> list[str]:
-    """Discover subdomains via C99's subdomain finder."""
+async def find_subdomains(domain: str, *, timeout: int = C99_TIMEOUT) -> list[dict[str, Any]]:
+    """Discover subdomains via C99's subdomain finder.
+
+    Returns list of dicts with keys: subdomain, ip, cloudflare.
+    """
     data = await _c99_get("subdomainfinder", {"domain": domain}, timeout=timeout)
     if not data or not data.get("success"):
         return []
     subs = data.get("subdomains") or []
-    result: list[str] = []
+    result: list[dict[str, Any]] = []
     for entry in subs:
         if isinstance(entry, dict):
             sub = entry.get("subdomain", "")
+            ip = entry.get("ip", entry.get("address", ""))
+            cf = entry.get("cloudflare", entry.get("is_cloudflare"))
         else:
             sub = str(entry)
+            ip = ""
+            cf = None
         sub = sub.strip().lower().rstrip(".")
         if sub:
-            result.append(sub)
+            if isinstance(cf, str):
+                cf = cf.lower() in ("true", "yes", "1")
+            result.append({"subdomain": sub, "ip": ip or None, "cloudflare": cf})
     return result
 
 

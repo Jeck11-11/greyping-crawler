@@ -78,6 +78,7 @@ from .models import (
     SecurityHeadersResult,
     SocialFinding,
     SSLCertResult,
+    SubdomainEntry,
     URLReputationResult,
     VulnerabilitiesGroup,
     WaybackResult,
@@ -326,8 +327,17 @@ async def _scan_single_target(
     c99_subs = c99_subs_result if isinstance(c99_subs_result, list) else []
     if c99_subs and ct_result:
         merged = set(ct_result.subdomains or [])
-        merged.update(c99_subs)
+        for entry in c99_subs:
+            merged.add(entry["subdomain"])
         ct_result.subdomains = sorted(merged)
+        ct_result.subdomain_details = [
+            SubdomainEntry(
+                subdomain=e["subdomain"],
+                ip=e.get("ip"),
+                cloudflare=e.get("cloudflare"),
+            )
+            for e in c99_subs
+        ]
         if ct_result.error:
             ct_result.error = None
 

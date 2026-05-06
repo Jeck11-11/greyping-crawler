@@ -499,11 +499,22 @@ class IPEnrichmentResult(BaseModel):
     error: str | None = None
 
 
+class SubdomainEntry(BaseModel):
+    """A discovered subdomain with optional IP and CDN metadata."""
+    subdomain: str
+    ip: str | None = None
+    cloudflare: bool | None = None
+
+
 class CTResult(BaseModel):
     domain: str
     subdomains: list[str] = Field(
         default_factory=list,
         description="Deduped subdomains observed in CT log issuances.",
+    )
+    subdomain_details: list[SubdomainEntry] = Field(
+        default_factory=list,
+        description="Subdomains with IP and CDN metadata from C99.",
     )
     issuers: list[str] = Field(default_factory=list)
     certificates_seen: int = 0
