@@ -80,9 +80,9 @@ _PATTERNS: list[_Pattern] = [
     # Slack bot/user tokens (xoxb = bot, xoxp = user)
     _Pattern("slack_bot_token", "slack_token",
              re.compile(r"xoxb-[0-9]{10,13}-[0-9]{10,13}-[A-Za-z0-9]{24,32}")),
-    # Twilio
+    # Twilio (require exact AC prefix at word boundary — bare hex in CSS/tracking IDs is not a SID)
     _Pattern("twilio_account_sid", "twilio_credential",
-             re.compile(r"AC[0-9a-f]{32}", re.I)),
+             re.compile(r"\bAC[0-9a-f]{32}\b")),
 ]
 
 
