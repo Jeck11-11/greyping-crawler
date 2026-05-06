@@ -174,6 +174,9 @@ _LONG_ENCODED_RE = re.compile(
     re.I,
 )
 
+# Unicode surrogate pairs and zero-width joiners used in emoji sequences
+_EMOJI_SURROGATE_RE = re.compile(r"\\u[dD][89a-fA-F][0-9a-fA-F]{2}|\\u200[b-fB-F]|\\ufe0f", re.I)
+
 
 def _check_obfuscated_js(html: str) -> list[IoCFinding]:
     findings: list[IoCFinding] = []
@@ -201,12 +204,18 @@ def _check_obfuscated_js(html: str) -> list[IoCFinding]:
             severity="medium",
         ))
 
-    # Long encoded strings
+    # Long encoded strings (skip emoji/surrogate sequences)
     for m in _LONG_ENCODED_RE.finditer(html):
+        matched = m.group(0)
+        unicode_escapes = re.findall(r"\\u[0-9a-fA-F]{4}", matched)
+        if unicode_escapes:
+            surrogate_count = len(_EMOJI_SURROGATE_RE.findall(matched))
+            if surrogate_count > len(unicode_escapes) * 0.3:
+                continue
         findings.append(IoCFinding(
             ioc_type="obfuscated_js",
             description="Long encoded/escaped string detected (possible payload)",
-            evidence=m.group(0)[:80] + "...",
+            evidence=matched[:80] + "...",
             location="script",
             severity="high",
         ))
