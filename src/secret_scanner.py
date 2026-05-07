@@ -83,6 +83,28 @@ _PATTERNS: list[_Pattern] = [
     # Twilio (require exact AC prefix at word boundary — bare hex in CSS/tracking IDs is not a SID)
     _Pattern("twilio_account_sid", "twilio_credential",
              re.compile(r"\bAC[0-9a-f]{32}\b")),
+    # Cloudflare
+    _Pattern("cloudflare_api_token", "cloudflare_key",
+             re.compile(r"v1\.0-[0-9a-f]{40}")),
+    # OpenAI / Anthropic
+    _Pattern("openai_api_key", "openai_key",
+             re.compile(r"sk-(?!live)[A-Za-z0-9]{20,}")),
+    _Pattern("anthropic_api_key", "anthropic_key",
+             re.compile(r"sk-ant-[A-Za-z0-9\-_]{20,}")),
+    # Discord
+    _Pattern("discord_bot_token", "discord_token",
+             re.compile(r"[MN][A-Za-z0-9]{23,}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,}")),
+    # NPM / PyPI
+    _Pattern("npm_token", "npm_token",
+             re.compile(r"npm_[A-Za-z0-9]{36,}")),
+    _Pattern("pypi_token", "pypi_token",
+             re.compile(r"pypi-[A-Za-z0-9]{16,}")),
+    # DigitalOcean
+    _Pattern("digitalocean_token", "digitalocean_key",
+             re.compile(r"dop_v1_[0-9a-f]{64}")),
+    # Shopify
+    _Pattern("shopify_token", "shopify_key",
+             re.compile(r"shp(?:at|ca|pa|ss)_[0-9a-fA-F]{32,}")),
 ]
 
 

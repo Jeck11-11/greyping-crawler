@@ -113,6 +113,34 @@ _COMPLIANCE_MAP: dict[str, list[str]] = {
         "ISO 27001 A.14.1.2",
     ],
     "js_sourcemap_vendor": [],
+    # -- CORS ---------------------------------------------------------------
+    "cors_wildcard": [
+        "PCI-DSS 6.5.8",
+        "ISO 27001 A.14.1.2",
+    ],
+    "cors_credentials": [
+        "PCI-DSS 6.5.8",
+        "ISO 27001 A.14.1.2",
+    ],
+    # -- Directory listing / GraphQL ----------------------------------------
+    "directory_listing": [
+        "PCI-DSS 6.5.8",
+        "ISO 27001 A.9.4.1",
+    ],
+    "graphql_introspection": [
+        "PCI-DSS 6.5.8",
+        "ISO 27001 A.14.1.2",
+    ],
+    # -- New security headers -----------------------------------------------
+    "missing_cross_origin_opener_policy": [
+        "ISO 27001 A.14.1.2",
+    ],
+    "missing_cross_origin_resource_policy": [
+        "ISO 27001 A.14.1.2",
+    ],
+    "missing_x_permitted_cross_domain_policies": [
+        "ISO 27001 A.14.1.2",
+    ],
 }
 
 # Prefix-based compliance tags for dynamic finding IDs (secret_*, ioc_*,
@@ -342,6 +370,24 @@ def _classify_header_findings(
                 business_impact="Minimal — aids targeted attacks",
                 evidence=[f"{h.header}: {h.value}"],
                 recommended_action=f"Remove or obscure the {h.header} header.",
+                source_field="security_headers",
+            ))
+        elif h.status == "misconfigured" and h.header == "Access-Control-Allow-Origin":
+            is_wildcard = h.value == "*"
+            findings.append(PrioritizedFinding(
+                id="cors_wildcard" if is_wildcard else "cors_credentials",
+                title="CORS wildcard allows any origin" if is_wildcard
+                    else "CORS with credentials — verify trusted origin",
+                category="security_headers",
+                severity=h.severity,
+                classification=FindingClassification.confirmed_issue,
+                confidence="high",
+                owner=FindingOwner.customer,
+                why_it_matters=h.recommendation,
+                business_impact="Cross-origin data theft risk" if is_wildcard
+                    else "Authenticated cross-origin request risk",
+                evidence=[f"Access-Control-Allow-Origin: {h.value}"],
+                recommended_action=h.recommendation,
                 source_field="security_headers",
             ))
     return findings

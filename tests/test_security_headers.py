@@ -12,6 +12,9 @@ class TestAnalyzeHeaders:
             "X-Content-Type-Options": "nosniff",
             "Referrer-Policy": "strict-origin-when-cross-origin",
             "Permissions-Policy": "camera=(), microphone=()",
+            "Cross-Origin-Opener-Policy": "same-origin",
+            "Cross-Origin-Resource-Policy": "same-origin",
+            "X-Permitted-Cross-Domain-Policies": "none",
         }
         result = analyze_headers(headers)
         assert result.grade == "A"
@@ -49,3 +52,21 @@ class TestAnalyzeHeaders:
         hsts = [f for f in result.findings if f.header == "Strict-Transport-Security"]
         assert len(hsts) == 1
         assert hsts[0].status == "present"
+
+    def test_cors_wildcard_detected(self):
+        headers = {"Access-Control-Allow-Origin": "*"}
+        result = analyze_headers(headers)
+        cors = [f for f in result.findings if f.header == "Access-Control-Allow-Origin"]
+        assert len(cors) == 1
+        assert cors[0].status == "misconfigured"
+        assert cors[0].severity == "high"
+
+    def test_cors_credentials_detected(self):
+        headers = {
+            "Access-Control-Allow-Origin": "https://evil.com",
+            "Access-Control-Allow-Credentials": "true",
+        }
+        result = analyze_headers(headers)
+        cors = [f for f in result.findings if f.header == "Access-Control-Allow-Origin"]
+        assert len(cors) == 1
+        assert cors[0].severity == "medium"
