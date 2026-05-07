@@ -924,6 +924,36 @@ class SubdomainTakeoverResult(BaseModel):
     error: str | None = None
 
 
+class TyposquatCandidate(BaseModel):
+    domain: str
+    a_records: list[str] = Field(default_factory=list)
+    technique: str = ""
+    similarity_score: float = 0.0
+
+
+class TyposquattingResult(BaseModel):
+    domain: str
+    candidates_checked: int = 0
+    registered_candidates: list[TyposquatCandidate] = Field(default_factory=list)
+    scan_duration_seconds: float = 0
+    error: str | None = None
+
+
+class PrivacyIndicator(BaseModel):
+    name: str
+    present: bool = False
+    evidence: list[str] = Field(default_factory=list)
+
+
+class PrivacyComplianceResult(BaseModel):
+    domain: str
+    score: int = 0
+    grade: str = ""
+    indicators: list[PrivacyIndicator] = Field(default_factory=list)
+    consent_tool: str = ""
+    error: str | None = None
+
+
 class IPReputationResult(BaseModel):
     ip: str
     malicious: bool = False
@@ -1023,6 +1053,9 @@ class DomainSummary(BaseModel):
     risky_ports: int = 0
     cloud_buckets_found: int = 0
     screenshots_taken: int = 0
+    typosquat_candidates: int = Field(default=0, description="Registered lookalike domains found.")
+    privacy_score: int = Field(default=0, description="Privacy compliance score (0-100).")
+    consent_tool: str = Field(default="", description="Detected cookie consent management tool.")
 
 
 # ---------------------------------------------------------------------------
@@ -1115,6 +1148,8 @@ class DomainResult(BaseModel):
     passive_intel: PassiveIntelSlim | None = None
     vulnerabilities: VulnerabilitiesGroup | None = None
     reputation: ReputationGroup | None = None
+    typosquatting: TyposquattingResult | None = None
+    privacy: PrivacyComplianceResult | None = None
     email_validations: list[EmailValidationResult] = Field(default_factory=list)
     screenshots: list[ScreenshotResult] = Field(default_factory=list)
     favicon: FaviconResult | None = None

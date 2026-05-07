@@ -141,6 +141,25 @@ _COMPLIANCE_MAP: dict[str, list[str]] = {
     "missing_x_permitted_cross_domain_policies": [
         "ISO 27001 A.14.1.2",
     ],
+    # -- Typosquatting / brand protection -----------------------------------
+    "typosquat_domains_found": [
+        "ISO 27001 A.7.2.2",
+    ],
+    # -- Privacy compliance -------------------------------------------------
+    "missing_privacy_policy": [
+        "GDPR Art.13",
+        "CCPA §1798.100",
+    ],
+    "missing_cookie_consent": [
+        "GDPR Art.7",
+        "ePrivacy Directive Art.5(3)",
+    ],
+    "missing_terms_of_service": [],
+    "privacy_compliance_low": [
+        "GDPR Art.13",
+        "GDPR Art.14",
+        "CCPA §1798.100",
+    ],
 }
 
 # Prefix-based compliance tags for dynamic finding IDs (secret_*, ioc_*,
@@ -1128,6 +1147,115 @@ def _build_executive_summary(
 # Public entry point
 # ---------------------------------------------------------------------------
 
+def _classify_typosquatting_findings(result: DomainResult) -> list[PrioritizedFinding]:
+    findings: list[PrioritizedFinding] = []
+    if not result.typosquatting or not result.typosquatting.registered_candidates:
+        return findings
+    for cand in result.typosquatting.registered_candidates[:10]:
+        if cand.similarity_score >= 0.9:
+            sev = "high"
+        elif cand.similarity_score >= 0.8:
+            sev = "medium"
+        else:
+            sev = "low"
+        findings.append(PrioritizedFinding(
+            id="typosquat_domains_found",
+            title=f"Typosquat domain registered: {cand.domain}",
+            category="brand_protection",
+            severity=sev,
+            classification=FindingClassification.confirmed_issue,
+            confidence="high",
+            owner=FindingOwner.customer,
+            why_it_matters="Lookalike domains can be used for phishing, credential theft, or brand impersonation.",
+            business_impact="Phishing and brand reputation risk",
+            evidence=[
+                f"Domain: {cand.domain}",
+                f"Technique: {cand.technique}",
+                f"Resolves to: {', '.join(cand.a_records[:3])}",
+            ],
+            recommended_action="Register this domain defensively or request takedown via the registrar.",
+            source_field="typosquatting",
+        ))
+    return findings
+
+
+def _classify_privacy_findings(result: DomainResult) -> list[PrioritizedFinding]:
+    findings: list[PrioritizedFinding] = []
+    if not result.privacy or result.privacy.error:
+        return findings
+
+    indicator_map = {ind.name: ind for ind in result.privacy.indicators}
+
+    pp = indicator_map.get("privacy_policy")
+    if pp and not pp.present:
+        findings.append(PrioritizedFinding(
+            id="missing_privacy_policy",
+            title="No privacy policy detected",
+            category="privacy_compliance",
+            severity="medium",
+            classification=FindingClassification.confirmed_issue,
+            confidence="medium",
+            owner=FindingOwner.customer,
+            why_it_matters="Privacy policies are required under GDPR, CCPA, and most privacy regulations.",
+            business_impact="Regulatory non-compliance risk",
+            evidence=["No /privacy or /privacy-policy page returned HTTP 200"],
+            recommended_action="Publish a privacy policy page and link to it from the website footer.",
+            source_field="privacy",
+        ))
+
+    cc = indicator_map.get("cookie_consent_tool")
+    if cc and not cc.present:
+        findings.append(PrioritizedFinding(
+            id="missing_cookie_consent",
+            title="No cookie consent tool detected",
+            category="privacy_compliance",
+            severity="medium",
+            classification=FindingClassification.confirmed_issue,
+            confidence="medium",
+            owner=FindingOwner.customer,
+            why_it_matters="Cookie consent banners are required under GDPR and ePrivacy Directive for EU visitors.",
+            business_impact="Regulatory non-compliance risk for EU-facing sites",
+            evidence=["No consent management platform (OneTrust, Cookiebot, etc.) detected"],
+            recommended_action="Implement a cookie consent tool such as OneTrust, Cookiebot, or Osano.",
+            source_field="privacy",
+        ))
+
+    tos = indicator_map.get("terms_of_service")
+    if tos and not tos.present:
+        findings.append(PrioritizedFinding(
+            id="missing_terms_of_service",
+            title="No terms of service page detected",
+            category="privacy_compliance",
+            severity="low",
+            classification=FindingClassification.informational,
+            confidence="medium",
+            owner=FindingOwner.customer,
+            why_it_matters="Terms of service establish the legal framework for site usage.",
+            business_impact="Legal protection gap",
+            evidence=["No /terms or /terms-of-service page returned HTTP 200"],
+            recommended_action="Publish terms of service and link from the website footer.",
+            source_field="privacy",
+        ))
+
+    if result.privacy.score < 40:
+        findings.append(PrioritizedFinding(
+            id="privacy_compliance_low",
+            title=f"Low privacy compliance score ({result.privacy.score}/100)",
+            category="privacy_compliance",
+            severity="medium",
+            classification=FindingClassification.confirmed_issue,
+            confidence="medium",
+            owner=FindingOwner.customer,
+            why_it_matters="Low privacy compliance increases regulatory and reputational risk.",
+            business_impact="Regulatory fines and customer trust erosion",
+            evidence=[f"Privacy score: {result.privacy.score}/100, grade: {result.privacy.grade}"],
+            recommended_action="Address missing privacy indicators: privacy policy, cookie consent, GDPR/CCPA compliance pages.",
+            source_field="privacy",
+        ))
+
+    return findings
+
+
 def build_easm_report(
     result: DomainResult, *, scan_mode: str = "full",
 ) -> EASMReport:
@@ -1147,6 +1275,8 @@ def build_easm_report(
         all_findings.extend(_classify_breach_findings(result))
         all_findings.extend(_classify_robots_sitemap(result))
         all_findings.extend(_classify_js_intel(result))
+        all_findings.extend(_classify_typosquatting_findings(result))
+        all_findings.extend(_classify_privacy_findings(result))
 
         sorted_findings = _sort_findings(all_findings)
 

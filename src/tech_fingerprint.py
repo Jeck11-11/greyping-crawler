@@ -257,6 +257,43 @@ SIGNATURES: dict[str, dict[str, Any]] = {
         "categories": ["cdn", "waf"],
         "headers": {"x-azure-ref": r".+"},
     },
+    # --- Consent management platforms ----------------------------------------
+    "OneTrust": {
+        "categories": ["consent_management"],
+        "scripts": [r"cdn\.cookielaw\.org", r"optanon\.blob\.core"],
+        "html": [r"OneTrust", r"optanon-category"],
+        "cookies": [r"^OptanonConsent$", r"^OptanonAlertBoxClosed$"],
+    },
+    "Cookiebot": {
+        "categories": ["consent_management"],
+        "scripts": [r"consent\.cookiebot\.com"],
+        "html": [r"CookieConsent", r"Cookiebot"],
+        "cookies": [r"^CookieConsent$"],
+    },
+    "TrustArc": {
+        "categories": ["consent_management"],
+        "scripts": [r"consent\.trustarc\.com", r"truste\.com"],
+        "html": [r"TrustArc", r"truste-consent"],
+    },
+    "Osano": {
+        "categories": ["consent_management"],
+        "scripts": [r"cmp\.osano\.com"],
+        "html": [r"osano"],
+    },
+    "Quantcast Choice": {
+        "categories": ["consent_management"],
+        "scripts": [r"quantcast\.mgr\.consensu\.org"],
+    },
+    "Didomi": {
+        "categories": ["consent_management"],
+        "scripts": [r"sdk\.privacy-center\.org"],
+        "html": [r"didomi"],
+    },
+    "Iubenda": {
+        "categories": ["consent_management"],
+        "scripts": [r"cdn\.iubenda\.com"],
+        "html": [r"iubenda"],
+    },
 }
 
 

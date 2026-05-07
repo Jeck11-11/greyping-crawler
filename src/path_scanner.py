@@ -65,11 +65,27 @@ _SENSITIVE_PATHS: list[tuple[str, str, str]] = [
     ("/assets/", "Asset directory listing exposes file structure.", "medium"),
     ("/files/", "File directory listing may expose sensitive documents.", "high"),
     ("/media/", "Media directory listing may expose uploaded content.", "medium"),
+    # Privacy / compliance pages
+    ("/privacy", "Privacy policy page.", "info"),
+    ("/privacy-policy", "Privacy policy page.", "info"),
+    ("/cookie-policy", "Cookie consent policy page.", "info"),
+    ("/terms", "Terms of service page.", "info"),
+    ("/terms-of-service", "Terms of service page.", "info"),
+    ("/gdpr", "GDPR compliance page.", "info"),
+    ("/ccpa", "CCPA compliance page.", "info"),
+    ("/data-request", "Data subject request form (GDPR/CCPA).", "info"),
+    ("/.well-known/dnt-policy.txt", "Do Not Track policy.", "info"),
 ]
 
 # Paths at info severity are always reported when found; others only on
 # interesting status codes.
-_INFO_PATHS = {"/robots.txt", "/sitemap.xml", "/.well-known/security.txt"}
+_INFO_PATHS = {
+    "/robots.txt", "/sitemap.xml", "/.well-known/security.txt",
+    "/privacy", "/privacy-policy", "/cookie-policy",
+    "/terms", "/terms-of-service",
+    "/gdpr", "/ccpa", "/data-request",
+    "/.well-known/dnt-policy.txt",
+}
 
 # Status codes that indicate the path exists and is accessible.
 # 301/302 are excluded — redirects (common on Wix, CDNs, etc.) do NOT

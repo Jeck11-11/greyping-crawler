@@ -137,3 +137,80 @@ class TestReconSubdomains:
         assert body[0]["domain"] == "example.com"
         assert body[0]["error"] is not None
         assert "Enumeration failed" in body[0]["error"]
+
+
+class TestReconTyposquatting:
+    @patch("src.routers.discovery.check_typosquatting", new_callable=AsyncMock)
+    def test_typosquatting_returns_candidates(self, mock_typo):
+        from src.models import TyposquattingResult, TyposquatCandidate
+        mock_typo.return_value = TyposquattingResult(
+            domain="example.com",
+            candidates_checked=50,
+            registered_candidates=[
+                TyposquatCandidate(
+                    domain="examp1e.com",
+                    a_records=["1.2.3.4"],
+                    technique="homoglyph",
+                    similarity_score=0.95,
+                ),
+            ],
+        )
+        resp = client.post(
+            "/recon/typosquatting", json={"targets": ["https://example.com"]},
+        )
+        assert resp.status_code == 200
+        body = resp.json()[0]
+        assert body["domain"] == "example.com"
+        assert body["candidates_checked"] == 50
+        assert len(body["registered_candidates"]) == 1
+        assert body["registered_candidates"][0]["domain"] == "examp1e.com"
+
+    @patch("src.routers.discovery.check_typosquatting", new_callable=AsyncMock)
+    def test_typosquatting_handles_failure(self, mock_typo):
+        mock_typo.side_effect = RuntimeError("DNS failed")
+        resp = client.post(
+            "/recon/typosquatting", json={"targets": ["https://example.com"]},
+        )
+        assert resp.status_code == 200
+        body = resp.json()[0]
+        assert body["error"] is not None
+
+
+class TestReconPrivacy:
+    @patch("src.routers.discovery.analyze_privacy_compliance")
+    @patch("src.routers.discovery.fingerprint_tech")
+    @patch("src.routers.discovery.scan_sensitive_paths", new_callable=AsyncMock)
+    @patch("src.routers.discovery.fetch_landing_page_full", new_callable=AsyncMock)
+    def test_privacy_returns_compliance_result(self, mock_fetch, mock_paths, mock_tech, mock_privacy):
+        import httpx
+        from src.models import PrivacyComplianceResult, PrivacyIndicator
+        mock_fetch.return_value = ({}, httpx.Cookies(), "<html></html>")
+        mock_paths.return_value = []
+        mock_tech.return_value = []
+        mock_privacy.return_value = PrivacyComplianceResult(
+            domain="example.com",
+            score=75,
+            grade="B",
+            indicators=[
+                PrivacyIndicator(name="privacy_policy", present=True, evidence=["/privacy (HTTP 200)"]),
+            ],
+            consent_tool="OneTrust",
+        )
+        resp = client.post(
+            "/recon/privacy", json={"targets": ["https://example.com"]},
+        )
+        assert resp.status_code == 200
+        body = resp.json()[0]
+        assert body["domain"] == "example.com"
+        assert body["score"] == 75
+        assert body["consent_tool"] == "OneTrust"
+
+    @patch("src.routers.discovery.fetch_landing_page_full", new_callable=AsyncMock)
+    def test_privacy_handles_fetch_failure(self, mock_fetch):
+        mock_fetch.side_effect = RuntimeError("Fetch failed")
+        resp = client.post(
+            "/recon/privacy", json={"targets": ["https://example.com"]},
+        )
+        assert resp.status_code == 200
+        body = resp.json()[0]
+        assert body["error"] is not None

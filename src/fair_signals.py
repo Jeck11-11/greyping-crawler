@@ -578,6 +578,20 @@ def _build_vulnerability(result: DomainResult) -> FAIRFactor:
                 evidence=parts,
             ))
 
+    # Typosquatting / brand impersonation exposure.
+    if result.typosquatting and result.typosquatting.registered_candidates:
+        count = len(result.typosquatting.registered_candidates)
+        typo_score = min(100, 40 + count * 10)
+        signals.append(FAIRSignal(
+            name="typosquatting_exposure",
+            score=typo_score,
+            weight=1.3,
+            evidence=[
+                f"{count} lookalike domain(s) registered",
+                *[c.domain for c in result.typosquatting.registered_candidates[:5]],
+            ],
+        ))
+
     return _factor_from_signals(
         signals,
         notes="Higher Vulnerability means a threat engagement is more likely to succeed.",
@@ -756,6 +770,18 @@ def _build_control_strength(result: DomainResult) -> FAIRFactor:
                 evidence=[f"{len(risky)} risky port(s) exposed"],
             ))
 
+    # Privacy compliance posture — consent tool + privacy policy presence.
+    if result.privacy and not result.privacy.error:
+        signals.append(FAIRSignal(
+            name="privacy_compliance_posture",
+            score=result.privacy.score,
+            weight=0.8,
+            evidence=[
+                f"privacy compliance score={result.privacy.score}, grade={result.privacy.grade}",
+                f"consent tool: {result.privacy.consent_tool or 'none detected'}",
+            ],
+        ))
+
     return _factor_from_signals(
         signals,
         notes="Higher Control Strength means stronger observed defences (WAF, TLS, headers, cookies, email auth).",
@@ -882,6 +908,17 @@ def _build_loss_magnitude(result: DomainResult) -> FAIRFactor:
                 weight=0.5,
                 evidence=[f"{len(ext_domains)} unique external domains loaded"],
             ))
+
+    # Brand impersonation risk from typosquatting.
+    if result.typosquatting and result.typosquatting.registered_candidates:
+        signals.append(FAIRSignal(
+            name="brand_impersonation_risk",
+            score=70,
+            weight=1.0,
+            evidence=[
+                f"{len(result.typosquatting.registered_candidates)} typosquat domains could be used for phishing",
+            ],
+        ))
 
     return _factor_from_signals(
         signals,

@@ -44,6 +44,8 @@ from .middleware import APIKeyMiddleware, RateLimitMiddleware
 from .js_miner import mine_javascript
 from .extractors import extract_contacts, extract_links, extract_page_metadata
 from .ioc_scanner import scan_ioc
+from .privacy_scanner import analyze_privacy_compliance
+from .typosquatting import check_typosquatting
 from .models import (
     CloudAssetResult,
     ContactsGroup,
@@ -66,6 +68,7 @@ from .models import (
     PassiveIntelSlim,
     PhoneFinding,
     PortScanResult,
+    PrivacyComplianceResult,
     RDAPResult,
     ReconRequest,
     ReputationGroup,
@@ -79,6 +82,7 @@ from .models import (
     SocialFinding,
     SSLCertResult,
     SubdomainEntry,
+    TyposquattingResult,
     URLReputationResult,
     VulnerabilitiesGroup,
     WaybackResult,
@@ -182,17 +186,18 @@ async def _scan_single_target(
     cloud_assets_task = discover_cloud_assets(domain)
     c99_subs_task = find_subdomains(domain)
     robots_task = fetch_and_parse_robots_sitemap(target, timeout=request.timeout)
+    typosquat_task = check_typosquatting(domain, timeout=request.timeout)
 
     (crawl_result, ssl_result, landing_result, paths_result,
      dns_result, ct_result, rdap_result, wayback_result,
      favicon_result,
      port_scan_result, cloud_assets_result, c99_subs_result,
-     robots_sitemap_result) = await asyncio.gather(
+     robots_sitemap_result, typosquat_result) = await asyncio.gather(
         crawl_task, ssl_task, landing_task, paths_task,
         dns_task, ct_task, rdap_task, wayback_task,
         favicon_task,
         port_scan_task, cloud_assets_task, c99_subs_task,
-        robots_task,
+        robots_task, typosquat_task,
         return_exceptions=True,
     )
 
@@ -259,6 +264,17 @@ async def _scan_single_target(
     except Exception as exc:
         logger.warning("Tech fingerprint failed for %s: %s", target, exc)
 
+    # Privacy compliance analysis (uses paths + tech + landing HTML)
+    privacy_result: PrivacyComplianceResult | None = None
+    try:
+        _privacy_paths = paths_result if isinstance(paths_result, list) else []
+        privacy_result = analyze_privacy_compliance(
+            domain, _privacy_paths, tech_findings, landing_html,
+        )
+    except Exception as exc:
+        logger.warning("Privacy analysis failed for %s: %s", target, exc)
+        privacy_result = PrivacyComplianceResult(domain=domain, error=str(exc))
+
     # JS mining + CVE lookup run in parallel (independent of each other)
     cve_findings: list = []
     js_coro = mine_javascript(target, landing_html, timeout=request.timeout)
@@ -293,6 +309,11 @@ async def _scan_single_target(
     if isinstance(cloud_assets_result, Exception):
         logger.warning("Cloud asset scan failed for %s: %s", target, cloud_assets_result)
         cloud_assets_result = CloudAssetResult(domain=domain, error=str(cloud_assets_result))
+
+    # Process typosquatting result
+    if isinstance(typosquat_result, Exception):
+        logger.warning("Typosquatting scan failed for %s: %s", target, typosquat_result)
+        typosquat_result = TyposquattingResult(domain=domain, error=str(typosquat_result))
 
     # Subdomain takeover scan (uses CT-discovered subdomains)
     # Subdomain takeover is a separate scan — use /recon/takeover directly.
@@ -566,6 +587,9 @@ async def _scan_single_target(
         risky_ports=sum(1 for p in (port_scan_result.open_ports if port_scan_result else []) if p.is_risky),
         cloud_buckets_found=len(cloud_assets_result.findings) if cloud_assets_result else 0,
         screenshots_taken=len(screenshots),
+        typosquat_candidates=len(typosquat_result.registered_candidates) if typosquat_result else 0,
+        privacy_score=privacy_result.score if privacy_result else 0,
+        consent_tool=privacy_result.consent_tool if privacy_result else "",
     )
 
     # Build page summary from the raw pages list
@@ -617,6 +641,8 @@ async def _scan_single_target(
             subdomain_takeover=takeover_result,
         ),
         reputation=ReputationGroup(ip=ip_rep_result, url=url_rep_result),
+        typosquatting=typosquat_result,
+        privacy=privacy_result,
         email_validations=email_validations,
         screenshots=screenshots,
         favicon=favicon_result,
