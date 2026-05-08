@@ -391,16 +391,34 @@ def _build_vulnerability(result: DomainResult) -> FAIRFactor:
         ))
 
     # CVE findings from detected technology versions.
+    # KEV-listed and high-EPSS CVEs get elevated weight.
     if result.cve_findings:
         worst = max(_severity_score(f.severity) for f in result.cve_findings)
         score = min(100, worst + 10 * (len(result.cve_findings) - 1))
+        kev_count = sum(1 for f in result.cve_findings if f.in_kev)
+        high_epss = sum(1 for f in result.cve_findings if (f.epss_score or 0) > 0.5)
+        if kev_count:
+            score = min(100, score + 15)
+        weight = 1.5
+        if kev_count:
+            weight = 2.0
+        elif high_epss:
+            weight = 1.7
+        evidence = [
+            f"{len(result.cve_findings)} CVE(s) correlated from detected tech",
+        ]
+        if kev_count:
+            evidence.append(f"{kev_count} in CISA KEV (actively exploited)")
+        if high_epss:
+            evidence.append(f"{high_epss} with EPSS > 50%")
+        evidence.extend(
+            f"{f.cve_id} ({f.severity})" for f in result.cve_findings[:5]
+        )
         signals.append(FAIRSignal(
             name="known_cves",
             score=score,
-            weight=1.5,
-            evidence=[
-                f"{f.cve_id} ({f.severity})" for f in result.cve_findings[:5]
-            ],
+            weight=weight,
+            evidence=evidence,
         ))
 
     # Subdomain takeover findings.

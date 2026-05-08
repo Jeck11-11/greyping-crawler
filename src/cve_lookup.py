@@ -13,6 +13,98 @@ from .models import CVEFinding, TechFinding
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# EPSS + CISA KEV enrichment
+# ---------------------------------------------------------------------------
+
+_EPSS_URL = "https://api.first.org/data/v1/epss"
+_KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
+
+_kev_cache: dict[str, str] = {}
+_kev_loaded: bool = False
+
+
+async def _load_kev_catalog() -> dict[str, str]:
+    """Fetch CISA KEV catalog (cached for process lifetime)."""
+    global _kev_cache, _kev_loaded
+    if _kev_loaded:
+        return _kev_cache
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(20)) as client:
+            resp = await client.get(_KEV_URL)
+            if resp.status_code == 200:
+                data = resp.json()
+                _kev_cache = {
+                    v["cveID"]: v.get("dueDate", "")
+                    for v in data.get("vulnerabilities", [])
+                }
+                _kev_loaded = True
+                logger.info("Loaded %d KEV entries", len(_kev_cache))
+    except Exception as exc:
+        logger.debug("KEV catalog fetch failed: %s", exc)
+    return _kev_cache
+
+
+async def _fetch_epss_batch(cve_ids: list[str]) -> dict[str, dict]:
+    """Fetch EPSS scores for a batch of CVE IDs (max 50)."""
+    if not cve_ids:
+        return {}
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15)) as client:
+            resp = await client.get(
+                _EPSS_URL,
+                params={"cve": ",".join(cve_ids[:50])},
+            )
+            if resp.status_code != 200:
+                return {}
+            data = resp.json()
+            return {
+                item["cve"]: {
+                    "score": float(item["epss"]),
+                    "percentile": float(item["percentile"]),
+                }
+                for item in data.get("data", [])
+            }
+    except Exception as exc:
+        logger.debug("EPSS fetch failed: %s", exc)
+        return {}
+
+
+async def enrich_cves_with_epss_kev(findings: list[CVEFinding]) -> None:
+    """Enrich CVE findings with EPSS scores and KEV status in-place."""
+    if not findings:
+        return
+
+    cve_ids = [f.cve_id for f in findings if f.cve_id.startswith("CVE-")]
+    if not cve_ids:
+        return
+
+    epss_data, kev_map = await asyncio.gather(
+        _fetch_epss_batch(cve_ids),
+        _load_kev_catalog(),
+        return_exceptions=True,
+    )
+    if isinstance(epss_data, Exception):
+        logger.debug("EPSS enrichment failed: %s", epss_data)
+        epss_data = {}
+    if isinstance(kev_map, Exception):
+        logger.debug("KEV enrichment failed: %s", kev_map)
+        kev_map = {}
+
+    for finding in findings:
+        epss = epss_data.get(finding.cve_id)
+        if epss:
+            finding.epss_score = epss["score"]
+            finding.epss_percentile = epss["percentile"]
+        if finding.cve_id in kev_map:
+            finding.in_kev = True
+            finding.kev_due_date = kev_map[finding.cve_id]
+
+
+# ---------------------------------------------------------------------------
+# OSV.dev CVE lookup
+# ---------------------------------------------------------------------------
+
 _OSV_API = "https://api.osv.dev/v1/query"
 
 _TECH_TO_OSV: dict[str, tuple[str, str]] = {

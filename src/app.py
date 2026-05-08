@@ -31,7 +31,7 @@ from ._social_utils import detect_platform
 from .breach_checker import check_breaches
 from .cookie_checker import analyze_cookies
 from .crawler import crawl_domain
-from .cve_lookup import lookup_cves
+from .cve_lookup import enrich_cves_with_epss_kev, lookup_cves
 from .easm_report import build_easm_report
 from .fair_signals import compute_fair_signals
 from .favicon import fetch_favicon
@@ -293,6 +293,13 @@ async def _scan_single_target(
         logger.warning("CVE lookup failed for %s: %s", target, cve_raw)
     elif isinstance(cve_raw, list):
         cve_findings = cve_raw
+
+    # Enrich CVEs with EPSS exploit scores and CISA KEV status
+    if cve_findings:
+        try:
+            await enrich_cves_with_epss_kev(cve_findings)
+        except Exception as exc:
+            logger.warning("EPSS/KEV enrichment failed for %s: %s", target, exc)
 
 
     # Process favicon result
