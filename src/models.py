@@ -1129,6 +1129,32 @@ class CloudAssetResult(BaseModel):
     error: str | None = None
 
 
+class GitHubSecretFinding(BaseModel):
+    query: str = Field(default="", description="Dork query category that matched.")
+    repository: str = Field(default="", description="GitHub owner/repo.")
+    file_path: str = Field(default="", description="Path within the repository.")
+    file_url: str = Field(default="", description="GitHub URL to the file.")
+    code_snippet: str = Field(default="", description="Redacted code fragment.")
+    last_modified: str = Field(default="", description="Repository last push date.")
+    severity: str = "high"
+    fingerprint: str = Field(default="", description="Stable hash for cross-scan deduplication.")
+
+    @model_validator(mode="after")
+    def _set_fingerprint(self) -> GitHubSecretFinding:
+        if not self.fingerprint:
+            self.fingerprint = _fingerprint("github", self.repository, self.file_path, self.query)
+        return self
+
+
+class GitHubSecretResult(BaseModel):
+    domain: str
+    findings: list[GitHubSecretFinding] = Field(default_factory=list)
+    queries_run: int = 0
+    total_matches: int = 0
+    scan_duration_seconds: float = 0
+    error: str | None = None
+
+
 class DomainSummary(BaseModel):
     """Quick-glance counts for a single target."""
 
@@ -1450,6 +1476,12 @@ class IoCReconResult(BaseModel):
 class BreachReconResult(BaseModel):
     target: str
     breaches: list[BreachRecord] = Field(default_factory=list)
+    error: str | None = None
+
+
+class GitHubSecretsReconResult(BaseModel):
+    target: str
+    github_secrets: GitHubSecretResult | None = None
     error: str | None = None
 
 

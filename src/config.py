@@ -31,6 +31,10 @@ MAX_RESPONSE_BYTES = int(os.getenv("MAX_RESPONSE_BYTES", str(10 * 1024 * 1024)))
 C99_API_KEY = os.getenv("C99_API_KEY", "")
 C99_TIMEOUT = int(os.getenv("C99_TIMEOUT", "20"))
 
+# GitHub Code Search
+GITHUB_API_KEY = os.getenv("GITHUB_API_KEY", "")
+GITHUB_SCAN_TIMEOUT = int(os.getenv("GITHUB_SCAN_TIMEOUT", "60"))
+
 # Nuclei integration
 NUCLEI_API_URL = os.getenv("NUCLEI_API_URL", "")
 NUCLEI_TIMEOUT = int(os.getenv("NUCLEI_TIMEOUT", "300"))
