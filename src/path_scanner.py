@@ -13,6 +13,11 @@ from .models import SensitivePathFinding
 
 logger = logging.getLogger(__name__)
 
+_DIR_LISTING_SIGNATURES = (
+    "<title>Index of", "Directory listing for", "<title>Directory Listing",
+    "Parent Directory</a>", "[To Parent Directory]",
+)
+
 # (path, risk description, severity)
 _SENSITIVE_PATHS: list[tuple[str, str, str]] = [
     ("/.env", "Environment file may contain secrets, DB credentials, and API keys.", "critical"),
@@ -54,11 +59,33 @@ _SENSITIVE_PATHS: list[tuple[str, str, str]] = [
     ("/.aws/credentials", "AWS credentials file may contain access keys.", "critical"),
     ("/graphql", "GraphQL endpoint may allow introspection queries.", "medium"),
     ("/node_modules/.package-lock.json", "Exposed node_modules confirms dependency leak.", "medium"),
+    # Directory listing probes
+    ("/uploads/", "Upload directory listing may expose user-uploaded content.", "high"),
+    ("/images/", "Image directory listing exposes file structure.", "medium"),
+    ("/assets/", "Asset directory listing exposes file structure.", "medium"),
+    ("/files/", "File directory listing may expose sensitive documents.", "high"),
+    ("/media/", "Media directory listing may expose uploaded content.", "medium"),
+    # Privacy / compliance pages
+    ("/privacy", "Privacy policy page.", "info"),
+    ("/privacy-policy", "Privacy policy page.", "info"),
+    ("/cookie-policy", "Cookie consent policy page.", "info"),
+    ("/terms", "Terms of service page.", "info"),
+    ("/terms-of-service", "Terms of service page.", "info"),
+    ("/gdpr", "GDPR compliance page.", "info"),
+    ("/ccpa", "CCPA compliance page.", "info"),
+    ("/data-request", "Data subject request form (GDPR/CCPA).", "info"),
+    ("/.well-known/dnt-policy.txt", "Do Not Track policy.", "info"),
 ]
 
 # Paths at info severity are always reported when found; others only on
 # interesting status codes.
-_INFO_PATHS = {"/robots.txt", "/sitemap.xml", "/.well-known/security.txt"}
+_INFO_PATHS = {
+    "/robots.txt", "/sitemap.xml", "/.well-known/security.txt",
+    "/privacy", "/privacy-policy", "/cookie-policy",
+    "/terms", "/terms-of-service",
+    "/gdpr", "/ccpa", "/data-request",
+    "/.well-known/dnt-policy.txt",
+}
 
 # Status codes that indicate the path exists and is accessible.
 # 301/302 are excluded — redirects (common on Wix, CDNs, etc.) do NOT
@@ -105,6 +132,32 @@ async def scan_sensitive_paths(
 
             if code == 200 and length > 0 and length < 20 and path not in _INFO_PATHS:
                 return None
+
+            # Directory listing detection for directory paths
+            if code == 200 and path.endswith("/") and path not in _INFO_PATHS:
+                try:
+                    get_resp = await client.get(url, headers={"User-Agent": UA_HONEST})
+                    body = get_resp.text[:2000]
+                    if not any(sig in body for sig in _DIR_LISTING_SIGNATURES):
+                        return None
+                    risk = "Directory listing enabled — exposes file/folder names."
+                    severity = "high"
+                except Exception:
+                    return None
+
+            # GraphQL introspection probe
+            if path == "/graphql" and code == 200:
+                try:
+                    gql_resp = await client.post(
+                        url,
+                        headers={"User-Agent": UA_HONEST, "Content-Type": "application/json"},
+                        json={"query": "{__schema{types{name}}}"},
+                    )
+                    if gql_resp.status_code == 200 and "__schema" in gql_resp.text:
+                        risk = "GraphQL introspection enabled — full API schema is queryable."
+                        severity = "high"
+                except Exception:
+                    pass
 
             return SensitivePathFinding(
                 path=path,

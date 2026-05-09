@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, model_validator
+
+
+def _fingerprint(*parts: str) -> str:
+    """Produce a stable 16-char hex fingerprint for finding deduplication."""
+    raw = "|".join(str(p) for p in parts)
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +197,13 @@ class SecretFinding(BaseModel):
         default="",
         description="Page URL where the secret was detected.",
     )
+    fingerprint: str = Field(default="", description="Stable hash for cross-scan deduplication.")
+
+    @model_validator(mode="after")
+    def _set_fingerprint(self) -> SecretFinding:
+        if not self.fingerprint:
+            self.fingerprint = _fingerprint("secret", self.secret_type, self.found_on, self.value_preview)
+        return self
 
 
 class BreachRecord(BaseModel):
@@ -204,6 +218,13 @@ class BreachRecord(BaseModel):
         description="Types of data exposed (e.g. 'email', 'password').",
     )
     description: str = Field(default="", description="Breach description.")
+    fingerprint: str = Field(default="", description="Stable hash for cross-scan deduplication.")
+
+    @model_validator(mode="after")
+    def _set_fingerprint(self) -> BreachRecord:
+        if not self.fingerprint:
+            self.fingerprint = _fingerprint("breach", self.breach_name, self.domain)
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +239,13 @@ class HeaderFinding(BaseModel):
     value: str = Field(default="", description="Header value if present.")
     recommendation: str = Field(default="", description="What to do to fix this.")
     severity: str = Field(default="medium", description="low, medium, high, critical.")
+    fingerprint: str = Field(default="", description="Stable hash for cross-scan deduplication.")
+
+    @model_validator(mode="after")
+    def _set_fingerprint(self) -> HeaderFinding:
+        if not self.fingerprint:
+            self.fingerprint = _fingerprint("header", self.header, self.status)
+        return self
 
 
 class SecurityHeadersResult(BaseModel):
@@ -240,6 +268,13 @@ class CookieFinding(BaseModel):
     path: str = ""
     issues: list[str] = Field(default_factory=list)
     severity: str = Field(default="low")
+    fingerprint: str = Field(default="", description="Stable hash for cross-scan deduplication.")
+
+    @model_validator(mode="after")
+    def _set_fingerprint(self) -> CookieFinding:
+        if not self.fingerprint:
+            self.fingerprint = _fingerprint("cookie", self.name, ":".join(sorted(self.issues)))
+        return self
 
 
 class SSLCertResult(BaseModel):
@@ -284,6 +319,13 @@ class SensitivePathFinding(BaseModel):
     content_length: int = 0
     risk: str = Field(default="", description="Why this path is sensitive.")
     severity: str = Field(default="high")
+    fingerprint: str = Field(default="", description="Stable hash for cross-scan deduplication.")
+
+    @model_validator(mode="after")
+    def _set_fingerprint(self) -> SensitivePathFinding:
+        if not self.fingerprint:
+            self.fingerprint = _fingerprint("path", self.path, str(self.status_code))
+        return self
 
 
 class RobotsTxtResult(BaseModel):
@@ -322,6 +364,13 @@ class IoCFinding(BaseModel):
         description="Where in the page (script, body, iframe, form).",
     )
     severity: str = Field(default="high", description="critical, high, medium, low.")
+    fingerprint: str = Field(default="", description="Stable hash for cross-scan deduplication.")
+
+    @model_validator(mode="after")
+    def _set_fingerprint(self) -> IoCFinding:
+        if not self.fingerprint:
+            self.fingerprint = _fingerprint("ioc", self.ioc_type, self.evidence[:100])
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -499,11 +548,22 @@ class IPEnrichmentResult(BaseModel):
     error: str | None = None
 
 
+class SubdomainEntry(BaseModel):
+    """A discovered subdomain with optional IP and CDN metadata."""
+    subdomain: str
+    ip: str | None = None
+    cloudflare: bool | None = None
+
+
 class CTResult(BaseModel):
     domain: str
     subdomains: list[str] = Field(
         default_factory=list,
         description="Deduped subdomains observed in CT log issuances.",
+    )
+    subdomain_details: list[SubdomainEntry] = Field(
+        default_factory=list,
+        description="Subdomains with IP and CDN metadata from C99.",
     )
     issuers: list[str] = Field(default_factory=list)
     certificates_seen: int = 0
@@ -671,6 +731,13 @@ class PrioritizedFinding(BaseModel):
         description="Applicable compliance framework references.",
     )
     source_field: str = Field(default="", description="Which DomainResult field this came from.")
+    fingerprint: str = Field(default="", description="Stable hash for cross-scan deduplication.")
+
+    @model_validator(mode="after")
+    def _set_fingerprint(self) -> PrioritizedFinding:
+        if not self.fingerprint:
+            self.fingerprint = _fingerprint("easm", self.id)
+        return self
 
 
 class SourcemapSummary(BaseModel):
@@ -860,6 +927,13 @@ class NucleiFinding(BaseModel):
     reference: list[str] = Field(default_factory=list)
     extracted_results: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
+    fingerprint: str = Field(default="", description="Stable hash for cross-scan deduplication.")
+
+    @model_validator(mode="after")
+    def _set_fingerprint(self) -> NucleiFinding:
+        if not self.fingerprint:
+            self.fingerprint = _fingerprint("nuclei", self.template_id, self.matched_at)
+        return self
 
 
 class NucleiResult(BaseModel):
@@ -878,6 +952,17 @@ class CVEFinding(BaseModel):
     affected_tech: str = ""
     affected_version: str = ""
     reference_url: str = ""
+    epss_score: float | None = Field(default=None, description="EPSS probability 0.0-1.0")
+    epss_percentile: float | None = Field(default=None, description="EPSS percentile 0.0-1.0")
+    in_kev: bool = Field(default=False, description="In CISA Known Exploited Vulnerabilities catalog")
+    kev_due_date: str = Field(default="", description="CISA KEV remediation due date")
+    fingerprint: str = Field(default="", description="Stable hash for cross-scan deduplication.")
+
+    @model_validator(mode="after")
+    def _set_fingerprint(self) -> CVEFinding:
+        if not self.fingerprint:
+            self.fingerprint = _fingerprint("cve", self.cve_id, self.affected_tech)
+        return self
 
 
 class FaviconResult(BaseModel):
@@ -895,6 +980,13 @@ class SubdomainTakeoverFinding(BaseModel):
     severity: str = Field(description="critical, high, medium, low, info")
     evidence: list[str] = Field(default_factory=list)
     remediation: str = ""
+    fingerprint: str = Field(default="", description="Stable hash for cross-scan deduplication.")
+
+    @model_validator(mode="after")
+    def _set_fingerprint(self) -> SubdomainTakeoverFinding:
+        if not self.fingerprint:
+            self.fingerprint = _fingerprint("takeover", self.subdomain, self.vulnerable_service)
+        return self
 
 
 class SubdomainEnumResult(BaseModel):
@@ -910,6 +1002,50 @@ class SubdomainTakeoverResult(BaseModel):
     findings: list[SubdomainTakeoverFinding] = Field(default_factory=list)
     subdomains_checked: int = 0
     scan_duration_seconds: float = 0
+    error: str | None = None
+
+
+class TyposquatCandidate(BaseModel):
+    domain: str
+    a_records: list[str] = Field(default_factory=list)
+    technique: str = ""
+    similarity_score: float = 0.0
+    fingerprint: str = Field(default="", description="Stable hash for cross-scan deduplication.")
+
+    @model_validator(mode="after")
+    def _set_fingerprint(self) -> TyposquatCandidate:
+        if not self.fingerprint:
+            self.fingerprint = _fingerprint("typosquat", self.domain)
+        return self
+
+
+class TyposquattingResult(BaseModel):
+    domain: str
+    candidates_checked: int = 0
+    registered_candidates: list[TyposquatCandidate] = Field(default_factory=list)
+    scan_duration_seconds: float = 0
+    error: str | None = None
+
+
+class PrivacyIndicator(BaseModel):
+    name: str
+    present: bool = False
+    evidence: list[str] = Field(default_factory=list)
+    fingerprint: str = Field(default="", description="Stable hash for cross-scan deduplication.")
+
+    @model_validator(mode="after")
+    def _set_fingerprint(self) -> PrivacyIndicator:
+        if not self.fingerprint:
+            self.fingerprint = _fingerprint("privacy", self.name, str(self.present))
+        return self
+
+
+class PrivacyComplianceResult(BaseModel):
+    domain: str
+    score: int = 0
+    grade: str = ""
+    indicators: list[PrivacyIndicator] = Field(default_factory=list)
+    consent_tool: str = ""
     error: str | None = None
 
 
@@ -942,6 +1078,13 @@ class OpenPort(BaseModel):
     service: str = ""
     banner: str = ""
     is_risky: bool = False
+    fingerprint: str = Field(default="", description="Stable hash for cross-scan deduplication.")
+
+    @model_validator(mode="after")
+    def _set_fingerprint(self) -> OpenPort:
+        if not self.fingerprint:
+            self.fingerprint = _fingerprint("port", str(self.port), self.service)
+        return self
 
 
 class PortScanResult(BaseModel):
@@ -969,12 +1112,45 @@ class CloudAssetFinding(BaseModel):
     status: str = ""  # "public", "exists_private"
     evidence: list[str] = Field(default_factory=list)
     severity: str = "critical"
+    fingerprint: str = Field(default="", description="Stable hash for cross-scan deduplication.")
+
+    @model_validator(mode="after")
+    def _set_fingerprint(self) -> CloudAssetFinding:
+        if not self.fingerprint:
+            self.fingerprint = _fingerprint("cloud", self.provider, self.bucket_name, self.status)
+        return self
 
 
 class CloudAssetResult(BaseModel):
     domain: str
     findings: list[CloudAssetFinding] = Field(default_factory=list)
     buckets_checked: int = 0
+    scan_duration_seconds: float = 0
+    error: str | None = None
+
+
+class GitHubSecretFinding(BaseModel):
+    query: str = Field(default="", description="Dork query category that matched.")
+    repository: str = Field(default="", description="GitHub owner/repo.")
+    file_path: str = Field(default="", description="Path within the repository.")
+    file_url: str = Field(default="", description="GitHub URL to the file.")
+    code_snippet: str = Field(default="", description="Redacted code fragment.")
+    last_modified: str = Field(default="", description="Repository last push date.")
+    severity: str = "high"
+    fingerprint: str = Field(default="", description="Stable hash for cross-scan deduplication.")
+
+    @model_validator(mode="after")
+    def _set_fingerprint(self) -> GitHubSecretFinding:
+        if not self.fingerprint:
+            self.fingerprint = _fingerprint("github", self.repository, self.file_path, self.query)
+        return self
+
+
+class GitHubSecretResult(BaseModel):
+    domain: str
+    findings: list[GitHubSecretFinding] = Field(default_factory=list)
+    queries_run: int = 0
+    total_matches: int = 0
     scan_duration_seconds: float = 0
     error: str | None = None
 
@@ -1012,6 +1188,9 @@ class DomainSummary(BaseModel):
     risky_ports: int = 0
     cloud_buckets_found: int = 0
     screenshots_taken: int = 0
+    typosquat_candidates: int = Field(default=0, description="Registered lookalike domains found.")
+    privacy_score: int = Field(default=0, description="Privacy compliance score (0-100).")
+    consent_tool: str = Field(default="", description="Detected cookie consent management tool.")
 
 
 # ---------------------------------------------------------------------------
@@ -1074,6 +1253,34 @@ class ReputationGroup(BaseModel):
     url: URLReputationResult | None = None
 
 
+class AttackStep(BaseModel):
+    finding_type: str = ""
+    description: str = ""
+    fingerprint: str = ""
+
+
+class AttackPath(BaseModel):
+    title: str = ""
+    severity: str = ""
+    impact: str = ""
+    steps: list[AttackStep] = Field(default_factory=list)
+    likelihood: str = ""
+    remediation: str = ""
+    fingerprint: str = Field(default="", description="Stable hash for cross-scan deduplication.")
+
+    @model_validator(mode="after")
+    def _set_fingerprint(self) -> AttackPath:
+        if not self.fingerprint:
+            step_fps = ":".join(s.fingerprint for s in self.steps)
+            self.fingerprint = _fingerprint("attack_path", self.title, step_fps)
+        return self
+
+
+class AttackPathResult(BaseModel):
+    paths: list[AttackPath] = Field(default_factory=list)
+    chains_evaluated: int = 0
+
+
 class RiskAssessmentGroup(BaseModel):
     """Risk scoring and EASM report."""
     fair_signals: FAIRSignals | None = None
@@ -1104,11 +1311,14 @@ class DomainResult(BaseModel):
     passive_intel: PassiveIntelSlim | None = None
     vulnerabilities: VulnerabilitiesGroup | None = None
     reputation: ReputationGroup | None = None
+    typosquatting: TyposquattingResult | None = None
+    privacy: PrivacyComplianceResult | None = None
     email_validations: list[EmailValidationResult] = Field(default_factory=list)
     screenshots: list[ScreenshotResult] = Field(default_factory=list)
     favicon: FaviconResult | None = None
     robots_txt: RobotsTxtResult | None = None
     sitemap: SitemapResult | None = None
+    attack_paths: AttackPathResult | None = None
     risk_assessment: RiskAssessmentGroup | None = None
 
     # --- Backward-compat read-only properties (not serialized to JSON) ---
@@ -1227,6 +1437,7 @@ class ScanResponse(BaseModel):
     )
     total_targets: int = 0
     results: list[DomainResult] = Field(default_factory=list)
+    scanner_version: str = Field(default="1.4.0", description="Scanner version for change attribution.")
 
 
 # ---------------------------------------------------------------------------
@@ -1294,6 +1505,12 @@ class IoCReconResult(BaseModel):
 class BreachReconResult(BaseModel):
     target: str
     breaches: list[BreachRecord] = Field(default_factory=list)
+    error: str | None = None
+
+
+class GitHubSecretsReconResult(BaseModel):
+    target: str
+    github_secrets: GitHubSecretResult | None = None
     error: str | None = None
 
 

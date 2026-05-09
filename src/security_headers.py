@@ -37,6 +37,21 @@ _REQUIRED_HEADERS: list[tuple[str, str, str]] = [
         "low",
         "Add a Permissions-Policy header to restrict browser features (camera, mic, geolocation).",
     ),
+    (
+        "Cross-Origin-Opener-Policy",
+        "low",
+        "Add 'Cross-Origin-Opener-Policy: same-origin' to isolate browsing context from cross-origin popups.",
+    ),
+    (
+        "Cross-Origin-Resource-Policy",
+        "low",
+        "Add 'Cross-Origin-Resource-Policy: same-origin' to prevent cross-origin reads of resources.",
+    ),
+    (
+        "X-Permitted-Cross-Domain-Policies",
+        "low",
+        "Add 'X-Permitted-Cross-Domain-Policies: none' to prevent Adobe Flash/Acrobat cross-domain data loading.",
+    ),
 ]
 
 # Headers whose presence leaks information
@@ -115,6 +130,32 @@ def analyze_headers(headers: dict[str, str]) -> SecurityHeadersResult:
                 )
             )
             score -= 3  # small penalty for information leakage
+
+    # CORS misconfiguration detection
+    cors_origin = lower.get("access-control-allow-origin", "")
+    cors_credentials = lower.get("access-control-allow-credentials", "").lower()
+    if cors_origin == "*":
+        findings.append(
+            HeaderFinding(
+                header="Access-Control-Allow-Origin",
+                status="misconfigured",
+                value=cors_origin,
+                recommendation="Wildcard CORS allows any website to read responses. Restrict to trusted origins.",
+                severity="high",
+            )
+        )
+        score -= 15
+    elif cors_origin and cors_credentials == "true":
+        findings.append(
+            HeaderFinding(
+                header="Access-Control-Allow-Origin",
+                status="misconfigured",
+                value=f"{cors_origin} (with credentials)",
+                recommendation="CORS with credentials allows the specified origin to make authenticated requests. Verify this origin is trusted.",
+                severity="medium",
+            )
+        )
+        score -= 10
 
     score = max(0, score)
 

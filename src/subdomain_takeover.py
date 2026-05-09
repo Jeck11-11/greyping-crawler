@@ -426,8 +426,8 @@ async def enumerate_subdomains(
     try:
         from .c99_client import find_subdomains as c99_find
         c99_subs = await c99_find(domain)
-        for sub in c99_subs:
-            sub = sub.strip().lower().rstrip(".")
+        for entry in c99_subs:
+            sub = (entry["subdomain"] if isinstance(entry, dict) else str(entry)).strip().lower().rstrip(".")
             if sub and sub != domain and sub.endswith(f".{domain}") and sub not in candidates:
                 candidates[sub] = "c99"
                 c99_count += 1

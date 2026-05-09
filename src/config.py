@@ -6,7 +6,7 @@ import os
 
 # HTTP timeouts (seconds)
 HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "15"))
-CRAWL_TIMEOUT = int(os.getenv("CRAWL_TIMEOUT", "30"))
+CRAWL_TIMEOUT = int(os.getenv("CRAWL_TIMEOUT", "20"))
 SSL_TIMEOUT = int(os.getenv("SSL_TIMEOUT", "10"))
 PATH_SCAN_TIMEOUT = int(os.getenv("PATH_SCAN_TIMEOUT", "10"))
 PORT_SCAN_TIMEOUT = int(os.getenv("PORT_SCAN_TIMEOUT", "3"))
@@ -21,7 +21,7 @@ MAX_PAGES = int(os.getenv("MAX_PAGES", "50"))
 MAX_SCRIPTS = int(os.getenv("MAX_SCRIPTS", "50"))
 PATH_CONCURRENCY = int(os.getenv("PATH_CONCURRENCY", "10"))
 BREACH_EMAIL_CAP = int(os.getenv("BREACH_EMAIL_CAP", "10"))
-PLAYWRIGHT_EXTRA_WAIT_MS = int(os.getenv("PLAYWRIGHT_EXTRA_WAIT_MS", "2000"))
+PLAYWRIGHT_EXTRA_WAIT_MS = int(os.getenv("PLAYWRIGHT_EXTRA_WAIT_MS", "500"))
 HIBP_RATE_LIMIT_DELAY = float(os.getenv("HIBP_RATE_LIMIT_DELAY", "1.5"))
 JS_FETCH_CONCURRENCY = int(os.getenv("JS_FETCH_CONCURRENCY", "5"))
 SCAN_CONCURRENCY = int(os.getenv("SCAN_CONCURRENCY", "5"))
@@ -30,6 +30,10 @@ MAX_RESPONSE_BYTES = int(os.getenv("MAX_RESPONSE_BYTES", str(10 * 1024 * 1024)))
 # C99 API integration
 C99_API_KEY = os.getenv("C99_API_KEY", "")
 C99_TIMEOUT = int(os.getenv("C99_TIMEOUT", "20"))
+
+# GitHub Code Search
+GITHUB_API_KEY = os.getenv("GITHUB_API_KEY", "")
+GITHUB_SCAN_TIMEOUT = int(os.getenv("GITHUB_SCAN_TIMEOUT", "60"))
 
 # Nuclei integration
 NUCLEI_API_URL = os.getenv("NUCLEI_API_URL", "")

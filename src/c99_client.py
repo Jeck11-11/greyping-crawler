@@ -17,6 +17,7 @@ C99_TIMEOUT = int(os.getenv("C99_TIMEOUT", "20"))
 
 async def _c99_get(endpoint: str, params: dict[str, str], timeout: int = C99_TIMEOUT) -> dict | None:
     if not C99_API_KEY:
+        print(f"[C99] {endpoint} skipped — no API key", flush=True)
         return None
     params["key"] = C99_API_KEY
     params["json"] = ""
@@ -24,27 +25,39 @@ async def _c99_get(endpoint: str, params: dict[str, str], timeout: int = C99_TIM
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
             resp = await client.get(f"{C99_BASE_URL}/{endpoint}", params=params)
             resp.raise_for_status()
-            return resp.json()
+            data = resp.json()
+            print(f"[C99] {endpoint} response (status={resp.status_code}): {str(data)[:500]}", flush=True)
+            return data
     except Exception as exc:
+        print(f"[C99] {endpoint} failed: {exc}", flush=True)
         logger.warning("C99 %s failed: %s", endpoint, exc)
         return None
 
 
-async def find_subdomains(domain: str, *, timeout: int = C99_TIMEOUT) -> list[str]:
-    """Discover subdomains via C99's subdomain finder."""
+async def find_subdomains(domain: str, *, timeout: int = C99_TIMEOUT) -> list[dict[str, Any]]:
+    """Discover subdomains via C99's subdomain finder.
+
+    Returns list of dicts with keys: subdomain, ip, cloudflare.
+    """
     data = await _c99_get("subdomainfinder", {"domain": domain}, timeout=timeout)
     if not data or not data.get("success"):
         return []
     subs = data.get("subdomains") or []
-    result: list[str] = []
+    result: list[dict[str, Any]] = []
     for entry in subs:
         if isinstance(entry, dict):
             sub = entry.get("subdomain", "")
+            ip = entry.get("ip", entry.get("address", ""))
+            cf = entry.get("cloudflare", entry.get("is_cloudflare"))
         else:
             sub = str(entry)
+            ip = ""
+            cf = None
         sub = sub.strip().lower().rstrip(".")
         if sub:
-            result.append(sub)
+            if isinstance(cf, str):
+                cf = cf.lower() in ("true", "yes", "1")
+            result.append({"subdomain": sub, "ip": ip or None, "cloudflare": cf})
     return result
 
 
@@ -92,16 +105,26 @@ async def check_url_reputation(url: str, *, timeout: int = C99_TIMEOUT) -> dict[
 async def validate_email(email: str, *, timeout: int = C99_TIMEOUT) -> dict[str, Any]:
     """Validate whether an email address is deliverable."""
     data = await _c99_get("emailvalidator", {"email": email}, timeout=timeout)
-    if not data or not data.get("success"):
-        return {"email": email, "valid": None, "error": "lookup failed"}
+    if not data:
+        return {"email": email, "valid": None, "error": "C99 API unavailable"}
+    if not data.get("success"):
+        return {"email": email, "valid": None, "error": data.get("error", "lookup failed")}
     result = data.get("result") or data
+    if isinstance(result, str):
+        is_valid = result.lower() in ("valid", "true", "ok", "deliverable")
+        return {"email": email, "valid": is_valid}
+    if isinstance(result, bool):
+        return {"email": email, "valid": result}
     if isinstance(result, dict):
+        valid_val = result.get("valid", result.get("is_valid", result.get("deliverable")))
+        if isinstance(valid_val, str):
+            valid_val = valid_val.lower() in ("true", "valid", "ok", "deliverable", "1")
         return {
             "email": email,
-            "valid": result.get("valid", result.get("is_valid")),
+            "valid": valid_val,
             "disposable": result.get("disposable", False),
-            "role_account": result.get("role", False),
-            "free_provider": result.get("free", False),
+            "role_account": result.get("role", result.get("role_account", False)),
+            "free_provider": result.get("free", result.get("free_provider", False)),
             "details": result,
         }
     return {"email": email, "valid": None, "details": result}

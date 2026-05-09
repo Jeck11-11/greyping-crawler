@@ -11,11 +11,14 @@ from fastapi import APIRouter
 from .._http_utils import validate_target
 from ..breach_checker import check_breaches
 from ..c99_client import validate_email
+from ..github_scanner import scan_github_secrets
 from ..models import (
     BreachReconRequest,
     BreachReconResult,
     EmailValidationRequest,
     EmailValidationResult,
+    GitHubSecretsReconResult,
+    ReconRequest,
 )
 from ..postprocess import fill_not_found
 
@@ -76,4 +79,24 @@ async def recon_email_validation(
             return EmailValidationResult(email=email, error=str(exc))
 
     results = await asyncio.gather(*(_one(e) for e in request.emails))
+    return results
+
+
+@router.post("/github-secrets", response_model=list[GitHubSecretsReconResult])
+async def recon_github_secrets(request: ReconRequest) -> list[GitHubSecretsReconResult]:
+    """Search GitHub for leaked secrets referencing target domains."""
+    targets = [validate_target(t) for t in request.targets]
+
+    async def _one(target: str) -> GitHubSecretsReconResult:
+        domain = _domain_of(target)
+        try:
+            result = await scan_github_secrets(domain, timeout=request.timeout)
+            return GitHubSecretsReconResult(target=target, github_secrets=result)
+        except Exception as exc:
+            logger.warning("GitHub secret scan failed for %s: %s", target, exc)
+            return GitHubSecretsReconResult(target=target, error=str(exc))
+
+    results = await asyncio.gather(*(_one(t) for t in targets))
+    for r in results:
+        fill_not_found(r)
     return results

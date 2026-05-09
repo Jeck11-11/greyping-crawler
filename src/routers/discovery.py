@@ -19,18 +19,22 @@ from ..models import (
     JSIntelResult,
     NucleiResult,
     PathsReconResult,
+    PrivacyComplianceResult,
     ReconRequest,
     SubdomainEnumResult,
     SubdomainTakeoverResult,
     TechIntelResult,
+    TyposquattingResult,
 )
 from ..favicon import fetch_favicon
 from ..nuclei_client import run_nuclei_scan
 from ..passive_intel import query_ct_logs
 from ..path_scanner import scan_sensitive_paths
 from ..postprocess import fill_not_found
+from ..privacy_scanner import analyze_privacy_compliance
 from ..subdomain_takeover import enumerate_subdomains, scan_subdomain_takeover
 from ..tech_fingerprint import fingerprint_tech
+from ..typosquatting import check_typosquatting
 
 logger = logging.getLogger(__name__)
 
@@ -237,6 +241,56 @@ async def recon_cloud_assets(request: ReconRequest) -> list[CloudAssetResult]:
         except Exception as exc:
             logger.warning("Cloud asset scan failed for %s: %s", target, exc)
             return CloudAssetResult(domain=domain, error=str(exc))
+
+    results = await asyncio.gather(*(_one(t) for t in targets))
+    for r in results:
+        fill_not_found(r)
+    return results
+
+
+@router.post("/typosquatting", response_model=list[TyposquattingResult])
+async def recon_typosquatting(request: ReconRequest) -> list[TyposquattingResult]:
+    """Detect registered typosquat / lookalike domains for brand impersonation."""
+    targets = [validate_target(t) for t in request.targets]
+
+    async def _one(target: str) -> TyposquattingResult:
+        hostname = urlparse(target).hostname or target
+        domain = hostname.lstrip("www.")
+        try:
+            return await check_typosquatting(domain, timeout=request.timeout)
+        except Exception as exc:
+            logger.warning("Typosquatting scan failed for %s: %s", target, exc)
+            return TyposquattingResult(domain=domain, error=str(exc))
+
+    results = await asyncio.gather(*(_one(t) for t in targets))
+    for r in results:
+        fill_not_found(r)
+    return results
+
+
+@router.post("/privacy", response_model=list[PrivacyComplianceResult])
+async def recon_privacy(request: ReconRequest) -> list[PrivacyComplianceResult]:
+    """Assess privacy compliance indicators (policies, consent tools, GDPR/CCPA)."""
+    targets = [validate_target(t) for t in request.targets]
+
+    async def _one(target: str) -> PrivacyComplianceResult:
+        hostname = urlparse(target).hostname or target
+        domain = hostname.lstrip("www.")
+        try:
+            headers, cookies, html = await fetch_landing_page_full(
+                target, timeout=request.timeout,
+            )
+            paths = await scan_sensitive_paths(target, timeout=request.timeout)
+            meta = _parse_meta(html)
+            scripts = _extract_script_urls_for_fingerprint(html)
+            techs = fingerprint_tech(
+                html=html, headers=headers, cookies=cookies,
+                script_urls=scripts, meta=meta,
+            )
+            return analyze_privacy_compliance(domain, paths, techs, html)
+        except Exception as exc:
+            logger.warning("Privacy scan failed for %s: %s", target, exc)
+            return PrivacyComplianceResult(domain=domain, error=str(exc))
 
     results = await asyncio.gather(*(_one(t) for t in targets))
     for r in results:

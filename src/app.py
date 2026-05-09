@@ -31,7 +31,8 @@ from ._social_utils import detect_platform
 from .breach_checker import check_breaches
 from .cookie_checker import analyze_cookies
 from .crawler import crawl_domain
-from .cve_lookup import lookup_cves
+from .cve_lookup import enrich_cves_with_epss_kev, lookup_cves
+from .attack_paths import analyze_attack_paths
 from .easm_report import build_easm_report
 from .fair_signals import compute_fair_signals
 from .favicon import fetch_favicon
@@ -44,6 +45,8 @@ from .middleware import APIKeyMiddleware, RateLimitMiddleware
 from .js_miner import mine_javascript
 from .extractors import extract_contacts, extract_links, extract_page_metadata
 from .ioc_scanner import scan_ioc
+from .privacy_scanner import analyze_privacy_compliance
+from .typosquatting import check_typosquatting
 from .models import (
     CloudAssetResult,
     ContactsGroup,
@@ -66,6 +69,7 @@ from .models import (
     PassiveIntelSlim,
     PhoneFinding,
     PortScanResult,
+    PrivacyComplianceResult,
     RDAPResult,
     ReconRequest,
     ReputationGroup,
@@ -78,6 +82,8 @@ from .models import (
     SecurityHeadersResult,
     SocialFinding,
     SSLCertResult,
+    SubdomainEntry,
+    TyposquattingResult,
     URLReputationResult,
     VulnerabilitiesGroup,
     WaybackResult,
@@ -180,15 +186,19 @@ async def _scan_single_target(
     port_scan_task = scan_ports(domain)
     cloud_assets_task = discover_cloud_assets(domain)
     c99_subs_task = find_subdomains(domain)
+    robots_task = fetch_and_parse_robots_sitemap(target, timeout=request.timeout)
+    typosquat_task = check_typosquatting(domain, timeout=request.timeout)
 
     (crawl_result, ssl_result, landing_result, paths_result,
      dns_result, ct_result, rdap_result, wayback_result,
      favicon_result,
-     port_scan_result, cloud_assets_result, c99_subs_result) = await asyncio.gather(
+     port_scan_result, cloud_assets_result, c99_subs_result,
+     robots_sitemap_result, typosquat_result) = await asyncio.gather(
         crawl_task, ssl_task, landing_task, paths_task,
         dns_task, ct_task, rdap_task, wayback_task,
         favicon_task,
         port_scan_task, cloud_assets_task, c99_subs_task,
+        robots_task, typosquat_task,
         return_exceptions=True,
     )
 
@@ -255,20 +265,42 @@ async def _scan_single_target(
     except Exception as exc:
         logger.warning("Tech fingerprint failed for %s: %s", target, exc)
 
+    # Privacy compliance analysis (uses paths + tech + landing HTML)
+    privacy_result: PrivacyComplianceResult | None = None
     try:
-        js_intel_result = await mine_javascript(
-            target, landing_html, timeout=request.timeout,
+        _privacy_paths = paths_result if isinstance(paths_result, list) else []
+        privacy_result = analyze_privacy_compliance(
+            domain, _privacy_paths, tech_findings, landing_html,
         )
     except Exception as exc:
-        logger.warning("JS mining failed for %s: %s", target, exc)
+        logger.warning("Privacy analysis failed for %s: %s", target, exc)
+        privacy_result = PrivacyComplianceResult(domain=domain, error=str(exc))
 
-    # CVE correlation from detected tech versions
+    # JS mining + CVE lookup run in parallel (independent of each other)
     cve_findings: list = []
-    if tech_findings:
+    js_coro = mine_javascript(target, landing_html, timeout=request.timeout)
+    cve_coro = lookup_cves(tech_findings, timeout=request.timeout) if tech_findings else None
+    if cve_coro:
+        js_raw, cve_raw = await asyncio.gather(js_coro, cve_coro, return_exceptions=True)
+    else:
+        js_raw = await asyncio.gather(js_coro, return_exceptions=True)
+        js_raw = js_raw[0]
+        cve_raw = []
+    if isinstance(js_raw, Exception):
+        logger.warning("JS mining failed for %s: %s", target, js_raw)
+    else:
+        js_intel_result = js_raw
+    if isinstance(cve_raw, Exception):
+        logger.warning("CVE lookup failed for %s: %s", target, cve_raw)
+    elif isinstance(cve_raw, list):
+        cve_findings = cve_raw
+
+    # Enrich CVEs with EPSS exploit scores and CISA KEV status
+    if cve_findings:
         try:
-            cve_findings = await lookup_cves(tech_findings, timeout=request.timeout)
+            await enrich_cves_with_epss_kev(cve_findings)
         except Exception as exc:
-            logger.warning("CVE lookup failed for %s: %s", target, exc)
+            logger.warning("EPSS/KEV enrichment failed for %s: %s", target, exc)
 
 
     # Process favicon result
@@ -286,6 +318,11 @@ async def _scan_single_target(
         logger.warning("Cloud asset scan failed for %s: %s", target, cloud_assets_result)
         cloud_assets_result = CloudAssetResult(domain=domain, error=str(cloud_assets_result))
 
+    # Process typosquatting result
+    if isinstance(typosquat_result, Exception):
+        logger.warning("Typosquatting scan failed for %s: %s", target, typosquat_result)
+        typosquat_result = TyposquattingResult(domain=domain, error=str(typosquat_result))
+
     # Subdomain takeover scan (uses CT-discovered subdomains)
     # Subdomain takeover is a separate scan — use /recon/takeover directly.
     takeover_result = None
@@ -295,14 +332,12 @@ async def _scan_single_target(
         logger.warning("Path scan failed for %s: %s", target, paths_result)
         paths_result = []
 
-    # Fetch and parse robots.txt + sitemap.xml
+    # Unpack robots/sitemap from parallel gather
     robots_result, sitemap_result = None, None
-    try:
-        robots_result, sitemap_result = await fetch_and_parse_robots_sitemap(
-            target, timeout=request.timeout,
-        )
-    except Exception as exc:
-        logger.warning("robots/sitemap parse failed for %s: %s", target, exc)
+    if isinstance(robots_sitemap_result, tuple):
+        robots_result, sitemap_result = robots_sitemap_result
+    elif isinstance(robots_sitemap_result, Exception):
+        logger.warning("robots/sitemap parse failed for %s: %s", target, robots_sitemap_result)
 
     # Process passive intel results
     def _passive_result(x, kind):
@@ -317,12 +352,23 @@ async def _scan_single_target(
     rdap_result = _passive_result(rdap_result, RDAPResult)
     wayback_result = _passive_result(wayback_result, WaybackResult)
 
-    # Merge C99 subdomains into CT result
+    # Merge C99 subdomains into CT result (even if CT failed)
     c99_subs = c99_subs_result if isinstance(c99_subs_result, list) else []
-    if c99_subs and ct_result and not ct_result.error:
+    if c99_subs and ct_result:
         merged = set(ct_result.subdomains or [])
-        merged.update(c99_subs)
+        for entry in c99_subs:
+            merged.add(entry["subdomain"])
         ct_result.subdomains = sorted(merged)
+        ct_result.subdomain_details = [
+            SubdomainEntry(
+                subdomain=e["subdomain"],
+                ip=e.get("ip"),
+                cloudflare=e.get("cloudflare"),
+            )
+            for e in c99_subs
+        ]
+        if ct_result.error:
+            ct_result.error = None
 
     # Email security + IP enrichment (depend on DNS data, run concurrently)
     mx_records = dns_result.mx_records if not dns_result.error else []
@@ -443,32 +489,44 @@ async def _scan_single_target(
             found_on=unique_pages[:MAX_FOUND_ON],
         ))
 
-    # C99 email validation (up to 20 discovered emails)
+    # Email validation + breach checks run in parallel
     email_validations: list[EmailValidationResult] = []
-    discovered_emails = sorted(email_sources)[:20]
-    if discovered_emails:
-        try:
-            val_tasks = [validate_email(e) for e in discovered_emails]
-            val_results = await asyncio.gather(*val_tasks, return_exceptions=True)
-            for raw in val_results:
-                if isinstance(raw, dict):
-                    email_validations.append(EmailValidationResult(
-                        email=raw.get("email", ""),
-                        valid=raw.get("valid"),
-                        disposable=raw.get("disposable", False),
-                        role_account=raw.get("role_account", False),
-                        free_provider=raw.get("free_provider", False),
-                    ))
-        except Exception as exc:
-            logger.warning("Email validation failed for %s: %s", domain, exc)
-
-    # Breach checks
     breaches = []
-    if request.check_breaches:
-        try:
-            breaches = await check_breaches(domain, list(email_sources))
-        except Exception as exc:
-            logger.warning("Breach check failed for %s: %s", domain, exc)
+    discovered_emails = sorted(email_sources)[:20]
+
+    async def _do_email_validation() -> list[EmailValidationResult]:
+        if not discovered_emails:
+            return []
+        val_tasks = [validate_email(e) for e in discovered_emails]
+        val_results = await asyncio.gather(*val_tasks, return_exceptions=True)
+        results = []
+        for raw in val_results:
+            if isinstance(raw, dict):
+                results.append(EmailValidationResult(
+                    email=raw.get("email", ""),
+                    valid=raw.get("valid"),
+                    disposable=raw.get("disposable", False),
+                    role_account=raw.get("role_account", False),
+                    free_provider=raw.get("free_provider", False),
+                ))
+        return results
+
+    async def _do_breach_check() -> list:
+        if not request.check_breaches:
+            return []
+        return await check_breaches(domain, list(email_sources))
+
+    val_raw, breach_raw = await asyncio.gather(
+        _do_email_validation(), _do_breach_check(), return_exceptions=True,
+    )
+    if isinstance(val_raw, Exception):
+        logger.warning("Email validation failed for %s: %s", domain, val_raw)
+    else:
+        email_validations = val_raw
+    if isinstance(breach_raw, Exception):
+        logger.warning("Breach check failed for %s: %s", domain, breach_raw)
+    else:
+        breaches = breach_raw
 
     # Screenshots — admin paths and takeover pages
     from .config import SCREENSHOT_MAX_PER_SCAN
@@ -522,7 +580,7 @@ async def _scan_single_target(
         ioc_findings=len(all_iocs),
         technologies_found=len(tech_findings),
         js_endpoints_found=js_endpoints_count,
-        subdomains_found=len(ct_result.subdomains) if not ct_result.error else 0,
+        subdomains_found=len(ct_result.subdomains or []),
         wayback_snapshots=wayback_result.snapshot_count if not wayback_result.error else 0,
         robots_disallow_count=len(robots_result.disallow_rules) if robots_result else 0,
         sitemap_url_count=sitemap_result.url_count if sitemap_result else 0,
@@ -537,6 +595,9 @@ async def _scan_single_target(
         risky_ports=sum(1 for p in (port_scan_result.open_ports if port_scan_result else []) if p.is_risky),
         cloud_buckets_found=len(cloud_assets_result.findings) if cloud_assets_result else 0,
         screenshots_taken=len(screenshots),
+        typosquat_candidates=len(typosquat_result.registered_candidates) if typosquat_result else 0,
+        privacy_score=privacy_result.score if privacy_result else 0,
+        consent_tool=privacy_result.consent_tool if privacy_result else "",
     )
 
     # Build page summary from the raw pages list
@@ -588,6 +649,8 @@ async def _scan_single_target(
             subdomain_takeover=takeover_result,
         ),
         reputation=ReputationGroup(ip=ip_rep_result, url=url_rep_result),
+        typosquatting=typosquat_result,
+        privacy=privacy_result,
         email_validations=email_validations,
         screenshots=screenshots,
         favicon=favicon_result,
@@ -599,6 +662,7 @@ async def _scan_single_target(
             "max_depth": request.max_depth,
         },
     )
+    result.attack_paths = analyze_attack_paths(result)
     result.risk_assessment = RiskAssessmentGroup(
         fair_signals=compute_fair_signals(result, scan_mode="full"),
         easm_report=build_easm_report(result, scan_mode="full"),
@@ -874,6 +938,7 @@ async def _lighttouch_single_target(target: str, timeout: int) -> DomainResult:
         metadata={"domain": domain, "mode": "lighttouch"},
         error=None if html else "landing page fetch failed",
     )
+    result.attack_paths = analyze_attack_paths(result)
     result.risk_assessment = RiskAssessmentGroup(
         fair_signals=compute_fair_signals(result, scan_mode="lighttouch"),
         easm_report=build_easm_report(result, scan_mode="lighttouch"),
@@ -1045,6 +1110,7 @@ async def _passive_single_target(
         metadata={"domain": domain, "mode": "passive"},
         error=passive_error,
     )
+    result.attack_paths = analyze_attack_paths(result)
     result.risk_assessment = RiskAssessmentGroup(
         fair_signals=compute_fair_signals(result, scan_mode="passive"),
         easm_report=build_easm_report(result, scan_mode="passive"),

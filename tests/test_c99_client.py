@@ -38,8 +38,8 @@ class TestFindSubdomains:
         api_response = {
             "success": True,
             "subdomains": [
-                {"subdomain": "api.example.com"},
-                {"subdomain": "mail.example.com"},
+                {"subdomain": "api.example.com", "ip": "1.2.3.4", "cloudflare": True},
+                {"subdomain": "mail.example.com", "ip": "5.6.7.8", "cloudflare": False},
             ],
         }
         with patch("src.c99_client.httpx.AsyncClient") as MockClient:
@@ -49,8 +49,11 @@ class TestFindSubdomains:
             MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
 
             result = await find_subdomains("example.com")
-            assert "api.example.com" in result
-            assert "mail.example.com" in result
+            subs = [e["subdomain"] for e in result]
+            assert "api.example.com" in subs
+            assert "mail.example.com" in subs
+            assert result[0]["ip"] == "1.2.3.4"
+            assert result[0]["cloudflare"] is True
 
     @pytest.mark.asyncio
     async def test_returns_empty_on_failure(self, mock_c99_key):
@@ -83,6 +86,9 @@ class TestFindSubdomains:
 
             result = await find_subdomains("example.com")
             assert len(result) == 2
+            assert result[0]["subdomain"] == "api.example.com"
+            assert result[0]["ip"] is None
+            assert result[0]["cloudflare"] is None
 
 
 # ---------------------------------------------------------------------------

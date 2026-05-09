@@ -8,7 +8,7 @@ class TestConfigDefaults:
         assert config.HTTP_TIMEOUT == 15
 
     def test_crawl_timeout_default(self):
-        assert config.CRAWL_TIMEOUT == 30
+        assert config.CRAWL_TIMEOUT == 20
 
     def test_ssl_timeout_default(self):
         assert config.SSL_TIMEOUT == 10
@@ -41,7 +41,7 @@ class TestConfigDefaults:
         assert config.BREACH_EMAIL_CAP == 10
 
     def test_playwright_wait_default(self):
-        assert config.PLAYWRIGHT_EXTRA_WAIT_MS == 2000
+        assert config.PLAYWRIGHT_EXTRA_WAIT_MS == 500
 
     def test_ua_honest_default(self):
         assert config.UA_HONEST == "GreypingCrawler/1.0"

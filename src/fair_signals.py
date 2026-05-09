@@ -391,16 +391,34 @@ def _build_vulnerability(result: DomainResult) -> FAIRFactor:
         ))
 
     # CVE findings from detected technology versions.
+    # KEV-listed and high-EPSS CVEs get elevated weight.
     if result.cve_findings:
         worst = max(_severity_score(f.severity) for f in result.cve_findings)
         score = min(100, worst + 10 * (len(result.cve_findings) - 1))
+        kev_count = sum(1 for f in result.cve_findings if f.in_kev)
+        high_epss = sum(1 for f in result.cve_findings if (f.epss_score or 0) > 0.5)
+        if kev_count:
+            score = min(100, score + 15)
+        weight = 1.5
+        if kev_count:
+            weight = 2.0
+        elif high_epss:
+            weight = 1.7
+        evidence = [
+            f"{len(result.cve_findings)} CVE(s) correlated from detected tech",
+        ]
+        if kev_count:
+            evidence.append(f"{kev_count} in CISA KEV (actively exploited)")
+        if high_epss:
+            evidence.append(f"{high_epss} with EPSS > 50%")
+        evidence.extend(
+            f"{f.cve_id} ({f.severity})" for f in result.cve_findings[:5]
+        )
         signals.append(FAIRSignal(
             name="known_cves",
             score=score,
-            weight=1.5,
-            evidence=[
-                f"{f.cve_id} ({f.severity})" for f in result.cve_findings[:5]
-            ],
+            weight=weight,
+            evidence=evidence,
         ))
 
     # Subdomain takeover findings.
@@ -507,6 +525,50 @@ def _build_vulnerability(result: DomainResult) -> FAIRFactor:
             evidence=[exp_msg],
         ))
 
+    # CORS misconfiguration
+    cors_findings = [h for h in headers.findings if h.header == "Access-Control-Allow-Origin" and h.status == "misconfigured"]
+    if cors_findings:
+        signals.append(FAIRSignal(
+            name="cors_misconfiguration",
+            score=80,
+            weight=1.2,
+            evidence=[f"{h.header}: {h.value}" for h in cors_findings[:3]],
+        ))
+
+    # Open ports (non-risky but numerous = larger attack surface)
+    if result.port_scan and result.port_scan.open_ports:
+        total_open = len(result.port_scan.open_ports)
+        if total_open >= 5:
+            signals.append(FAIRSignal(
+                name="large_port_surface",
+                score=min(100, total_open * 10),
+                weight=0.6,
+                evidence=[f"{total_open} open ports detected"],
+            ))
+
+    # Directory listing exposed
+    dir_listing = [p for p in (result.sensitive_paths or []) if "directory listing" in (p.risk or "").lower()]
+    if dir_listing:
+        signals.append(FAIRSignal(
+            name="directory_listing_exposed",
+            score=70,
+            weight=1.1,
+            evidence=[f"{p.path} → directory listing enabled" for p in dir_listing[:3]],
+        ))
+
+    # GraphQL introspection enabled
+    graphql_paths = [p for p in (result.sensitive_paths or []) if p.path == "/graphql" and p.status_code == 200]
+    if graphql_paths:
+        risk_text = (graphql_paths[0].risk or "").lower()
+        is_introspection = "introspection" in risk_text
+        signals.append(FAIRSignal(
+            name="graphql_exposed",
+            score=85 if is_introspection else 50,
+            weight=1.2 if is_introspection else 0.8,
+            evidence=["GraphQL introspection enabled — full API schema queryable" if is_introspection
+                       else "GraphQL endpoint accessible"],
+        ))
+
     # Server/X-Powered-By information leakage with version numbers.
     if headers and (headers.server or headers.powered_by):
         parts: list[str] = []
@@ -533,6 +595,34 @@ def _build_vulnerability(result: DomainResult) -> FAIRFactor:
                 weight=0.4,
                 evidence=parts,
             ))
+
+    # Typosquatting / brand impersonation exposure.
+    if result.typosquatting and result.typosquatting.registered_candidates:
+        count = len(result.typosquatting.registered_candidates)
+        typo_score = min(100, 40 + count * 10)
+        signals.append(FAIRSignal(
+            name="typosquatting_exposure",
+            score=typo_score,
+            weight=1.3,
+            evidence=[
+                f"{count} lookalike domain(s) registered",
+                *[c.domain for c in result.typosquatting.registered_candidates[:5]],
+            ],
+        ))
+
+    if result.attack_paths and result.attack_paths.paths:
+        critical_chains = sum(1 for p in result.attack_paths.paths if p.severity == "critical")
+        high_chains = sum(1 for p in result.attack_paths.paths if p.severity == "high")
+        score = min(100, 70 + critical_chains * 15 + high_chains * 5)
+        signals.append(FAIRSignal(
+            name="attack_path_chains",
+            score=score,
+            weight=2.0,
+            evidence=[
+                f"{len(result.attack_paths.paths)} exploit chain(s) identified",
+                *[f"[{p.severity}] {p.title}" for p in result.attack_paths.paths[:3]],
+            ],
+        ))
 
     return _factor_from_signals(
         signals,
@@ -694,6 +784,36 @@ def _build_control_strength(result: DomainResult) -> FAIRFactor:
         except (ValueError, TypeError):
             pass
 
+    # Port hygiene — no risky ports open = good security posture.
+    if result.port_scan and result.port_scan.open_ports:
+        risky = [p for p in result.port_scan.open_ports if p.is_risky]
+        if not risky:
+            signals.append(FAIRSignal(
+                name="port_hygiene",
+                score=80,
+                weight=0.5,
+                evidence=[f"{len(result.port_scan.open_ports)} open ports, none risky"],
+            ))
+        else:
+            signals.append(FAIRSignal(
+                name="port_hygiene",
+                score=max(10, 50 - 10 * len(risky)),
+                weight=0.5,
+                evidence=[f"{len(risky)} risky port(s) exposed"],
+            ))
+
+    # Privacy compliance posture — consent tool + privacy policy presence.
+    if result.privacy and not result.privacy.error:
+        signals.append(FAIRSignal(
+            name="privacy_compliance_posture",
+            score=result.privacy.score,
+            weight=0.8,
+            evidence=[
+                f"privacy compliance score={result.privacy.score}, grade={result.privacy.grade}",
+                f"consent tool: {result.privacy.consent_tool or 'none detected'}",
+            ],
+        ))
+
     return _factor_from_signals(
         signals,
         notes="Higher Control Strength means stronger observed defences (WAF, TLS, headers, cookies, email auth).",
@@ -819,6 +939,28 @@ def _build_loss_magnitude(result: DomainResult) -> FAIRFactor:
                 score=min(100, len(ext_domains) * 3),
                 weight=0.5,
                 evidence=[f"{len(ext_domains)} unique external domains loaded"],
+            ))
+
+    # Brand impersonation risk from typosquatting.
+    if result.typosquatting and result.typosquatting.registered_candidates:
+        signals.append(FAIRSignal(
+            name="brand_impersonation_risk",
+            score=70,
+            weight=1.0,
+            evidence=[
+                f"{len(result.typosquatting.registered_candidates)} typosquat domains could be used for phishing",
+            ],
+        ))
+
+    if result.attack_paths and result.attack_paths.paths:
+        impacts = {p.impact for p in result.attack_paths.paths}
+        high_impacts = impacts & {"data_theft", "code_execution", "account_takeover"}
+        if high_impacts:
+            signals.append(FAIRSignal(
+                name="confirmed_exploit_chain_impact",
+                score=90,
+                weight=2.0,
+                evidence=[f"Confirmed attack path leads to {', '.join(sorted(high_impacts))}"],
             ))
 
     return _factor_from_signals(
