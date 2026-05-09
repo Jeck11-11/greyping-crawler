@@ -32,6 +32,7 @@ from .breach_checker import check_breaches
 from .cookie_checker import analyze_cookies
 from .crawler import crawl_domain
 from .cve_lookup import enrich_cves_with_epss_kev, lookup_cves
+from .attack_paths import analyze_attack_paths
 from .easm_report import build_easm_report
 from .fair_signals import compute_fair_signals
 from .favicon import fetch_favicon
@@ -661,6 +662,7 @@ async def _scan_single_target(
             "max_depth": request.max_depth,
         },
     )
+    result.attack_paths = analyze_attack_paths(result)
     result.risk_assessment = RiskAssessmentGroup(
         fair_signals=compute_fair_signals(result, scan_mode="full"),
         easm_report=build_easm_report(result, scan_mode="full"),
@@ -936,6 +938,7 @@ async def _lighttouch_single_target(target: str, timeout: int) -> DomainResult:
         metadata={"domain": domain, "mode": "lighttouch"},
         error=None if html else "landing page fetch failed",
     )
+    result.attack_paths = analyze_attack_paths(result)
     result.risk_assessment = RiskAssessmentGroup(
         fair_signals=compute_fair_signals(result, scan_mode="lighttouch"),
         easm_report=build_easm_report(result, scan_mode="lighttouch"),
@@ -1107,6 +1110,7 @@ async def _passive_single_target(
         metadata={"domain": domain, "mode": "passive"},
         error=passive_error,
     )
+    result.attack_paths = analyze_attack_paths(result)
     result.risk_assessment = RiskAssessmentGroup(
         fair_signals=compute_fair_signals(result, scan_mode="passive"),
         easm_report=build_easm_report(result, scan_mode="passive"),

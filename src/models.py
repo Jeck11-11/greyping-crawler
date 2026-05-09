@@ -1253,6 +1253,34 @@ class ReputationGroup(BaseModel):
     url: URLReputationResult | None = None
 
 
+class AttackStep(BaseModel):
+    finding_type: str = ""
+    description: str = ""
+    fingerprint: str = ""
+
+
+class AttackPath(BaseModel):
+    title: str = ""
+    severity: str = ""
+    impact: str = ""
+    steps: list[AttackStep] = Field(default_factory=list)
+    likelihood: str = ""
+    remediation: str = ""
+    fingerprint: str = Field(default="", description="Stable hash for cross-scan deduplication.")
+
+    @model_validator(mode="after")
+    def _set_fingerprint(self) -> AttackPath:
+        if not self.fingerprint:
+            step_fps = ":".join(s.fingerprint for s in self.steps)
+            self.fingerprint = _fingerprint("attack_path", self.title, step_fps)
+        return self
+
+
+class AttackPathResult(BaseModel):
+    paths: list[AttackPath] = Field(default_factory=list)
+    chains_evaluated: int = 0
+
+
 class RiskAssessmentGroup(BaseModel):
     """Risk scoring and EASM report."""
     fair_signals: FAIRSignals | None = None
@@ -1290,6 +1318,7 @@ class DomainResult(BaseModel):
     favicon: FaviconResult | None = None
     robots_txt: RobotsTxtResult | None = None
     sitemap: SitemapResult | None = None
+    attack_paths: AttackPathResult | None = None
     risk_assessment: RiskAssessmentGroup | None = None
 
     # --- Backward-compat read-only properties (not serialized to JSON) ---

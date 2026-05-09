@@ -610,6 +610,20 @@ def _build_vulnerability(result: DomainResult) -> FAIRFactor:
             ],
         ))
 
+    if result.attack_paths and result.attack_paths.paths:
+        critical_chains = sum(1 for p in result.attack_paths.paths if p.severity == "critical")
+        high_chains = sum(1 for p in result.attack_paths.paths if p.severity == "high")
+        score = min(100, 70 + critical_chains * 15 + high_chains * 5)
+        signals.append(FAIRSignal(
+            name="attack_path_chains",
+            score=score,
+            weight=2.0,
+            evidence=[
+                f"{len(result.attack_paths.paths)} exploit chain(s) identified",
+                *[f"[{p.severity}] {p.title}" for p in result.attack_paths.paths[:3]],
+            ],
+        ))
+
     return _factor_from_signals(
         signals,
         notes="Higher Vulnerability means a threat engagement is more likely to succeed.",
@@ -937,6 +951,17 @@ def _build_loss_magnitude(result: DomainResult) -> FAIRFactor:
                 f"{len(result.typosquatting.registered_candidates)} typosquat domains could be used for phishing",
             ],
         ))
+
+    if result.attack_paths and result.attack_paths.paths:
+        impacts = {p.impact for p in result.attack_paths.paths}
+        high_impacts = impacts & {"data_theft", "code_execution", "account_takeover"}
+        if high_impacts:
+            signals.append(FAIRSignal(
+                name="confirmed_exploit_chain_impact",
+                score=90,
+                weight=2.0,
+                evidence=[f"Confirmed attack path leads to {', '.join(sorted(high_impacts))}"],
+            ))
 
     return _factor_from_signals(
         signals,
