@@ -39,7 +39,7 @@ from .favicon import fetch_favicon
 from .cloud_assets import discover_cloud_assets
 from .port_scanner import scan_ports
 from .screenshot import take_screenshot
-from .c99_client import check_ip_reputation, check_url_reputation, find_subdomains, validate_email
+from .c99_client import check_ip_reputation, check_url_reputation, detect_waf, find_subdomains, validate_email
 from .postprocess import fill_not_found
 from .middleware import APIKeyMiddleware, RateLimitMiddleware
 from .js_miner import mine_javascript
@@ -86,6 +86,7 @@ from .models import (
     TyposquattingResult,
     URLReputationResult,
     VulnerabilitiesGroup,
+    WAFResult,
     WaybackResult,
 )
 from .passive_intel import (
@@ -186,6 +187,7 @@ async def _scan_single_target(
     port_scan_task = scan_ports(domain)
     cloud_assets_task = discover_cloud_assets(domain)
     c99_subs_task = find_subdomains(domain)
+    waf_task = detect_waf(target)
     robots_task = fetch_and_parse_robots_sitemap(target, timeout=request.timeout)
     typosquat_task = check_typosquatting(domain, timeout=request.timeout)
     async def _no_cookies() -> list[dict]:
@@ -196,12 +198,14 @@ async def _scan_single_target(
      dns_result, ct_result, rdap_result, wayback_result,
      favicon_result,
      port_scan_result, cloud_assets_result, c99_subs_result,
+     waf_raw_result,
      robots_sitemap_result, typosquat_result,
      rendered_cookies_result) = await asyncio.gather(
         crawl_task, ssl_task, landing_task, paths_task,
         dns_task, ct_task, rdap_task, wayback_task,
         favicon_task,
         port_scan_task, cloud_assets_task, c99_subs_task,
+        waf_task,
         robots_task, typosquat_task,
         rendered_cookies_task,
         return_exceptions=True,
@@ -433,6 +437,25 @@ async def _scan_single_target(
     except Exception as exc:
         logger.warning("C99 reputation checks failed for %s: %s", target, exc)
 
+    # C99 WAF detection
+    waf_result: WAFResult | None = None
+    if isinstance(waf_raw_result, dict):
+        waf_result = WAFResult(
+            url=target,
+            detected=waf_raw_result.get("detected", False),
+            firewall=waf_raw_result.get("firewall"),
+        )
+        if waf_result.detected and waf_result.firewall:
+            existing_names = {t.name.lower() for t in tech_findings}
+            if waf_result.firewall.lower() not in existing_names:
+                from .models import TechFinding
+                tech_findings.append(TechFinding(
+                    name=waf_result.firewall,
+                    categories=["waf"],
+                    confidence="high",
+                    evidence=["c99_firewalldetector"],
+                ))
+
     # Aggregate contacts, links, and secrets across all pages,
     # tracking which page URL each finding came from.
     email_sources: dict[str, list[str]] = {}
@@ -602,6 +625,7 @@ async def _scan_single_target(
         cloud_buckets_found=len(cloud_assets_result.findings) if cloud_assets_result else 0,
         screenshots_taken=len(screenshots),
         typosquat_candidates=len(typosquat_result.registered_candidates) if typosquat_result else 0,
+        waf_detected=waf_result.firewall if waf_result and waf_result.detected else "",
         privacy_score=privacy_result.score if privacy_result else 0,
         consent_tool=privacy_result.consent_tool if privacy_result else "",
     )
@@ -655,6 +679,7 @@ async def _scan_single_target(
             subdomain_takeover=takeover_result,
         ),
         reputation=ReputationGroup(ip=ip_rep_result, url=url_rep_result),
+        waf=waf_result,
         typosquatting=typosquat_result,
         privacy=privacy_result,
         email_validations=email_validations,

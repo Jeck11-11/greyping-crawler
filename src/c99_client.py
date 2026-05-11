@@ -102,6 +102,27 @@ async def check_url_reputation(url: str, *, timeout: int = C99_TIMEOUT) -> dict[
     }
 
 
+async def detect_waf(url: str, *, timeout: int = C99_TIMEOUT) -> dict[str, Any]:
+    """Detect WAF/firewall protecting a URL via C99's firewall detector."""
+    data = await _c99_get("firewalldetector", {"url": url}, timeout=timeout)
+    if not data or not data.get("success"):
+        return {"url": url, "detected": False, "error": "lookup failed"}
+    result = data.get("result") or data.get("firewall") or data
+    if isinstance(result, str):
+        detected = result.lower() not in ("", "none", "not detected", "unknown")
+        return {"url": url, "detected": detected, "firewall": result if detected else None}
+    if isinstance(result, dict):
+        fw = result.get("firewall") or result.get("name") or result.get("waf") or ""
+        detected = bool(fw) and fw.lower() not in ("none", "not detected", "unknown")
+        return {
+            "url": url,
+            "detected": detected,
+            "firewall": fw if detected else None,
+            "details": result,
+        }
+    return {"url": url, "detected": False, "details": result}
+
+
 async def validate_email(email: str, *, timeout: int = C99_TIMEOUT) -> dict[str, Any]:
     """Validate whether an email address is deliverable."""
     data = await _c99_get("emailvalidator", {"email": email}, timeout=timeout)

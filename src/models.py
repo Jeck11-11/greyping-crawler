@@ -1073,6 +1073,15 @@ class EmailValidationResult(BaseModel):
     error: str | None = None
 
 
+class WAFResult(BaseModel):
+    """WAF / firewall detection result from C99 API."""
+    url: str = ""
+    detected: bool = False
+    firewall: str | None = None
+    confidence: str = "high"
+    error: str | None = None
+
+
 class OpenPort(BaseModel):
     port: int
     service: str = ""
@@ -1189,6 +1198,7 @@ class DomainSummary(BaseModel):
     cloud_buckets_found: int = 0
     screenshots_taken: int = 0
     typosquat_candidates: int = Field(default=0, description="Registered lookalike domains found.")
+    waf_detected: str = Field(default="", description="WAF/firewall product detected by C99 (empty if none).")
     privacy_score: int = Field(default=0, description="Privacy compliance score (0-100).")
     consent_tool: str = Field(default="", description="Detected cookie consent management tool.")
 
@@ -1311,6 +1321,7 @@ class DomainResult(BaseModel):
     passive_intel: PassiveIntelSlim | None = None
     vulnerabilities: VulnerabilitiesGroup | None = None
     reputation: ReputationGroup | None = None
+    waf: WAFResult | None = None
     typosquatting: TyposquattingResult | None = None
     privacy: PrivacyComplianceResult | None = None
     email_validations: list[EmailValidationResult] = Field(default_factory=list)
