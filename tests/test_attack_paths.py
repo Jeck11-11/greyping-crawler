@@ -329,40 +329,29 @@ class TestSessionHijacking:
         assert not any("Session Hijacking" in p.title for p in ap.paths)
 
 
-class TestTyposquatBrandImpersonation:
+class TestTyposquatInformational:
     def test_match(self):
         result = _base_result(
             typosquatting=TyposquattingResult(
                 domain="example.com",
                 registered_candidates=[TyposquatCandidate(domain="examp1e.com", a_records=["1.2.3.4"])],
             ),
-            dns=DNSGroup(
-                email_security=EmailSecurityResult(
-                    domain="example.com",
-                    dmarc=DMARCResult(exists=False),
-                ),
-            ),
         )
         ap = analyze_attack_paths(result)
-        chain = next((p for p in ap.paths if "Brand Impersonation" in p.title), None)
+        chain = next((p for p in ap.paths if "Lookalike" in p.title), None)
         assert chain is not None
-        assert chain.severity == "medium"
+        assert chain.severity == "info"
+        assert chain.impact == "informational"
 
-    def test_no_match_dmarc_enforced(self):
+    def test_no_match_no_candidates(self):
         result = _base_result(
             typosquatting=TyposquattingResult(
                 domain="example.com",
-                registered_candidates=[TyposquatCandidate(domain="examp1e.com", a_records=["1.2.3.4"])],
-            ),
-            dns=DNSGroup(
-                email_security=EmailSecurityResult(
-                    domain="example.com",
-                    dmarc=DMARCResult(exists=True, policy="reject"),
-                ),
+                registered_candidates=[],
             ),
         )
         ap = analyze_attack_paths(result)
-        assert not any("Brand Impersonation" in p.title for p in ap.paths)
+        assert not any("Lookalike" in p.title for p in ap.paths)
 
 
 class TestAttackPathFingerprints:

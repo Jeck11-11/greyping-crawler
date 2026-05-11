@@ -30,7 +30,7 @@ from ._link_utils import is_asset_url, is_social_url, normalise_ext_url, MAX_FOU
 from ._social_utils import detect_platform
 from .breach_checker import check_breaches
 from .cookie_checker import analyze_cookies
-from .crawler import crawl_domain
+from .crawler import crawl_domain, fetch_rendered_cookies
 from .cve_lookup import enrich_cves_with_epss_kev, lookup_cves
 from .attack_paths import analyze_attack_paths
 from .easm_report import build_easm_report
@@ -188,17 +188,22 @@ async def _scan_single_target(
     c99_subs_task = find_subdomains(domain)
     robots_task = fetch_and_parse_robots_sitemap(target, timeout=request.timeout)
     typosquat_task = check_typosquatting(domain, timeout=request.timeout)
+    async def _no_cookies() -> list[dict]:
+        return []
+    rendered_cookies_task = fetch_rendered_cookies(target, timeout=request.timeout) if request.render_js else _no_cookies()
 
     (crawl_result, ssl_result, landing_result, paths_result,
      dns_result, ct_result, rdap_result, wayback_result,
      favicon_result,
      port_scan_result, cloud_assets_result, c99_subs_result,
-     robots_sitemap_result, typosquat_result) = await asyncio.gather(
+     robots_sitemap_result, typosquat_result,
+     rendered_cookies_result) = await asyncio.gather(
         crawl_task, ssl_task, landing_task, paths_task,
         dns_task, ct_task, rdap_task, wayback_task,
         favicon_task,
         port_scan_task, cloud_assets_task, c99_subs_task,
         robots_task, typosquat_task,
+        rendered_cookies_task,
         return_exceptions=True,
     )
 
@@ -236,7 +241,8 @@ async def _scan_single_target(
         resp_headers, resp_cookies, landing_html = landing_result
 
     headers_result = analyze_headers(resp_headers)
-    cookie_findings = analyze_cookies(resp_cookies)
+    browser_cookies = rendered_cookies_result if isinstance(rendered_cookies_result, list) else []
+    cookie_findings = analyze_cookies(resp_cookies, browser_cookies=browser_cookies)
 
     # Enrich SSL result with HSTS and final URL
     hsts_val = resp_headers.get("strict-transport-security", "")

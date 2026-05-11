@@ -63,8 +63,13 @@ async def _fetch_rendered(
     url: str,
     *,
     timeout: int = CRAWL_TIMEOUT,
-) -> tuple[str, int | None]:
-    """Fetch a URL via Playwright headless Chromium to execute JS."""
+) -> tuple[str, int | None, list[dict]]:
+    """Fetch a URL via Playwright headless Chromium to execute JS.
+
+    Returns ``(html, status_code, browser_cookies)`` where
+    *browser_cookies* is a list of cookie dicts from the browser context
+    (includes JS-set cookies invisible to plain HTTP).
+    """
     from playwright.async_api import async_playwright
 
     async with async_playwright() as pw:
@@ -75,17 +80,18 @@ async def _fetch_rendered(
         )
         page = await context.new_page()
         status_code: int | None = None
+        browser_cookies: list[dict] = []
         try:
             response = await page.goto(url, wait_until="networkidle", timeout=timeout * 1000)
             if response:
                 status_code = response.status
-            # Give extra time for late-loading XHR / SPA hydration
             await page.wait_for_timeout(PLAYWRIGHT_EXTRA_WAIT_MS)
             html = await page.content()
+            browser_cookies = await context.cookies()
         finally:
             await context.close()
             await browser.close()
-    return html, status_code
+    return html, status_code, browser_cookies
 
 
 async def crawl_page(
@@ -105,7 +111,7 @@ async def crawl_page(
         pw_available = await _check_playwright()
         if render_js and pw_available:
             try:
-                html, status_code = await _fetch_rendered(url, timeout=timeout)
+                html, status_code, _browser_cookies = await _fetch_rendered(url, timeout=timeout)
             except Exception as pw_exc:
                 logger.warning(
                     "Playwright failed for %s (%s), falling back to static fetch",
@@ -158,6 +164,27 @@ def _is_crawlable_url(url: str) -> bool:
     """Return False for URLs pointing to binary/non-HTML files."""
     path = urlparse(url).path.lower()
     return not any(path.endswith(ext) for ext in _SKIP_EXTENSIONS)
+
+
+async def fetch_rendered_cookies(
+    url: str,
+    *,
+    timeout: int = CRAWL_TIMEOUT,
+) -> list[dict]:
+    """Render *url* in a headless browser and return all cookies.
+
+    Returns Playwright cookie dicts (keys: name, value, domain, path,
+    httpOnly, secure, sameSite, expires).  Returns empty list if
+    Playwright is unavailable or rendering fails.
+    """
+    if not await _check_playwright():
+        return []
+    try:
+        _html, _status, cookies = await _fetch_rendered(url, timeout=timeout)
+        return cookies
+    except Exception as exc:
+        logger.debug("Rendered cookie fetch failed for %s: %s", url, exc)
+        return []
 
 
 async def crawl_domain(
