@@ -48,6 +48,10 @@ SCREENSHOT_MAX_PER_SCAN = int(os.getenv("SCREENSHOT_MAX_PER_SCAN", "10"))
 SCREENSHOT_WIDTH = int(os.getenv("SCREENSHOT_WIDTH", "1280"))
 SCREENSHOT_HEIGHT = int(os.getenv("SCREENSHOT_HEIGHT", "720"))
 
+# Xano webhook (nuclei results callback)
+XANO_WEBHOOK_URL = os.getenv("XANO_WEBHOOK_URL", "")
+NUCLEI_WEBHOOK_TIMEOUT = int(os.getenv("NUCLEI_WEBHOOK_TIMEOUT", "30"))
+
 # User-Agent strings
 UA_HONEST = os.getenv("UA_HONEST", "GreypingCrawler/1.0")
 UA_BROWSER = os.getenv(

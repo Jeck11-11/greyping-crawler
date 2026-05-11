@@ -104,15 +104,16 @@ def _severity_score(severity: str) -> int:
 def _aggregate_findings_score(items: list, attr: str = "severity") -> int:
     """Score a list of findings by the worst severity, amplified by count.
 
-    One high-severity finding already matters; several compound but saturate
-    at 100. Empty list → 0.
+    Worst severity is scaled to 80% so a single critical finding does not
+    immediately saturate at 100.  Additional findings add up to 25 bonus
+    points, leaving room for count to matter at every severity level.
     """
     if not items:
         return 0
     severities = [_severity_score(getattr(i, attr, "")) for i in items]
     worst = max(severities)
-    # Each additional finding adds 5 points, capped at 100.
-    return min(100, worst + 5 * (len(items) - 1))
+    count_bonus = min(25, 5 * (len(items) - 1))
+    return min(100, int(worst * 0.8) + count_bonus + 5)
 
 
 def _factor_from_signals(signals: list[FAIRSignal], notes: str = "") -> FAIRFactor:
@@ -321,16 +322,16 @@ def _build_vulnerability(result: DomainResult) -> FAIRFactor:
             evidence=ssl.issues[:3] if ssl.issues else ["TLS cert invalid"],
         ))
 
-    # Missing security headers (invert the grade).
+    # Missing or weak security headers (invert the grade).
     headers = result.security_headers
-    missing = [h for h in headers.findings if h.status == "missing"]
-    if missing:
+    weak_or_missing = [h for h in headers.findings if h.status in ("missing", "weak")]
+    if weak_or_missing:
         inv = 100 - _grade_score(headers.grade)
         signals.append(FAIRSignal(
             name="missing_security_headers",
             score=inv,
             weight=1.0,
-            evidence=[f"{h.header} ({h.severity})" for h in missing[:5]],
+            evidence=[f"{h.header} ({h.severity}, {h.status})" for h in weak_or_missing[:5]],
         ))
 
     # Cookies with security issues.
@@ -825,11 +826,13 @@ def _build_loss_magnitude(result: DomainResult) -> FAIRFactor:
     signals: list[FAIRSignal] = []
 
     # Credential exposure — secrets leaked = direct loss potential.
+    # Weight reduced from 1.5 to 0.8: secrets are primarily a Vulnerability
+    # signal; Loss Magnitude captures the data type impact, not the count.
     if result.secrets:
         signals.append(FAIRSignal(
             name="credential_exposure",
             score=_aggregate_findings_score(result.secrets),
-            weight=1.5,
+            weight=0.8,
             evidence=[f"{s.secret_type} exposed" for s in result.secrets[:5]],
         ))
 
@@ -942,16 +945,21 @@ def _build_loss_magnitude(result: DomainResult) -> FAIRFactor:
             ))
 
     # Brand impersonation risk from typosquatting.
+    # Weight reduced from 1.0 to 0.6: typosquatting is already heavily
+    # weighted in Vulnerability (1.3); Loss Magnitude uses a lighter touch.
     if result.typosquatting and result.typosquatting.registered_candidates:
         signals.append(FAIRSignal(
             name="brand_impersonation_risk",
             score=70,
-            weight=1.0,
+            weight=0.6,
             evidence=[
                 f"{len(result.typosquatting.registered_candidates)} typosquat domains could be used for phishing",
             ],
         ))
 
+    # Attack path impact — Weight reduced from 2.0 to 1.2: attack paths
+    # already drive Vulnerability heavily (w=2.0); in Loss Magnitude the
+    # impact type matters more than the chain itself.
     if result.attack_paths and result.attack_paths.paths:
         impacts = {p.impact for p in result.attack_paths.paths}
         high_impacts = impacts & {"data_theft", "code_execution", "account_takeover"}
@@ -959,7 +967,7 @@ def _build_loss_magnitude(result: DomainResult) -> FAIRFactor:
             signals.append(FAIRSignal(
                 name="confirmed_exploit_chain_impact",
                 score=90,
-                weight=2.0,
+                weight=1.2,
                 evidence=[f"Confirmed attack path leads to {', '.join(sorted(high_impacts))}"],
             ))
 

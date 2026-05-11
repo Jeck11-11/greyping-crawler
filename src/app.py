@@ -17,7 +17,8 @@ from pydantic import Field
 
 import httpx
 
-from .config import SCAN_CONCURRENCY
+from .config import NUCLEI_API_URL, SCAN_CONCURRENCY, XANO_WEBHOOK_URL
+from .nuclei_webhook import nuclei_background_scan
 
 from ._http_utils import (
     TargetValidationError,
@@ -754,6 +755,14 @@ async def scan(request: ScanRequest) -> ScanResponse:
         status = "partial"
     else:
         status = "completed"
+
+    nuclei_status = "skipped"
+    if NUCLEI_API_URL and XANO_WEBHOOK_URL:
+        nuclei_status = "pending"
+        asyncio.create_task(nuclei_background_scan(scan_id, domain_results))
+
+    for dr in domain_results:
+        dr.metadata["nuclei_status"] = nuclei_status
 
     return ScanResponse(
         scan_id=scan_id,

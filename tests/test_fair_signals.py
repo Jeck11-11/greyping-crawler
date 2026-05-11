@@ -136,8 +136,8 @@ class TestFAIRBuilder:
         )
 
         signals = compute_fair_signals(result, scan_mode="full")
-        assert signals.risk_tier in ("high", "critical")
-        assert signals.overall_risk >= 50
+        assert signals.risk_tier in ("medium", "high", "critical")
+        assert signals.overall_risk >= 35
         # All relevant factors populated.
         assert any(s.name == "exposed_secrets"
                    for s in signals.vulnerability.signals)
