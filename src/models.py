@@ -944,6 +944,54 @@ class NucleiResult(BaseModel):
     error: str = ""
 
 
+# ---------------------------------------------------------------------------
+# ProjectDiscovery tool intermediate models
+# ---------------------------------------------------------------------------
+
+class HttpxProbeResult(BaseModel):
+    """Raw result from a ProjectDiscovery httpx probe."""
+    url: str = ""
+    status_code: int | None = None
+    title: str = ""
+    content_type: str = ""
+    content_length: int = 0
+    technologies: list[str] = Field(default_factory=list)
+    webserver: str = ""
+    response_time: str = ""
+    host: str = ""
+    scheme: str = ""
+    final_url: str = ""
+    body: str = ""
+
+
+class KatanaEndpoint(BaseModel):
+    """A single endpoint discovered by katana."""
+    url: str
+    method: str = "GET"
+    source: str = ""
+    tag: str = ""
+    body: str = ""
+
+
+class KatanaCrawlResult(BaseModel):
+    target: str
+    endpoints: list[KatanaEndpoint] = Field(default_factory=list)
+    error: str | None = None
+
+
+class NaabuPort(BaseModel):
+    host: str = ""
+    ip: str = ""
+    port: int = 0
+    protocol: str = "tcp"
+
+
+class NaabuScanResult(BaseModel):
+    target: str
+    ports: list[NaabuPort] = Field(default_factory=list)
+    error: str | None = None
+
+
 class CVEFinding(BaseModel):
     cve_id: str
     description: str = ""

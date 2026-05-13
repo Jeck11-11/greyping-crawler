@@ -9,7 +9,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from bs4 import BeautifulSoup
 
-from .config import CRAWL_TIMEOUT, MAX_PAGES, MAX_RESPONSE_BYTES, PLAYWRIGHT_EXTRA_WAIT_MS, UA_BROWSER, UA_HONEST
+from .config import CRAWL_TIMEOUT, MAX_PAGES, MAX_RESPONSE_BYTES, PD_TOOLS_API_URL, PLAYWRIGHT_EXTRA_WAIT_MS, UA_BROWSER, UA_HONEST
 from .extractors import extract_contacts, extract_links, extract_page_metadata
 from .ioc_scanner import scan_ioc
 from .models import ContactInfo, LinkInfo, PageResult
@@ -187,6 +187,41 @@ async def fetch_rendered_cookies(
         return []
 
 
+def _katana_to_page_results(katana_result) -> list[PageResult]:
+    """Convert katana crawl output to PageResult list using existing extractors."""
+    results: list[PageResult] = []
+    seen: set[str] = set()
+    for endpoint in katana_result.endpoints:
+        if not endpoint.url or endpoint.url in seen:
+            continue
+        seen.add(endpoint.url)
+        if not endpoint.body:
+            results.append(PageResult(url=endpoint.url, notes="katana: no body"))
+            continue
+        try:
+            soup = BeautifulSoup(endpoint.body, "html.parser")
+            title, meta_desc, snippet = extract_page_metadata(soup)
+            contacts = extract_contacts(soup, endpoint.body)
+            links = extract_links(soup, endpoint.url)
+            secrets = scan_secrets(endpoint.body)
+            iocs = scan_ioc(endpoint.body, endpoint.url)
+            results.append(PageResult(
+                url=endpoint.url,
+                title=title,
+                meta_description=meta_desc,
+                content_snippet=snippet,
+                contacts=contacts,
+                links=links,
+                secrets=secrets,
+                ioc_findings=iocs,
+                notes="katana",
+            ))
+        except Exception as exc:
+            logger.debug("Extraction failed for katana endpoint %s: %s", endpoint.url, exc)
+            results.append(PageResult(url=endpoint.url, error=str(exc)))
+    return results
+
+
 async def crawl_domain(
     target: str,
     *,
@@ -197,8 +232,44 @@ async def crawl_domain(
 ) -> list[PageResult]:
     """Crawl *target* up to *max_depth* levels of internal links.
 
-    Returns a list of :class:`PageResult` – one per crawled page.
+    Uses katana via the PD tools sidecar when available, otherwise falls
+    back to the built-in Python BFS crawler.
     """
+    if PD_TOOLS_API_URL:
+        try:
+            from .katana_client import run_katana_crawl
+            katana_result = await run_katana_crawl(
+                target, max_depth=max_depth, timeout=timeout,
+            )
+            if katana_result and not katana_result.error and katana_result.endpoints:
+                pages = _katana_to_page_results(katana_result)
+                if pages:
+                    return pages[:MAX_PAGES]
+            logger.info(
+                "Katana returned no results for %s, falling back to Python",
+                target,
+            )
+        except Exception as exc:
+            logger.warning("Katana crawl failed for %s, falling back to Python: %s", target, exc)
+
+    return await _crawl_domain_python(
+        target,
+        render_js=render_js,
+        follow_redirects=follow_redirects,
+        max_depth=max_depth,
+        timeout=timeout,
+    )
+
+
+async def _crawl_domain_python(
+    target: str,
+    *,
+    render_js: bool = True,
+    follow_redirects: bool = True,
+    max_depth: int = 2,
+    timeout: int = CRAWL_TIMEOUT,
+) -> list[PageResult]:
+    """Built-in Python BFS crawler."""
     parsed_target = urlparse(target)
     base_domain = (parsed_target.hostname or "").lower().lstrip("www.")
 
@@ -206,7 +277,6 @@ async def crawl_domain(
     results: list[PageResult] = []
     queue: list[tuple[str, int]] = [(target, 0)]
 
-    # Cap total pages to prevent runaway scans
     max_pages = MAX_PAGES
 
     while queue and len(results) < max_pages:
@@ -226,7 +296,6 @@ async def crawl_domain(
         )
         results.append(page)
 
-        # Enqueue internal links for deeper crawling
         if depth < max_depth:
             for link in page.links:
                 if link.link_type == "internal" and link.url not in visited:

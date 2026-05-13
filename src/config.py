@@ -52,6 +52,14 @@ SCREENSHOT_HEIGHT = int(os.getenv("SCREENSHOT_HEIGHT", "720"))
 XANO_WEBHOOK_URL = os.getenv("XANO_WEBHOOK_URL", "")
 NUCLEI_WEBHOOK_TIMEOUT = int(os.getenv("NUCLEI_WEBHOOK_TIMEOUT", "30"))
 
+# ProjectDiscovery tools sidecar
+PD_TOOLS_API_URL = os.getenv("PD_TOOLS_API_URL", "")
+HTTPX_TIMEOUT = int(os.getenv("HTTPX_TIMEOUT", "60"))
+KATANA_TIMEOUT = int(os.getenv("KATANA_TIMEOUT", "120"))
+NAABU_TIMEOUT = int(os.getenv("NAABU_TIMEOUT", "120"))
+NAABU_RATE = int(os.getenv("NAABU_RATE", "1000"))
+NAABU_PORT_RANGE = os.getenv("NAABU_PORT_RANGE", "1-10000")
+
 # User-Agent strings
 UA_HONEST = os.getenv("UA_HONEST", "GreypingCrawler/1.0")
 UA_BROWSER = os.getenv(

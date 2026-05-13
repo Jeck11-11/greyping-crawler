@@ -103,6 +103,20 @@ def _parse_stats(text: str) -> dict:
     return last_stats
 
 
+def _parse_jsonl(text: str) -> list[dict]:
+    """Parse generic JSONL output into a list of dicts."""
+    results = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or not line.startswith("{"):
+            continue
+        try:
+            results.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return results
+
+
 class NucleiAPIHandler(BaseHTTPRequestHandler):
     def _send_json(self, status: HTTPStatus, payload: dict) -> None:
         body = json.dumps(payload).encode("utf-8")
@@ -115,54 +129,56 @@ class NucleiAPIHandler(BaseHTTPRequestHandler):
     def _bad_request(self, message: str) -> None:
         self._send_json(HTTPStatus.BAD_REQUEST, {"error": message})
 
-    def do_GET(self) -> None:
-        if self.path.rstrip("/") == "/health":
-            self._send_json(HTTPStatus.OK, {"status": "ok"})
-        else:
-            self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+    def _parse_request(self) -> Optional[dict]:
+        """Parse and validate common JSON request fields.
 
-    def do_POST(self) -> None:
-        if self.path.rstrip("/") != "/scan":
-            self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
-            return
-
+        Returns a dict with keys: targets, extra_args, timeout, payload.
+        Returns None if the request was invalid (error response already sent).
+        """
         content_length = int(self.headers.get("Content-Length", "0"))
         if content_length <= 0:
             self._bad_request("Request body required")
-            return
+            return None
 
         try:
             payload = json.loads(self.rfile.read(content_length))
         except json.JSONDecodeError:
             self._bad_request("Invalid JSON payload")
-            return
+            return None
 
         targets = payload.get("targets")
         if isinstance(targets, str):
             targets = [targets]
         if not targets or not isinstance(targets, list):
             self._bad_request("Field 'targets' must be a non-empty list or string")
-            return
+            return None
 
         normalized = [str(target).strip() for target in targets if str(target).strip()]
         if not normalized:
             self._bad_request("Targets must not be empty")
-            return
+            return None
 
         extra_args = payload.get("additional_args")
         if extra_args is not None and not isinstance(extra_args, str):
             self._bad_request("Field 'additional_args' must be a string when provided")
-            return
+            return None
 
-        passive = payload.get("passive", False)
         timeout_seconds = int(payload.get("timeout", 600))
 
-        _ensure_dirs()
-        targets_file = _write_targets_file(normalized)
-        command, output_file = _build_command(targets_file, extra_args, passive=passive)
+        return {
+            "targets": normalized,
+            "extra_args": extra_args,
+            "timeout": timeout_seconds,
+            "payload": payload,
+        }
 
-        print(f"[scan] targets={normalized} passive={passive} timeout={timeout_seconds}s", flush=True)
-        print(f"[scan] command={' '.join(command)}", flush=True)
+    def _run_tool(self, tool_name: str, command: list[str], timeout: int) -> Optional[subprocess.CompletedProcess]:
+        """Run a subprocess and handle timeout / execution errors.
+
+        Returns the CompletedProcess on success, or None if an error response
+        was already sent.
+        """
+        print(f"[{tool_name}] command={' '.join(command)}", flush=True)
 
         try:
             completed = subprocess.run(
@@ -170,27 +186,79 @@ class NucleiAPIHandler(BaseHTTPRequestHandler):
                 capture_output=True,
                 text=True,
                 check=False,
-                timeout=timeout_seconds,
+                timeout=timeout,
             )
         except subprocess.TimeoutExpired as exc:
-            print(f"[scan] timeout after {timeout_seconds}s", flush=True)
+            print(f"[{tool_name}] timeout after {timeout}s", flush=True)
             self._send_json(
                 HTTPStatus.GATEWAY_TIMEOUT,
                 {
-                    "error": f"Nuclei scan timed out after {timeout_seconds}s",
+                    "error": f"{tool_name} timed out after {timeout}s",
                     "command": command,
-                    "output_file": str(output_file),
                     "partial_stdout": (exc.stdout or b"").decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or ""),
                     "partial_stderr": (exc.stderr or b"").decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or ""),
                 },
             )
-            return
+            return None
         except Exception as exc:  # noqa: BLE001
-            print(f"[scan] failed to execute: {exc}", flush=True)
+            print(f"[{tool_name}] failed to execute: {exc}", flush=True)
             self._send_json(
                 HTTPStatus.INTERNAL_SERVER_ERROR,
-                {"error": "Failed to execute nuclei", "detail": str(exc)},
+                {"error": f"Failed to execute {tool_name}", "detail": str(exc)},
             )
+            return None
+
+        return completed
+
+    # ------------------------------------------------------------------
+    # GET
+    # ------------------------------------------------------------------
+
+    def do_GET(self) -> None:
+        if self.path.rstrip("/") == "/health":
+            self._send_json(HTTPStatus.OK, {"status": "ok"})
+        else:
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+
+    # ------------------------------------------------------------------
+    # POST dispatcher
+    # ------------------------------------------------------------------
+
+    def do_POST(self) -> None:
+        path = self.path.rstrip("/")
+        if path == "/scan":
+            self._handle_nuclei_scan()
+        elif path == "/probe":
+            self._handle_probe()
+        elif path == "/crawl":
+            self._handle_crawl()
+        elif path == "/portscan":
+            self._handle_portscan()
+        else:
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+
+    # ------------------------------------------------------------------
+    # /scan — nuclei (existing behaviour)
+    # ------------------------------------------------------------------
+
+    def _handle_nuclei_scan(self) -> None:
+        parsed = self._parse_request()
+        if parsed is None:
+            return
+
+        targets = parsed["targets"]
+        extra_args = parsed["extra_args"]
+        timeout_seconds = parsed["timeout"]
+        passive = parsed["payload"].get("passive", False)
+
+        _ensure_dirs()
+        targets_file = _write_targets_file(targets)
+        command, output_file = _build_command(targets_file, extra_args, passive=passive)
+
+        print(f"[scan] targets={targets} passive={passive} timeout={timeout_seconds}s", flush=True)
+
+        completed = self._run_tool("nuclei", command, timeout_seconds)
+        if completed is None:
             return
 
         findings = _parse_findings(completed.stdout or "")
@@ -201,7 +269,7 @@ class NucleiAPIHandler(BaseHTTPRequestHandler):
         self._send_json(
             HTTPStatus.OK,
             {
-                "target": normalized[0] if len(normalized) == 1 else normalized,
+                "target": targets[0] if len(targets) == 1 else targets,
                 "findings": findings,
                 "stats": {
                     "templates": int(stats.get("templates", 0)),
@@ -217,11 +285,187 @@ class NucleiAPIHandler(BaseHTTPRequestHandler):
             },
         )
 
+    # ------------------------------------------------------------------
+    # /probe — httpx
+    # ------------------------------------------------------------------
+
+    def _handle_probe(self) -> None:
+        parsed = self._parse_request()
+        if parsed is None:
+            return
+
+        targets = parsed["targets"]
+        extra_args = parsed["extra_args"]
+        timeout_seconds = parsed["timeout"]
+        payload = parsed["payload"]
+
+        _ensure_dirs()
+        targets_file = _write_targets_file(targets)
+
+        per_host_timeout = str(payload.get("per_host_timeout", 10))
+
+        command = [
+            "httpx",
+            "-l", str(targets_file),
+            "-json",
+            "-silent",
+            "-status-code",
+            "-title",
+            "-tech-detect",
+            "-content-type",
+            "-follow-redirects",
+            "-timeout", per_host_timeout,
+        ]
+        if extra_args:
+            command.extend(shlex.split(extra_args))
+
+        print(f"[probe] targets={targets} timeout={timeout_seconds}s", flush=True)
+
+        completed = self._run_tool("httpx", command, timeout_seconds)
+        if completed is None:
+            return
+
+        results = _parse_jsonl(completed.stdout or "")
+
+        print(f"[probe] completed exit_code={completed.returncode} results={len(results)}", flush=True)
+
+        self._send_json(
+            HTTPStatus.OK,
+            {
+                "results": results,
+                "count": len(results),
+                "exit_code": completed.returncode,
+            },
+        )
+
+    # ------------------------------------------------------------------
+    # /crawl — katana
+    # ------------------------------------------------------------------
+
+    def _handle_crawl(self) -> None:
+        parsed = self._parse_request()
+        if parsed is None:
+            return
+
+        targets = parsed["targets"]
+        extra_args = parsed["extra_args"]
+        timeout_seconds = parsed["timeout"]
+        payload = parsed["payload"]
+
+        _ensure_dirs()
+        targets_file = _write_targets_file(targets)
+
+        depth = str(payload.get("depth", 3))
+
+        command = [
+            "katana",
+            "-list", str(targets_file),
+            "-json",
+            "-silent",
+            "-depth", depth,
+            "-js-crawl",
+            "-known-files", "all",
+        ]
+        if extra_args:
+            command.extend(shlex.split(extra_args))
+
+        print(f"[crawl] targets={targets} depth={depth} timeout={timeout_seconds}s", flush=True)
+
+        completed = self._run_tool("katana", command, timeout_seconds)
+        if completed is None:
+            return
+
+        raw_results = _parse_jsonl(completed.stdout or "")
+
+        endpoints = []
+        for obj in raw_results:
+            req = obj.get("request", {})
+            resp = obj.get("response", {})
+            endpoints.append({
+                "url": req.get("endpoint", obj.get("url", "")),
+                "method": req.get("method", "GET"),
+                "source": obj.get("source", ""),
+                "tag": req.get("tag", obj.get("tag", "")),
+                "status_code": resp.get("status_code"),
+            })
+
+        print(f"[crawl] completed exit_code={completed.returncode} endpoints={len(endpoints)}", flush=True)
+
+        self._send_json(
+            HTTPStatus.OK,
+            {
+                "target": targets[0] if len(targets) == 1 else targets,
+                "endpoints": endpoints,
+                "count": len(endpoints),
+                "exit_code": completed.returncode,
+            },
+        )
+
+    # ------------------------------------------------------------------
+    # /portscan — naabu
+    # ------------------------------------------------------------------
+
+    def _handle_portscan(self) -> None:
+        parsed = self._parse_request()
+        if parsed is None:
+            return
+
+        targets = parsed["targets"]
+        extra_args = parsed["extra_args"]
+        timeout_seconds = parsed["timeout"]
+        payload = parsed["payload"]
+
+        _ensure_dirs()
+        targets_file = _write_targets_file(targets)
+
+        port_range = str(payload.get("ports", "80,443,8080,8443"))
+        rate = str(payload.get("rate", 1000))
+
+        command = [
+            "naabu",
+            "-list", str(targets_file),
+            "-json",
+            "-silent",
+            "-port", port_range,
+            "-rate", rate,
+        ]
+        if extra_args:
+            command.extend(shlex.split(extra_args))
+
+        print(f"[portscan] targets={targets} ports={port_range} rate={rate} timeout={timeout_seconds}s", flush=True)
+
+        completed = self._run_tool("naabu", command, timeout_seconds)
+        if completed is None:
+            return
+
+        raw_results = _parse_jsonl(completed.stdout or "")
+
+        ports = []
+        for obj in raw_results:
+            ports.append({
+                "host": obj.get("host", ""),
+                "ip": obj.get("ip", ""),
+                "port": obj.get("port"),
+                "protocol": obj.get("protocol", "tcp"),
+            })
+
+        print(f"[portscan] completed exit_code={completed.returncode} ports={len(ports)}", flush=True)
+
+        self._send_json(
+            HTTPStatus.OK,
+            {
+                "target": targets[0] if len(targets) == 1 else targets,
+                "ports": ports,
+                "count": len(ports),
+                "exit_code": completed.returncode,
+            },
+        )
+
 
 def main() -> None:
     _ensure_dirs()
     server = ThreadingHTTPServer((HOST, PORT), NucleiAPIHandler)
-    print(f"Nuclei API listening on http://{HOST}:{PORT}")
+    print(f"PD Tools API listening on http://{HOST}:{PORT}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

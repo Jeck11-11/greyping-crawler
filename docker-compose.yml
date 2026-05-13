@@ -19,10 +19,10 @@ services:
       - ./config/nuclei-config.yaml:/etc/nuclei/config.yaml:ro
     command: ["scan"]
 
-  nuclei-api:
+  pd-tools-api:
     build: .
     image: greyping/nuclei-passive:latest
-    container_name: nuclei-passive-api
+    container_name: pd-tools-api
     restart: unless-stopped
     environment:
       - NUCLEI_ADDITIONAL_ARGS=-stats
@@ -50,6 +50,8 @@ services:
     environment:
       - OSINT_API_HOST=0.0.0.0
       - OSINT_API_PORT=8089
+      - NUCLEI_API_URL=http://pd-tools-api:8080
+      - PD_TOOLS_API_URL=http://pd-tools-api:8080
     ports:
       - "8089:8089"
     volumes:

@@ -17,7 +17,7 @@ from pydantic import Field
 
 import httpx
 
-from .config import NUCLEI_API_URL, SCAN_CONCURRENCY, XANO_WEBHOOK_URL
+from .config import NUCLEI_API_URL, PD_TOOLS_API_URL, SCAN_CONCURRENCY, XANO_WEBHOOK_URL
 from .nuclei_webhook import nuclei_background_scan
 
 from ._http_utils import (
@@ -275,6 +275,25 @@ async def _scan_single_target(
         )
     except Exception as exc:
         logger.warning("Tech fingerprint failed for %s: %s", target, exc)
+
+    # Supplement tech detection with PD httpx probe when available.
+    if PD_TOOLS_API_URL:
+        try:
+            from .httpx_client import run_httpx_probe
+            from .models import TechFinding
+            httpx_probes = await run_httpx_probe([target], timeout=request.timeout)
+            if httpx_probes:
+                existing_names = {t.name.lower() for t in tech_findings}
+                for tech_name in httpx_probes[0].technologies:
+                    if tech_name.lower() not in existing_names:
+                        tech_findings.append(TechFinding(
+                            name=tech_name,
+                            categories=[],
+                            confidence="medium",
+                            evidence=["httpx-probe"],
+                        ))
+        except Exception as exc:
+            logger.debug("httpx tech supplement failed for %s: %s", target, exc)
 
     # Privacy compliance analysis (uses paths + tech + landing HTML)
     privacy_result: PrivacyComplianceResult | None = None
