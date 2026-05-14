@@ -418,7 +418,7 @@ class NucleiAPIHandler(BaseHTTPRequestHandler):
         _ensure_dirs()
         targets_file = _write_targets_file(targets)
 
-        port_range = str(payload.get("ports", "80,443,8080,8443"))
+        port_range = str(payload.get("ports", "top-250"))
         rate = str(payload.get("rate", 1000))
 
         command = [
@@ -426,9 +426,13 @@ class NucleiAPIHandler(BaseHTTPRequestHandler):
             "-list", str(targets_file),
             "-json",
             "-silent",
-            "-port", port_range,
             "-rate", rate,
+            "-scan-type", "connect",
         ]
+        if port_range.startswith("top-"):
+            command.extend(["-top-ports", port_range.removeprefix("top-")])
+        else:
+            command.extend(["-port", port_range])
         if extra_args:
             command.extend(shlex.split(extra_args))
 
