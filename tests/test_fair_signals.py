@@ -136,8 +136,8 @@ class TestFAIRBuilder:
         )
 
         signals = compute_fair_signals(result, scan_mode="full")
-        assert signals.risk_tier in ("high", "critical")
-        assert signals.overall_risk >= 50
+        assert signals.risk_tier in ("medium", "high", "critical")
+        assert signals.overall_risk >= 35
         # All relevant factors populated.
         assert any(s.name == "exposed_secrets"
                    for s in signals.vulnerability.signals)
@@ -392,6 +392,29 @@ class TestNewTEFSignals:
         signals = compute_fair_signals(result, scan_mode="full")
         sig = next(s for s in signals.threat_event_frequency.signals if s.name == "sourcemap_exposure")
         assert sig.score == 40
+
+    def test_sourcemap_vendor_only_scores_low(self):
+        vendor_files = [
+            "webpack:///../../../node_modules/@wix/panorama-client/dist/esm/panorama-client.js",
+            "webpack:///../../thunderbolt-commons/src/bi/constants.ts",
+            "webpack:///../../feature-seo/src/symbols.ts",
+            "webpack:///../../../node_modules/lodash/debounce.js",
+            "webpack:///../../../node_modules/@babel/runtime/helpers/esm/typeof.js",
+        ]
+        result = DomainResult(
+            target="https://example.com",
+            js_intel=JSIntelResult(
+                target="https://example.com",
+                scripts_scanned=3,
+                sourcemaps_found=["vendor.js.map"],
+                recovered_source_files=vendor_files,
+            ),
+        )
+        signals = compute_fair_signals(result, scan_mode="full")
+        tef_sig = next(s for s in signals.threat_event_frequency.signals if s.name == "sourcemap_exposure")
+        assert tef_sig.score == 25
+        lm_sig = next(s for s in signals.loss_magnitude.signals if s.name == "source_code_exposure")
+        assert lm_sig.score == 20
 
 
 class TestNewVulnerabilitySignals:

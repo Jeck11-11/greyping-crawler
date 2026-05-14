@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch, MagicMock
 import pytest
 
 from src.c99_client import (
+    detect_waf,
     find_subdomains,
     check_ip_reputation,
     check_url_reputation,
@@ -229,6 +230,83 @@ class TestValidateEmail:
 
             result = await validate_email("temp@yopmail.com")
             assert result["disposable"] is True
+
+
+# ---------------------------------------------------------------------------
+# detect_waf
+# ---------------------------------------------------------------------------
+
+class TestDetectWAF:
+    @pytest.mark.asyncio
+    async def test_waf_detected_string_result(self, mock_c99_key):
+        api_response = {"success": True, "result": "Cloudflare"}
+        with patch("src.c99_client.httpx.AsyncClient") as MockClient:
+            mock_client = AsyncMock()
+            mock_client.get.return_value = _mock_response(api_response)
+            MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            result = await detect_waf("https://example.com")
+            assert result["detected"] is True
+            assert result["firewall"] == "Cloudflare"
+
+    @pytest.mark.asyncio
+    async def test_waf_detected_dict_result(self, mock_c99_key):
+        api_response = {"success": True, "result": {"firewall": "Sucuri", "confidence": "high"}}
+        with patch("src.c99_client.httpx.AsyncClient") as MockClient:
+            mock_client = AsyncMock()
+            mock_client.get.return_value = _mock_response(api_response)
+            MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            result = await detect_waf("https://example.com")
+            assert result["detected"] is True
+            assert result["firewall"] == "Sucuri"
+
+    @pytest.mark.asyncio
+    async def test_no_waf_detected(self, mock_c99_key):
+        api_response = {"success": True, "result": "Not Detected"}
+        with patch("src.c99_client.httpx.AsyncClient") as MockClient:
+            mock_client = AsyncMock()
+            mock_client.get.return_value = _mock_response(api_response)
+            MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            result = await detect_waf("https://example.com")
+            assert result["detected"] is False
+            assert result["firewall"] is None
+
+    @pytest.mark.asyncio
+    async def test_no_waf_none_string(self, mock_c99_key):
+        api_response = {"success": True, "result": "None"}
+        with patch("src.c99_client.httpx.AsyncClient") as MockClient:
+            mock_client = AsyncMock()
+            mock_client.get.return_value = _mock_response(api_response)
+            MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            result = await detect_waf("https://example.com")
+            assert result["detected"] is False
+
+    @pytest.mark.asyncio
+    async def test_api_failure(self, mock_c99_key):
+        api_response = {"success": False}
+        with patch("src.c99_client.httpx.AsyncClient") as MockClient:
+            mock_client = AsyncMock()
+            mock_client.get.return_value = _mock_response(api_response)
+            MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            result = await detect_waf("https://example.com")
+            assert result["detected"] is False
+            assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_no_api_key(self):
+        with patch("src.c99_client.C99_API_KEY", ""):
+            result = await detect_waf("https://example.com")
+            assert result["detected"] is False
+            assert "error" in result
 
 
 # ---------------------------------------------------------------------------

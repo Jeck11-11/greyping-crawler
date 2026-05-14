@@ -18,7 +18,8 @@ _COOKIE_POLICY_PATHS = frozenset({
     "/cookie-policy", "/cookies",
 })
 _TERMS_PATHS = frozenset({
-    "/terms", "/terms-of-service",
+    "/terms", "/terms-of-service", "/terms-of-use", "/terms-and-conditions",
+    "/tos",
 })
 _GDPR_PATHS = frozenset({"/gdpr", "/data-request"})
 _CCPA_PATHS = frozenset({"/ccpa"})

@@ -71,6 +71,9 @@ _SENSITIVE_PATHS: list[tuple[str, str, str]] = [
     ("/cookie-policy", "Cookie consent policy page.", "info"),
     ("/terms", "Terms of service page.", "info"),
     ("/terms-of-service", "Terms of service page.", "info"),
+    ("/terms-of-use", "Terms of use page.", "info"),
+    ("/terms-and-conditions", "Terms and conditions page.", "info"),
+    ("/tos", "Terms of service page.", "info"),
     ("/gdpr", "GDPR compliance page.", "info"),
     ("/ccpa", "CCPA compliance page.", "info"),
     ("/data-request", "Data subject request form (GDPR/CCPA).", "info"),
@@ -82,7 +85,7 @@ _SENSITIVE_PATHS: list[tuple[str, str, str]] = [
 _INFO_PATHS = {
     "/robots.txt", "/sitemap.xml", "/.well-known/security.txt",
     "/privacy", "/privacy-policy", "/cookie-policy",
-    "/terms", "/terms-of-service",
+    "/terms", "/terms-of-service", "/terms-of-use", "/terms-and-conditions", "/tos",
     "/gdpr", "/ccpa", "/data-request",
     "/.well-known/dnt-policy.txt",
 }

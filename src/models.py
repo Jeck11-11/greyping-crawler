@@ -944,6 +944,54 @@ class NucleiResult(BaseModel):
     error: str = ""
 
 
+# ---------------------------------------------------------------------------
+# ProjectDiscovery tool intermediate models
+# ---------------------------------------------------------------------------
+
+class HttpxProbeResult(BaseModel):
+    """Raw result from a ProjectDiscovery httpx probe."""
+    url: str = ""
+    status_code: int | None = None
+    title: str = ""
+    content_type: str = ""
+    content_length: int = 0
+    technologies: list[str] = Field(default_factory=list)
+    webserver: str = ""
+    response_time: str = ""
+    host: str = ""
+    scheme: str = ""
+    final_url: str = ""
+    body: str = ""
+
+
+class KatanaEndpoint(BaseModel):
+    """A single endpoint discovered by katana."""
+    url: str
+    method: str = "GET"
+    source: str = ""
+    tag: str = ""
+    body: str = ""
+
+
+class KatanaCrawlResult(BaseModel):
+    target: str
+    endpoints: list[KatanaEndpoint] = Field(default_factory=list)
+    error: str | None = None
+
+
+class NaabuPort(BaseModel):
+    host: str = ""
+    ip: str = ""
+    port: int = 0
+    protocol: str = "tcp"
+
+
+class NaabuScanResult(BaseModel):
+    target: str
+    ports: list[NaabuPort] = Field(default_factory=list)
+    error: str | None = None
+
+
 class CVEFinding(BaseModel):
     cve_id: str
     description: str = ""
@@ -1073,6 +1121,15 @@ class EmailValidationResult(BaseModel):
     error: str | None = None
 
 
+class WAFResult(BaseModel):
+    """WAF / firewall detection result from C99 API."""
+    url: str = ""
+    detected: bool = False
+    firewall: str | None = None
+    confidence: str = "high"
+    error: str | None = None
+
+
 class OpenPort(BaseModel):
     port: int
     service: str = ""
@@ -1189,6 +1246,7 @@ class DomainSummary(BaseModel):
     cloud_buckets_found: int = 0
     screenshots_taken: int = 0
     typosquat_candidates: int = Field(default=0, description="Registered lookalike domains found.")
+    waf_detected: str = Field(default="", description="WAF/firewall product detected by C99 (empty if none).")
     privacy_score: int = Field(default=0, description="Privacy compliance score (0-100).")
     consent_tool: str = Field(default="", description="Detected cookie consent management tool.")
 
@@ -1311,6 +1369,7 @@ class DomainResult(BaseModel):
     passive_intel: PassiveIntelSlim | None = None
     vulnerabilities: VulnerabilitiesGroup | None = None
     reputation: ReputationGroup | None = None
+    waf: WAFResult | None = None
     typosquatting: TyposquattingResult | None = None
     privacy: PrivacyComplianceResult | None = None
     email_validations: list[EmailValidationResult] = Field(default_factory=list)

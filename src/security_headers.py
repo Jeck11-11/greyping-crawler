@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from .models import HeaderFinding, SecurityHeadersResult
 
 
@@ -60,6 +62,45 @@ _LEAK_HEADERS: list[tuple[str, str]] = [
     ("X-Powered-By", "Remove the X-Powered-By header to avoid disclosing framework details."),
 ]
 
+_HSTS_MIN_MAX_AGE = 31536000  # 1 year in seconds
+
+_CSP_UNSAFE_DIRECTIVES = re.compile(
+    r"'unsafe-inline'|'unsafe-eval'", re.IGNORECASE,
+)
+
+_CSP_WILDCARD_SRC = re.compile(
+    r"(?:default-src|script-src|style-src|img-src|connect-src|object-src)\s+[^;]*(?<!')\*(?!')",
+    re.IGNORECASE,
+)
+
+
+def _check_hsts(value: str) -> tuple[str, str]:
+    """Return (status, recommendation) for an HSTS header value."""
+    if "max-age=0" in value:
+        return "weak", "HSTS max-age is 0, which effectively disables HSTS."
+    match = re.search(r"max-age=(\d+)", value, re.IGNORECASE)
+    if match:
+        age = int(match.group(1))
+        if age < _HSTS_MIN_MAX_AGE:
+            return "weak", (
+                f"HSTS max-age is {age}s ({age // 86400}d) — "
+                f"recommended minimum is {_HSTS_MIN_MAX_AGE}s (1 year). "
+                "Add includeSubDomains for full coverage."
+            )
+    return "present", ""
+
+
+def _check_csp(value: str) -> tuple[str, str]:
+    """Return (status, recommendation) for a CSP header value."""
+    issues: list[str] = []
+    if _CSP_UNSAFE_DIRECTIVES.search(value):
+        issues.append("'unsafe-inline' or 'unsafe-eval' weakens XSS protection")
+    if _CSP_WILDCARD_SRC.search(value):
+        issues.append("wildcard (*) source allows loading from any origin")
+    if issues:
+        return "weak", f"CSP is present but weak: {'; '.join(issues)}. Tighten directive sources."
+    return "present", ""
+
 
 def _score_to_grade(score: int) -> str:
     if score >= 90:
@@ -89,15 +130,17 @@ def analyze_headers(headers: dict[str, str]) -> SecurityHeadersResult:
     for header, severity, recommendation in _REQUIRED_HEADERS:
         value = lower.get(header.lower(), "")
         if value:
-            # Check for weak values
             status = "present"
-            if header == "Strict-Transport-Security" and "max-age=0" in value:
-                status = "weak"
-                recommendation = "HSTS max-age is 0, which effectively disables HSTS."
-                score -= severity_penalty.get(severity, 5)
+            rec = ""
+            if header == "Strict-Transport-Security":
+                status, rec = _check_hsts(value)
+            elif header == "Content-Security-Policy":
+                status, rec = _check_csp(value)
             elif header == "X-Frame-Options" and value.upper() == "ALLOWALL":
                 status = "weak"
-                recommendation = "X-Frame-Options: ALLOWALL does not prevent click-jacking."
+                rec = "X-Frame-Options: ALLOWALL does not prevent click-jacking."
+            if status == "weak":
+                recommendation = rec
                 score -= severity_penalty.get(severity, 5)
         else:
             status = "missing"
@@ -156,6 +199,20 @@ def analyze_headers(headers: dict[str, str]) -> SecurityHeadersResult:
             )
         )
         score -= 10
+
+    # Cache-Control on sensitive pages
+    cache_control = lower.get("cache-control", "")
+    if not cache_control or ("no-store" not in cache_control.lower() and "private" not in cache_control.lower()):
+        findings.append(
+            HeaderFinding(
+                header="Cache-Control",
+                status="missing" if not cache_control else "weak",
+                value=cache_control,
+                recommendation="Add 'Cache-Control: no-store' or 'private' to prevent caching of sensitive responses.",
+                severity="low",
+            )
+        )
+        score -= 3
 
     score = max(0, score)
 

@@ -319,30 +319,22 @@ def _check_typosquat_brand_impersonation(result: DomainResult) -> AttackPath | N
         candidates = result.typosquatting.registered_candidates
     if not candidates:
         return None
-    email_sec = result.dns.email_security if result.dns else None
-    dmarc_weak = email_sec and (not email_sec.dmarc.exists or email_sec.dmarc.policy in (None, "none"))
-    if not dmarc_weak:
-        return None
 
     return AttackPath(
-        title="Brand Impersonation via Typosquat Domain and Weak Email Auth",
-        severity="medium",
-        impact="phishing",
-        likelihood="possible",
-        remediation="Register defensive typosquat domains and enforce DMARC with policy=reject.",
+        title="Lookalike Domains Detected (Informational)",
+        severity="info",
+        impact="informational",
+        likelihood="informational",
+        remediation="Consider registering these domains defensively to prevent future misuse.",
         steps=[
             AttackStep(
                 finding_type="TyposquatCandidate",
-                description=f"Lookalike domain '{candidates[0].domain}' is registered and resolving",
+                description=f"{len(candidates)} lookalike domain(s) registered, e.g. '{candidates[0].domain}'",
                 fingerprint=candidates[0].fingerprint,
             ),
             AttackStep(
-                finding_type="EmailSecurityResult",
-                description="DMARC not enforced — domain can be spoofed in email headers",
-            ),
-            AttackStep(
-                finding_type="impact",
-                description="Attacker uses lookalike domain combined with email spoofing for targeted phishing",
+                finding_type="info",
+                description="These domains could potentially be used for brand impersonation but no active threat is confirmed",
             ),
         ],
     )

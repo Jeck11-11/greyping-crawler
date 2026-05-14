@@ -15,6 +15,7 @@ class TestAnalyzeHeaders:
             "Cross-Origin-Opener-Policy": "same-origin",
             "Cross-Origin-Resource-Policy": "same-origin",
             "X-Permitted-Cross-Domain-Policies": "none",
+            "Cache-Control": "no-store",
         }
         result = analyze_headers(headers)
         assert result.grade == "A"
@@ -70,3 +71,67 @@ class TestAnalyzeHeaders:
         cors = [f for f in result.findings if f.header == "Access-Control-Allow-Origin"]
         assert len(cors) == 1
         assert cors[0].severity == "medium"
+
+    def test_weak_hsts_low_max_age(self):
+        headers = {"Strict-Transport-Security": "max-age=3600"}
+        result = analyze_headers(headers)
+        hsts = [f for f in result.findings if f.header == "Strict-Transport-Security"]
+        assert len(hsts) == 1
+        assert hsts[0].status == "weak"
+        assert "3600" in hsts[0].recommendation
+
+    def test_weak_csp_unsafe_inline(self):
+        headers = {"Content-Security-Policy": "default-src 'self' 'unsafe-inline'"}
+        result = analyze_headers(headers)
+        csp = [f for f in result.findings if f.header == "Content-Security-Policy"]
+        assert len(csp) == 1
+        assert csp[0].status == "weak"
+        assert "unsafe-inline" in csp[0].recommendation
+
+    def test_weak_csp_unsafe_eval(self):
+        headers = {"Content-Security-Policy": "script-src 'self' 'unsafe-eval'"}
+        result = analyze_headers(headers)
+        csp = [f for f in result.findings if f.header == "Content-Security-Policy"]
+        assert len(csp) == 1
+        assert csp[0].status == "weak"
+
+    def test_weak_csp_wildcard(self):
+        headers = {"Content-Security-Policy": "default-src *"}
+        result = analyze_headers(headers)
+        csp = [f for f in result.findings if f.header == "Content-Security-Policy"]
+        assert len(csp) == 1
+        assert csp[0].status == "weak"
+        assert "wildcard" in csp[0].recommendation
+
+    def test_strong_csp_passes(self):
+        headers = {"Content-Security-Policy": "default-src 'self'; script-src 'self' https://cdn.example.com"}
+        result = analyze_headers(headers)
+        csp = [f for f in result.findings if f.header == "Content-Security-Policy"]
+        assert len(csp) == 1
+        assert csp[0].status == "present"
+
+    def test_cache_control_missing(self):
+        result = analyze_headers({})
+        cache = [f for f in result.findings if f.header == "Cache-Control"]
+        assert len(cache) == 1
+        assert cache[0].status == "missing"
+        assert cache[0].severity == "low"
+
+    def test_cache_control_weak(self):
+        headers = {"Cache-Control": "max-age=3600"}
+        result = analyze_headers(headers)
+        cache = [f for f in result.findings if f.header == "Cache-Control"]
+        assert len(cache) == 1
+        assert cache[0].status == "weak"
+
+    def test_cache_control_no_store_ok(self):
+        headers = {"Cache-Control": "no-store"}
+        result = analyze_headers(headers)
+        cache = [f for f in result.findings if f.header == "Cache-Control"]
+        assert len(cache) == 0
+
+    def test_cache_control_private_ok(self):
+        headers = {"Cache-Control": "private, no-cache"}
+        result = analyze_headers(headers)
+        cache = [f for f in result.findings if f.header == "Cache-Control"]
+        assert len(cache) == 0

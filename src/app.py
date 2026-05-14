@@ -17,7 +17,8 @@ from pydantic import Field
 
 import httpx
 
-from .config import SCAN_CONCURRENCY
+from .config import NUCLEI_API_URL, PD_TOOLS_API_URL, SCAN_CONCURRENCY, XANO_WEBHOOK_URL
+from .nuclei_webhook import nuclei_background_scan
 
 from ._http_utils import (
     TargetValidationError,
@@ -30,7 +31,7 @@ from ._link_utils import is_asset_url, is_social_url, normalise_ext_url, MAX_FOU
 from ._social_utils import detect_platform
 from .breach_checker import check_breaches
 from .cookie_checker import analyze_cookies
-from .crawler import crawl_domain
+from .crawler import crawl_domain, fetch_rendered_cookies
 from .cve_lookup import enrich_cves_with_epss_kev, lookup_cves
 from .attack_paths import analyze_attack_paths
 from .easm_report import build_easm_report
@@ -39,7 +40,7 @@ from .favicon import fetch_favicon
 from .cloud_assets import discover_cloud_assets
 from .port_scanner import scan_ports
 from .screenshot import take_screenshot
-from .c99_client import check_ip_reputation, check_url_reputation, find_subdomains, validate_email
+from .c99_client import check_ip_reputation, check_url_reputation, detect_waf, find_subdomains, validate_email
 from .postprocess import fill_not_found
 from .middleware import APIKeyMiddleware, RateLimitMiddleware
 from .js_miner import mine_javascript
@@ -86,6 +87,7 @@ from .models import (
     TyposquattingResult,
     URLReputationResult,
     VulnerabilitiesGroup,
+    WAFResult,
     WaybackResult,
 )
 from .passive_intel import (
@@ -186,19 +188,27 @@ async def _scan_single_target(
     port_scan_task = scan_ports(domain)
     cloud_assets_task = discover_cloud_assets(domain)
     c99_subs_task = find_subdomains(domain)
+    waf_task = detect_waf(target)
     robots_task = fetch_and_parse_robots_sitemap(target, timeout=request.timeout)
     typosquat_task = check_typosquatting(domain, timeout=request.timeout)
+    async def _no_cookies() -> list[dict]:
+        return []
+    rendered_cookies_task = fetch_rendered_cookies(target, timeout=request.timeout) if request.render_js else _no_cookies()
 
     (crawl_result, ssl_result, landing_result, paths_result,
      dns_result, ct_result, rdap_result, wayback_result,
      favicon_result,
      port_scan_result, cloud_assets_result, c99_subs_result,
-     robots_sitemap_result, typosquat_result) = await asyncio.gather(
+     waf_raw_result,
+     robots_sitemap_result, typosquat_result,
+     rendered_cookies_result) = await asyncio.gather(
         crawl_task, ssl_task, landing_task, paths_task,
         dns_task, ct_task, rdap_task, wayback_task,
         favicon_task,
         port_scan_task, cloud_assets_task, c99_subs_task,
+        waf_task,
         robots_task, typosquat_task,
+        rendered_cookies_task,
         return_exceptions=True,
     )
 
@@ -236,7 +246,8 @@ async def _scan_single_target(
         resp_headers, resp_cookies, landing_html = landing_result
 
     headers_result = analyze_headers(resp_headers)
-    cookie_findings = analyze_cookies(resp_cookies)
+    browser_cookies = rendered_cookies_result if isinstance(rendered_cookies_result, list) else []
+    cookie_findings = analyze_cookies(resp_cookies, browser_cookies=browser_cookies)
 
     # Enrich SSL result with HSTS and final URL
     hsts_val = resp_headers.get("strict-transport-security", "")
@@ -264,6 +275,25 @@ async def _scan_single_target(
         )
     except Exception as exc:
         logger.warning("Tech fingerprint failed for %s: %s", target, exc)
+
+    # Supplement tech detection with PD httpx probe when available.
+    if PD_TOOLS_API_URL:
+        try:
+            from .httpx_client import run_httpx_probe
+            from .models import TechFinding
+            httpx_probes = await run_httpx_probe([target], timeout=request.timeout)
+            if httpx_probes:
+                existing_names = {t.name.lower() for t in tech_findings}
+                for tech_name in httpx_probes[0].technologies:
+                    if tech_name.lower() not in existing_names:
+                        tech_findings.append(TechFinding(
+                            name=tech_name,
+                            categories=[],
+                            confidence="medium",
+                            evidence=["httpx-probe"],
+                        ))
+        except Exception as exc:
+            logger.debug("httpx tech supplement failed for %s: %s", target, exc)
 
     # Privacy compliance analysis (uses paths + tech + landing HTML)
     privacy_result: PrivacyComplianceResult | None = None
@@ -426,6 +456,25 @@ async def _scan_single_target(
             )
     except Exception as exc:
         logger.warning("C99 reputation checks failed for %s: %s", target, exc)
+
+    # C99 WAF detection
+    waf_result: WAFResult | None = None
+    if isinstance(waf_raw_result, dict):
+        waf_result = WAFResult(
+            url=target,
+            detected=waf_raw_result.get("detected", False),
+            firewall=waf_raw_result.get("firewall"),
+        )
+        if waf_result.detected and waf_result.firewall:
+            existing_names = {t.name.lower() for t in tech_findings}
+            if waf_result.firewall.lower() not in existing_names:
+                from .models import TechFinding
+                tech_findings.append(TechFinding(
+                    name=waf_result.firewall,
+                    categories=["waf"],
+                    confidence="high",
+                    evidence=["c99_firewalldetector"],
+                ))
 
     # Aggregate contacts, links, and secrets across all pages,
     # tracking which page URL each finding came from.
@@ -596,6 +645,7 @@ async def _scan_single_target(
         cloud_buckets_found=len(cloud_assets_result.findings) if cloud_assets_result else 0,
         screenshots_taken=len(screenshots),
         typosquat_candidates=len(typosquat_result.registered_candidates) if typosquat_result else 0,
+        waf_detected=waf_result.firewall if waf_result and waf_result.detected else "",
         privacy_score=privacy_result.score if privacy_result else 0,
         consent_tool=privacy_result.consent_tool if privacy_result else "",
     )
@@ -649,6 +699,7 @@ async def _scan_single_target(
             subdomain_takeover=takeover_result,
         ),
         reputation=ReputationGroup(ip=ip_rep_result, url=url_rep_result),
+        waf=waf_result,
         typosquatting=typosquat_result,
         privacy=privacy_result,
         email_validations=email_validations,
@@ -723,6 +774,14 @@ async def scan(request: ScanRequest) -> ScanResponse:
         status = "partial"
     else:
         status = "completed"
+
+    nuclei_status = "skipped"
+    if NUCLEI_API_URL and XANO_WEBHOOK_URL:
+        nuclei_status = "pending"
+        asyncio.create_task(nuclei_background_scan(scan_id, domain_results))
+
+    for dr in domain_results:
+        dr.metadata["nuclei_status"] = nuclei_status
 
     return ScanResponse(
         scan_id=scan_id,

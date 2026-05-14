@@ -54,14 +54,29 @@ def _digit_count(s: str) -> int:
     return sum(c.isdigit() for c in s)
 
 
+_YEAR_RANGE_RE = re.compile(
+    r"(?:19|20)\d{2}[\s\-/](?:19|20)\d{2}"  # e.g. "1977-2007"
+)
+_TRAILING_YEAR_RE = re.compile(
+    r"[\s\-](?:19|20)\d{2}$"  # ends with a 4-digit year
+)
+
+
 def _normalise_phone(raw: str) -> str | None:
     """Return a cleaned phone string or *None* if it looks like a false positive."""
     stripped = raw.strip()
     if "." in stripped:
         return None
+    if _YEAR_RANGE_RE.search(stripped):
+        return None
     digits = re.sub(r"\D", "", stripped)
     if len(digits) < _MIN_PHONE_DIGITS or len(digits) > 15:
         return None
+    if _TRAILING_YEAR_RE.search(stripped) and len(digits) <= 8:
+        return None
+    if digits.startswith(("19", "20")) and 1900 <= int(digits[:4]) <= 2099:
+        if len(digits) <= 10 and not stripped.startswith("+"):
+            return None
     return stripped
 
 
