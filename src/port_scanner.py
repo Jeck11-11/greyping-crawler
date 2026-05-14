@@ -12,7 +12,7 @@ import logging
 import socket
 import time
 
-from .config import NAABU_PORT_RANGE, NAABU_TIMEOUT, PD_TOOLS_API_URL, PORT_SCAN_CONCURRENCY, PORT_SCAN_TIMEOUT
+from .config import PORT_SCAN_CONCURRENCY, PORT_SCAN_TIMEOUT
 from .models import OpenPort, PortScanResult
 
 logger = logging.getLogger(__name__)
@@ -161,29 +161,6 @@ async def _probe_port(
         )
 
 
-def _naabu_to_port_scan_result(host: str, naabu_result, ports_scanned: int = 250) -> PortScanResult:
-    """Map a NaabuScanResult to the existing PortScanResult model."""
-    open_ports = []
-    ip = ""
-    for p in naabu_result.ports:
-        if p.ip:
-            ip = p.ip
-        service = _TOP_PORTS.get(p.port, "unknown")
-        open_ports.append(OpenPort(
-            port=p.port,
-            service=service,
-            banner="",
-            is_risky=p.port in _RISKY_PORTS,
-        ))
-    open_ports.sort(key=lambda p: p.port)
-    return PortScanResult(
-        target=host,
-        ip=ip,
-        open_ports=open_ports,
-        ports_scanned=ports_scanned,
-    )
-
-
 async def scan_ports(
     host: str,
     *,
@@ -191,39 +168,7 @@ async def scan_ports(
     timeout: int = PORT_SCAN_TIMEOUT,
     concurrency: int = PORT_SCAN_CONCURRENCY,
 ) -> PortScanResult:
-    """Scan *host* for open TCP ports.
-
-    Uses naabu via the PD tools sidecar when available, otherwise falls
-    back to the built-in Python TCP connect scanner.
-    """
-    if PD_TOOLS_API_URL and ports is None:
-        try:
-            from .naabu_client import run_naabu_scan
-            naabu_result = await run_naabu_scan(host, timeout=NAABU_TIMEOUT)
-            if naabu_result and not naabu_result.error:
-                if NAABU_PORT_RANGE.startswith("top-"):
-                    scanned = int(NAABU_PORT_RANGE.removeprefix("top-"))
-                else:
-                    scanned = sum(
-                        (int(b) - int(a) + 1) if "-" in part else 1
-                        for part in NAABU_PORT_RANGE.split(",")
-                        for a, _, b in [part.partition("-")] if a
-                    ) if NAABU_PORT_RANGE else 250
-                return _naabu_to_port_scan_result(host, naabu_result, ports_scanned=scanned)
-            logger.info("Naabu returned error for %s, falling back to Python: %s", host, naabu_result.error)
-        except Exception as exc:
-            logger.warning("Naabu scan failed for %s, falling back to Python: %s", host, exc)
-    return await _scan_ports_python(host, ports=ports, timeout=timeout, concurrency=concurrency)
-
-
-async def _scan_ports_python(
-    host: str,
-    *,
-    ports: dict[int, str] | None = None,
-    timeout: int = PORT_SCAN_TIMEOUT,
-    concurrency: int = PORT_SCAN_CONCURRENCY,
-) -> PortScanResult:
-    """Built-in Python TCP connect scanner."""
+    """Scan *host* for open TCP ports."""
     if ports is None:
         ports = _TOP_PORTS
 

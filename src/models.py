@@ -979,18 +979,6 @@ class KatanaCrawlResult(BaseModel):
     error: str | None = None
 
 
-class NaabuPort(BaseModel):
-    host: str = ""
-    ip: str = ""
-    port: int = 0
-    protocol: str = "tcp"
-
-
-class NaabuScanResult(BaseModel):
-    target: str
-    ports: list[NaabuPort] = Field(default_factory=list)
-    error: str | None = None
-
 
 class CVEFinding(BaseModel):
     cve_id: str

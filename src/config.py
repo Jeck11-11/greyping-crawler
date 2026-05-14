@@ -56,9 +56,6 @@ NUCLEI_WEBHOOK_TIMEOUT = int(os.getenv("NUCLEI_WEBHOOK_TIMEOUT", "30"))
 PD_TOOLS_API_URL = os.getenv("PD_TOOLS_API_URL", "")
 HTTPX_TIMEOUT = int(os.getenv("HTTPX_TIMEOUT", "60"))
 KATANA_TIMEOUT = int(os.getenv("KATANA_TIMEOUT", "120"))
-NAABU_TIMEOUT = int(os.getenv("NAABU_TIMEOUT", "120"))
-NAABU_RATE = int(os.getenv("NAABU_RATE", "1000"))
-NAABU_PORT_RANGE = os.getenv("NAABU_PORT_RANGE", "top-250")
 
 # User-Agent strings
 UA_HONEST = os.getenv("UA_HONEST", "GreypingCrawler/1.0")
