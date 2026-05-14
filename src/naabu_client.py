@@ -44,8 +44,6 @@ async def run_naabu_scan(
     if not api_url:
         return NaabuScanResult(target=host, error="PD_TOOLS_API_URL not configured")
 
-    extra_args = f"-port {ports} -rate {rate}"
-
     start = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
@@ -53,7 +51,8 @@ async def run_naabu_scan(
                 f"{api_url.rstrip('/')}/portscan",
                 json={
                     "targets": [host],
-                    "additional_args": extra_args,
+                    "ports": ports,
+                    "rate": rate,
                     "timeout": timeout,
                 },
             )
