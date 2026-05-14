@@ -58,7 +58,7 @@ HTTPX_TIMEOUT = int(os.getenv("HTTPX_TIMEOUT", "60"))
 KATANA_TIMEOUT = int(os.getenv("KATANA_TIMEOUT", "120"))
 NAABU_TIMEOUT = int(os.getenv("NAABU_TIMEOUT", "120"))
 NAABU_RATE = int(os.getenv("NAABU_RATE", "1000"))
-NAABU_PORT_RANGE = os.getenv("NAABU_PORT_RANGE", "1-10000")
+NAABU_PORT_RANGE = os.getenv("NAABU_PORT_RANGE", "1-1000")
 
 # User-Agent strings
 UA_HONEST = os.getenv("UA_HONEST", "GreypingCrawler/1.0")
