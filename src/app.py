@@ -195,13 +195,20 @@ async def _scan_single_target(
         return []
     rendered_cookies_task = fetch_rendered_cookies(target, timeout=request.timeout) if request.render_js else _no_cookies()
 
+    async def _httpx_probe_task():
+        if not PD_TOOLS_API_URL:
+            return None
+        from .httpx_client import run_httpx_probe
+        return await run_httpx_probe([target], timeout=request.timeout)
+
     (crawl_result, ssl_result, landing_result, paths_result,
      dns_result, ct_result, rdap_result, wayback_result,
      favicon_result,
      port_scan_result, cloud_assets_result, c99_subs_result,
      waf_raw_result,
      robots_sitemap_result, typosquat_result,
-     rendered_cookies_result) = await asyncio.gather(
+     rendered_cookies_result,
+     httpx_probe_result) = await asyncio.gather(
         crawl_task, ssl_task, landing_task, paths_task,
         dns_task, ct_task, rdap_task, wayback_task,
         favicon_task,
@@ -209,6 +216,7 @@ async def _scan_single_target(
         waf_task,
         robots_task, typosquat_task,
         rendered_cookies_task,
+        _httpx_probe_task(),
         return_exceptions=True,
     )
 
@@ -276,24 +284,20 @@ async def _scan_single_target(
     except Exception as exc:
         logger.warning("Tech fingerprint failed for %s: %s", target, exc)
 
-    # Supplement tech detection with PD httpx probe when available.
-    if PD_TOOLS_API_URL:
-        try:
-            from .httpx_client import run_httpx_probe
-            from .models import TechFinding
-            httpx_probes = await run_httpx_probe([target], timeout=request.timeout)
-            if httpx_probes:
-                existing_names = {t.name.lower() for t in tech_findings}
-                for tech_name in httpx_probes[0].technologies:
-                    if tech_name.lower() not in existing_names:
-                        tech_findings.append(TechFinding(
-                            name=tech_name,
-                            categories=[],
-                            confidence="medium",
-                            evidence=["httpx-probe"],
-                        ))
-        except Exception as exc:
-            logger.debug("httpx tech supplement failed for %s: %s", target, exc)
+    # Merge httpx probe results (ran in Phase 1 gather).
+    if isinstance(httpx_probe_result, Exception):
+        logger.debug("httpx tech supplement failed for %s: %s", target, httpx_probe_result)
+    elif httpx_probe_result:
+        from .models import TechFinding
+        existing_names = {t.name.lower() for t in tech_findings}
+        for tech_name in httpx_probe_result[0].technologies:
+            if tech_name.lower() not in existing_names:
+                tech_findings.append(TechFinding(
+                    name=tech_name,
+                    categories=[],
+                    confidence="medium",
+                    evidence=["httpx-probe"],
+                ))
 
     # Privacy compliance analysis (uses paths + tech + landing HTML)
     privacy_result: PrivacyComplianceResult | None = None
@@ -306,70 +310,35 @@ async def _scan_single_target(
         logger.warning("Privacy analysis failed for %s: %s", target, exc)
         privacy_result = PrivacyComplianceResult(domain=domain, error=str(exc))
 
-    # JS mining + CVE lookup run in parallel (independent of each other)
-    cve_findings: list = []
-    js_coro = mine_javascript(target, landing_html, timeout=request.timeout)
-    cve_coro = lookup_cves(tech_findings, timeout=request.timeout) if tech_findings else None
-    if cve_coro:
-        js_raw, cve_raw = await asyncio.gather(js_coro, cve_coro, return_exceptions=True)
-    else:
-        js_raw = await asyncio.gather(js_coro, return_exceptions=True)
-        js_raw = js_raw[0]
-        cve_raw = []
-    if isinstance(js_raw, Exception):
-        logger.warning("JS mining failed for %s: %s", target, js_raw)
-    else:
-        js_intel_result = js_raw
-    if isinstance(cve_raw, Exception):
-        logger.warning("CVE lookup failed for %s: %s", target, cve_raw)
-    elif isinstance(cve_raw, list):
-        cve_findings = cve_raw
-
-    # Enrich CVEs with EPSS exploit scores and CISA KEV status
-    if cve_findings:
-        try:
-            await enrich_cves_with_epss_kev(cve_findings)
-        except Exception as exc:
-            logger.warning("EPSS/KEV enrichment failed for %s: %s", target, exc)
-
-
-    # Process favicon result
+    # Process Phase 1 exception results (sync).
     if isinstance(favicon_result, Exception):
         logger.warning("Favicon fetch failed for %s: %s", target, favicon_result)
         favicon_result = None
 
-    # Process port scan result
     if isinstance(port_scan_result, Exception):
         logger.warning("Port scan failed for %s: %s", target, port_scan_result)
         port_scan_result = PortScanResult(target=domain, error=str(port_scan_result))
 
-    # Process cloud assets result
     if isinstance(cloud_assets_result, Exception):
         logger.warning("Cloud asset scan failed for %s: %s", target, cloud_assets_result)
         cloud_assets_result = CloudAssetResult(domain=domain, error=str(cloud_assets_result))
 
-    # Process typosquatting result
     if isinstance(typosquat_result, Exception):
         logger.warning("Typosquatting scan failed for %s: %s", target, typosquat_result)
         typosquat_result = TyposquattingResult(domain=domain, error=str(typosquat_result))
 
-    # Subdomain takeover scan (uses CT-discovered subdomains)
-    # Subdomain takeover is a separate scan — use /recon/takeover directly.
     takeover_result = None
 
-    # Process sensitive paths
     if isinstance(paths_result, Exception):
         logger.warning("Path scan failed for %s: %s", target, paths_result)
         paths_result = []
 
-    # Unpack robots/sitemap from parallel gather
     robots_result, sitemap_result = None, None
     if isinstance(robots_sitemap_result, tuple):
         robots_result, sitemap_result = robots_sitemap_result
     elif isinstance(robots_sitemap_result, Exception):
         logger.warning("robots/sitemap parse failed for %s: %s", target, robots_sitemap_result)
 
-    # Process passive intel results
     def _passive_result(x, kind):
         if isinstance(x, Exception):
             msg = str(x) or x.__class__.__name__
@@ -382,7 +351,6 @@ async def _scan_single_target(
     rdap_result = _passive_result(rdap_result, RDAPResult)
     wayback_result = _passive_result(wayback_result, WaybackResult)
 
-    # Merge C99 subdomains into CT result (even if CT failed)
     c99_subs = c99_subs_result if isinstance(c99_subs_result, list) else []
     if c99_subs and ct_result:
         merged = set(ct_result.subdomains or [])
@@ -400,22 +368,55 @@ async def _scan_single_target(
         if ct_result.error:
             ct_result.error = None
 
-    # Email security + IP enrichment (depend on DNS data, run concurrently)
+    # Prepare inputs for Phase 2.
     mx_records = dns_result.mx_records if not dns_result.error else []
     a_records = dns_result.a_records if not dns_result.error else []
     a_ips = [r.address for r in a_records] if a_records else []
+    primary_ip = a_ips[0] if a_ips else ""
 
-    email_sec_raw, ip_enrich_raw = await asyncio.gather(
-        asyncio.wait_for(
-            query_email_security(domain, mx_records, timeout=request.timeout),
-            timeout=request.timeout,
-        ),
-        asyncio.wait_for(
-            query_ip_enrichment(domain, a_ips, timeout=request.timeout),
-            timeout=request.timeout,
-        ),
+    # Phase 2: JS mining, CVE lookup, email security, IP enrichment,
+    # and reputation checks all run concurrently.
+    async def _noop():
+        return None
+
+    js_coro = mine_javascript(target, landing_html, timeout=request.timeout)
+    cve_coro = lookup_cves(tech_findings, timeout=request.timeout) if tech_findings else _noop()
+    email_sec_coro = asyncio.wait_for(
+        query_email_security(domain, mx_records, timeout=request.timeout),
+        timeout=request.timeout,
+    )
+    ip_enrich_coro = asyncio.wait_for(
+        query_ip_enrichment(domain, a_ips, timeout=request.timeout),
+        timeout=request.timeout,
+    )
+    ip_rep_coro = check_ip_reputation(primary_ip) if primary_ip else _noop()
+    url_rep_coro = check_url_reputation(target)
+
+    (js_raw, cve_raw, email_sec_raw, ip_enrich_raw,
+     ip_raw, url_raw) = await asyncio.gather(
+        js_coro, cve_coro, email_sec_coro, ip_enrich_coro,
+        ip_rep_coro, url_rep_coro,
         return_exceptions=True,
     )
+
+    # Unpack JS mining + CVE results.
+    cve_findings: list = []
+    if isinstance(js_raw, Exception):
+        logger.warning("JS mining failed for %s: %s", target, js_raw)
+    else:
+        js_intel_result = js_raw
+    if isinstance(cve_raw, Exception):
+        logger.warning("CVE lookup failed for %s: %s", target, cve_raw)
+    elif isinstance(cve_raw, list):
+        cve_findings = cve_raw
+
+    if cve_findings:
+        try:
+            await enrich_cves_with_epss_kev(cve_findings)
+        except Exception as exc:
+            logger.warning("EPSS/KEV enrichment failed for %s: %s", target, exc)
+
+    # Unpack email security + IP enrichment.
     email_sec = (
         email_sec_raw if not isinstance(email_sec_raw, Exception)
         else EmailSecurityResult(domain=domain, error=str(email_sec_raw))
@@ -432,30 +433,26 @@ async def _scan_single_target(
         ct=ct_result, rdap=rdap_result, wayback=wayback_result,
     )
 
-    # C99 reputation checks (IP + URL, run concurrently)
+    # Unpack reputation results.
     ip_rep_result: IPReputationResult | None = None
     url_rep_result: URLReputationResult | None = None
-    try:
-        primary_ip = a_ips[0] if a_ips else ""
-        ip_rep_coro = check_ip_reputation(primary_ip) if primary_ip else asyncio.sleep(0)
-        url_rep_coro = check_url_reputation(target)
-        ip_raw, url_raw = await asyncio.gather(ip_rep_coro, url_rep_coro, return_exceptions=True)
-
-        if primary_ip and isinstance(ip_raw, dict):
-            ip_rep_result = IPReputationResult(
-                ip=primary_ip,
-                malicious=ip_raw.get("malicious", False),
-                detections=ip_raw.get("details", []) if isinstance(ip_raw.get("details"), list) else [],
-            )
-        if isinstance(url_raw, dict):
-            url_rep_result = URLReputationResult(
-                url=target,
-                blacklisted=url_raw.get("blacklisted", False),
-                detections=url_raw.get("detections", []),
-                sources_checked=url_raw.get("sources_checked", 0),
-            )
-    except Exception as exc:
-        logger.warning("C99 reputation checks failed for %s: %s", target, exc)
+    if primary_ip and isinstance(ip_raw, dict):
+        ip_rep_result = IPReputationResult(
+            ip=primary_ip,
+            malicious=ip_raw.get("malicious", False),
+            detections=ip_raw.get("details", []) if isinstance(ip_raw.get("details"), list) else [],
+        )
+    elif isinstance(ip_raw, Exception):
+        logger.warning("IP reputation check failed for %s: %s", target, ip_raw)
+    if isinstance(url_raw, dict):
+        url_rep_result = URLReputationResult(
+            url=target,
+            blacklisted=url_raw.get("blacklisted", False),
+            detections=url_raw.get("detections", []),
+            sources_checked=url_raw.get("sources_checked", 0),
+        )
+    elif isinstance(url_raw, Exception):
+        logger.warning("URL reputation check failed for %s: %s", target, url_raw)
 
     # C99 WAF detection
     waf_result: WAFResult | None = None
