@@ -73,6 +73,12 @@ class TestExtractContacts:
         contacts = extract_contacts(_soup(html), html)
         assert any("818" in p for p in contacts.phone_numbers)
 
+    def test_rejects_truncated_international_phone(self):
+        html = "<p>Phone: +353 71 9174</p>"
+        contacts = extract_contacts(_soup(html), html)
+        for phone in contacts.phone_numbers:
+            assert "+353 71 9174" not in phone
+
 
 class TestExtractLinks:
     def test_classifies_internal_links(self):

@@ -77,6 +77,8 @@ def _normalise_phone(raw: str) -> str | None:
     if digits.startswith(("19", "20")) and 1900 <= int(digits[:4]) <= 2099:
         if len(digits) <= 10 and not stripped.startswith("+"):
             return None
+    if stripped.startswith("+") and len(digits) < 10:
+        return None
     return stripped
 
 

@@ -1240,7 +1240,7 @@ def _classify_privacy_findings(result: DomainResult) -> list[PrioritizedFinding]
             owner=FindingOwner.customer,
             why_it_matters="Terms of service establish the legal framework for site usage.",
             business_impact="Legal protection gap",
-            evidence=["No /terms or /terms-of-service page returned HTTP 200"],
+            evidence=["No terms page found (checked /terms, /terms-of-service, /terms-of-use, /tos, and HTML links)"],
             recommended_action="Publish terms of service and link from the website footer.",
             source_field="privacy",
         ))

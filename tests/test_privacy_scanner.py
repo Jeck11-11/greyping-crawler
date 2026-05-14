@@ -108,3 +108,10 @@ class TestAnalyzePrivacyCompliance:
         result = analyze_privacy_compliance("example.com", paths, [])
         tos = [i for i in result.indicators if i.name == "terms_of_service"]
         assert tos[0].present is True
+
+    def test_terms_link_in_html(self):
+        html = '<a href="/terms-of-use">Terms of Use</a>'
+        result = analyze_privacy_compliance("example.com", [], [], landing_html=html)
+        tos = [i for i in result.indicators if i.name == "terms_of_service"]
+        assert tos[0].present is True
+        assert result.score >= 10

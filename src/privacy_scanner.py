@@ -29,6 +29,10 @@ _PRIVACY_LINK_RE = re.compile(
     r'<a\b[^>]*href=["\'][^"\']*(?:privacy|datenschutz)[^"\']*["\'][^>]*>',
     re.IGNORECASE,
 )
+_TERMS_LINK_RE = re.compile(
+    r'<a\b[^>]*href=["\'][^"\']*(?:terms[-_]of[-_](?:service|use)|terms[-_]and[-_]conditions|/tos(?:["\'/?\#]))[^"\']*["\'][^>]*>',
+    re.IGNORECASE,
+)
 _DO_NOT_SELL_RE = re.compile(
     r"do\s+not\s+sell",
     re.IGNORECASE,
@@ -91,6 +95,8 @@ def analyze_privacy_compliance(
 
     # 3. Terms of service
     terms_evidence = _path_found(sensitive_paths, _TERMS_PATHS)
+    if not terms_evidence and landing_html and _TERMS_LINK_RE.search(landing_html):
+        terms_evidence = ["Terms link found in landing page HTML"]
     terms_present = bool(terms_evidence)
     indicators.append(PrivacyIndicator(name="terms_of_service", present=terms_present, evidence=terms_evidence))
     if terms_present:
