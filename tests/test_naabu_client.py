@@ -49,7 +49,7 @@ class TestNaabuToPortScanResult:
     def test_unknown_port_gets_unknown_service(self):
         naabu = NaabuScanResult(
             target="example.com",
-            ports=[NaabuPort(host="example.com", ip="1.2.3.4", port=9999)],
+            ports=[NaabuPort(host="example.com", ip="1.2.3.4", port=59999)],
         )
         result = _naabu_to_port_scan_result("example.com", naabu)
         assert result.open_ports[0].service == "unknown"
