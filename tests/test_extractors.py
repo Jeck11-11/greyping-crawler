@@ -50,6 +50,30 @@ class TestExtractContacts:
         assert len(contacts.social_profiles) == 0
 
 
+    def test_rejects_year_range(self):
+        html = "<p>Copyright 1977-2007 All rights reserved.</p>"
+        contacts = extract_contacts(_soup(html), html)
+        for phone in contacts.phone_numbers:
+            assert "1977" not in phone
+
+    def test_rejects_date_like_numbers(self):
+        html = "<p>Reference 2004 370 10 applies.</p>"
+        contacts = extract_contacts(_soup(html), html)
+        for phone in contacts.phone_numbers:
+            assert "2004" not in phone
+
+    def test_rejects_short_year_numbers(self):
+        html = "<p>Section 336 2007 of the Act.</p>"
+        contacts = extract_contacts(_soup(html), html)
+        for phone in contacts.phone_numbers:
+            assert "336 2007" not in phone
+
+    def test_keeps_real_irish_phone(self):
+        html = "<p>Call +353 818 70 71 71 for support.</p>"
+        contacts = extract_contacts(_soup(html), html)
+        assert any("818" in p for p in contacts.phone_numbers)
+
+
 class TestExtractLinks:
     def test_classifies_internal_links(self):
         html = '<a href="/about">About</a>'

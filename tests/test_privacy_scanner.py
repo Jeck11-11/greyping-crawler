@@ -89,3 +89,22 @@ class TestAnalyzePrivacyCompliance:
     def test_domain_in_result(self):
         result = analyze_privacy_compliance("test.io", [], [])
         assert result.domain == "test.io"
+
+    def test_terms_of_use_detected(self):
+        paths = [_path("/terms-of-use")]
+        result = analyze_privacy_compliance("example.com", paths, [])
+        tos = [i for i in result.indicators if i.name == "terms_of_service"]
+        assert tos[0].present is True
+        assert result.score >= 10
+
+    def test_terms_and_conditions_detected(self):
+        paths = [_path("/terms-and-conditions")]
+        result = analyze_privacy_compliance("example.com", paths, [])
+        tos = [i for i in result.indicators if i.name == "terms_of_service"]
+        assert tos[0].present is True
+
+    def test_tos_detected(self):
+        paths = [_path("/tos")]
+        result = analyze_privacy_compliance("example.com", paths, [])
+        tos = [i for i in result.indicators if i.name == "terms_of_service"]
+        assert tos[0].present is True

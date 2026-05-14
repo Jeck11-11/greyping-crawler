@@ -805,7 +805,21 @@ _VENDOR_PREFIXES = (
     "node_modules/", "webpack/", "react/", "vue/", "angular/",
     "@babel/", "@emotion/", "@mui/", "lodash/", "core-js/",
     "regenerator-runtime/", "tslib/", "rxjs/",
+    "@wix/", "thunderbolt-", "feature-", "@sentry/",
+    "@next/", "next/", "@vercel/", "@shopify/",
+    "@wordpress/", "@squarespace/", "@webflow/",
 )
+
+
+def is_vendor_source(path: str) -> bool:
+    """Return True if a recovered source file path is a third-party/vendor file."""
+    return any(path.startswith(p) or f"/{p}" in path for p in _VENDOR_PREFIXES)
+
+
+def count_first_party_sources(files: list[str]) -> tuple[int, int]:
+    """Return (first_party_count, vendor_count) for a list of recovered source paths."""
+    vendor = sum(1 for f in files if is_vendor_source(f))
+    return len(files) - vendor, vendor
 
 
 def _classify_js_intel(result: DomainResult) -> list[PrioritizedFinding]:
@@ -814,13 +828,7 @@ def _classify_js_intel(result: DomainResult) -> list[PrioritizedFinding]:
         return findings
 
     ji = result.js_intel
-    vendor_count = 0
-    first_party_count = 0
-    for f in ji.recovered_source_files:
-        if any(f.startswith(p) or f"/{p}" in f for p in _VENDOR_PREFIXES):
-            vendor_count += 1
-        else:
-            first_party_count += 1
+    first_party_count, vendor_count = count_first_party_sources(ji.recovered_source_files)
 
     if first_party_count > 10:
         prop_exposure = "high"

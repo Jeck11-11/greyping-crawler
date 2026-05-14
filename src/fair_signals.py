@@ -250,14 +250,22 @@ def _build_threat_event_frequency(result: DomainResult) -> FAIRFactor:
         smaps = result.js_intel.sourcemaps_found
         recovered = result.js_intel.recovered_source_files
         if smaps:
-            sc = min(100, 50 + len(recovered) * 10) if recovered else 40
+            from .easm_report import count_first_party_sources
+
+            first_party, _vendor = count_first_party_sources(recovered)
+            if first_party:
+                sc = min(100, 50 + first_party * 10)
+            elif recovered:
+                sc = 25
+            else:
+                sc = 40
             signals.append(FAIRSignal(
                 name="sourcemap_exposure",
                 score=sc,
                 weight=0.9,
                 evidence=[
                     f"{len(smaps)} sourcemap(s) found",
-                    f"{len(recovered)} source file(s) recovered",
+                    f"{first_party} first-party / {len(recovered)} total source file(s)",
                 ],
             ))
 
@@ -915,11 +923,20 @@ def _build_loss_magnitude(result: DomainResult) -> FAIRFactor:
         recovered = result.js_intel.recovered_source_files
         smaps = result.js_intel.sourcemaps_found
         if recovered:
+            from .easm_report import count_first_party_sources
+
+            first_party, _vendor = count_first_party_sources(recovered)
+            if first_party:
+                sc = min(100, 60 + first_party * 8)
+                evidence = f"{first_party} first-party source files recoverable from {len(smaps)} sourcemap(s)"
+            else:
+                sc = 20
+                evidence = f"{len(recovered)} vendor-only source files from {len(smaps)} sourcemap(s) (no proprietary code)"
             signals.append(FAIRSignal(
                 name="source_code_exposure",
-                score=min(100, 60 + len(recovered) * 8),
+                score=sc,
                 weight=1.3,
-                evidence=[f"{len(recovered)} source files recoverable from {len(smaps)} sourcemap(s)"],
+                evidence=[evidence],
             ))
         elif smaps:
             signals.append(FAIRSignal(
