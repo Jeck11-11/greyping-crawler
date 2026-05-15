@@ -91,6 +91,7 @@ from .models import (
     WaybackResult,
 )
 from .passive_intel import (
+    enumerate_spf,
     query_ct_logs,
     query_dns,
     query_email_security,
@@ -439,6 +440,14 @@ async def _scan_single_target(
         else IPEnrichmentResult(domain=domain, error=str(ip_enrich_raw))
     )
 
+    # SPF deep enumeration — runs after email_sec is available.
+    if email_sec.spf.exists:
+        try:
+            spf_intel = await enumerate_spf(domain, email_sec.spf, timeout=request.timeout)
+            email_sec.spf.intel = spf_intel
+        except Exception as exc:
+            logger.warning("SPF enumeration failed for %s: %s", domain, exc)
+
     dns_group = DNSGroup(
         records=dns_result, email_security=email_sec, ip_enrichment=ip_enrich,
     )
@@ -662,6 +671,8 @@ async def _scan_single_target(
         waf_detected=waf_result.firewall if waf_result and waf_result.detected else "",
         privacy_score=privacy_result.score if privacy_result else 0,
         consent_tool=privacy_result.consent_tool if privacy_result else "",
+        spf_senders_found=len(email_sec.spf.intel.senders) if email_sec.spf.intel else 0,
+        spf_services_found=len(email_sec.spf.intel.services_detected) if email_sec.spf.intel else 0,
     )
 
     # Build page summary from the raw pages list
@@ -873,6 +884,13 @@ async def _lighttouch_single_target(target: str, timeout: int) -> DomainResult:
         )
     except Exception as exc:
         ip_enrich = IPEnrichmentResult(domain=domain, error=str(exc))
+
+    if email_sec.spf.exists:
+        try:
+            spf_intel = await enumerate_spf(domain, email_sec.spf, timeout=timeout)
+            email_sec.spf.intel = spf_intel
+        except Exception as exc:
+            logger.warning("SPF enumeration failed for %s: %s", domain, exc)
 
     lt_dns_group = DNSGroup(
         records=dns_result, email_security=email_sec, ip_enrichment=ip_enrich,
@@ -1149,6 +1167,13 @@ async def _passive_single_target(
         )
     except Exception as exc:
         ip_enrich = IPEnrichmentResult(domain=domain, error=str(exc))
+
+    if email_sec.spf.exists:
+        try:
+            spf_intel = await enumerate_spf(domain, email_sec.spf, timeout=timeout)
+            email_sec.spf.intel = spf_intel
+        except Exception as exc:
+            logger.warning("SPF enumeration failed for %s: %s", domain, exc)
 
     p_dns_group = DNSGroup(
         records=dns, email_security=email_sec, ip_enrichment=ip_enrich,

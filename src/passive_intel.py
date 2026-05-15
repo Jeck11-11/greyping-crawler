@@ -43,7 +43,11 @@ from .models import (
     NSRecord,
     RDAPResult,
     SOARecord,
+    SPFIncludeNode,
+    SPFIntelResult,
+    SPFMechanism,
     SPFResult,
+    SPFSenderInfo,
     SRVRecord,
     TXTRecord,
     WaybackResult,
@@ -512,6 +516,329 @@ def _parse_spf(txt_records: list[str]) -> SPFResult:
         includes=includes,
         issues=issues,
     )
+
+
+# ---------------------------------------------------------------------------
+# SPF deep enumeration — mechanism parsing, include tree, IP enrichment
+# ---------------------------------------------------------------------------
+
+_SPF_INCLUDE_SERVICE_MAP: dict[str, str] = {
+    "_spf.google.com": "Google Workspace",
+    "_netblocks.google.com": "Google Workspace",
+    "_netblocks2.google.com": "Google Workspace",
+    "_netblocks3.google.com": "Google Workspace",
+    "spf.protection.outlook.com": "Microsoft 365",
+    "spf.messagelabs.com": "Broadcom Email Security",
+    "spf.mandrillapp.com": "Mailchimp Transactional",
+    "servers.mcsv.net": "Mailchimp",
+    "mail.zendesk.com": "Zendesk",
+    "sendgrid.net": "SendGrid",
+    "amazonses.com": "Amazon SES",
+    "spf.mtasv.net": "Postmark",
+    "mktomail.com": "Marketo",
+    "spf.sendinblue.com": "Brevo",
+    "stspg-customer.com": "StatusPage",
+    "spf.freshdesk.com": "Freshdesk",
+    "spf1.hubspot.com": "HubSpot",
+    "helpscoutemail.com": "Help Scout",
+    "mxlogin.com": "Intermedia",
+    "pphosted.com": "Proofpoint",
+    "firebasemail.com": "Firebase",
+    "mailgun.org": "Mailgun",
+    "zoho.com": "Zoho Mail",
+    "outbound.mailhop.org": "DynECT",
+    "aspmx.googlemail.com": "Google Workspace",
+    "mailsenders.netsuite.com": "NetSuite",
+    "spf.constantcontact.com": "Constant Contact",
+    "em.sailthru.com": "Sailthru",
+    "cust-spf.exacttarget.com": "Salesforce Marketing Cloud",
+    "spf.campaignmonitor.com": "Campaign Monitor",
+    "mimecast.com": "Mimecast",
+}
+
+_SPF_MECHANISM_RE = re.compile(
+    r"^([+\-~?])?"
+    r"(ip4|ip6|all|include|redirect|exists|ptr|mx|a)"
+    r"(?:[=:/](\S+))?$",
+    re.I,
+)
+
+
+def _parse_spf_mechanisms(raw: str) -> list[SPFMechanism]:
+    """Parse all mechanisms from a raw SPF record."""
+    mechanisms: list[SPFMechanism] = []
+    tokens = raw.split()
+    for token in tokens:
+        if token.lower().startswith("v=spf1"):
+            continue
+        m = _SPF_MECHANISM_RE.match(token)
+        if m:
+            qual = m.group(1) or "+"
+            mech = m.group(2).lower()
+            val = m.group(3) or ""
+            if mech == "redirect":
+                qual = ""
+            mechanisms.append(SPFMechanism(qualifier=qual, mechanism=mech, value=val))
+    return mechanisms
+
+
+def _map_include_to_service(domain: str) -> str:
+    """Map an SPF include domain to a known third-party service."""
+    domain_lower = domain.lower().rstrip(".")
+    for pattern, service in _SPF_INCLUDE_SERVICE_MAP.items():
+        if pattern in domain_lower:
+            return service
+    return ""
+
+
+def _resolve_spf_record(domain: str) -> str | None:
+    """Blocking: resolve a single SPF TXT record for *domain*."""
+    try:
+        answers = dns.resolver.resolve(domain, "TXT", lifetime=DNS_LIFETIME)
+        for rr in answers:
+            txt = b"".join(rr.strings).decode("utf-8", errors="replace")
+            if txt.lower().startswith("v=spf1"):
+                return txt
+    except Exception:
+        pass
+    return None
+
+
+def _walk_spf_tree(
+    domain: str, depth: int, max_depth: int, visited: set[str],
+) -> tuple[SPFIncludeNode, int]:
+    """Recursively resolve SPF includes. Returns (node, dns_lookups_consumed)."""
+    domain = domain.lower().rstrip(".")
+    if domain in visited or depth > max_depth:
+        return SPFIncludeNode(domain=domain, error="max depth or cycle"), 0
+    visited.add(domain)
+
+    raw = _resolve_spf_record(domain)
+    if not raw:
+        return SPFIncludeNode(domain=domain, error="no SPF record found"), 1
+
+    node = SPFIncludeNode(
+        domain=domain,
+        raw_record=raw,
+        service=_map_include_to_service(domain),
+    )
+
+    lookups = 1
+    mechanisms = _parse_spf_mechanisms(raw)
+    for mech in mechanisms:
+        if mech.mechanism == "ip4" and mech.value:
+            node.ip4_ranges.append(mech.value)
+        elif mech.mechanism == "ip6" and mech.value:
+            node.ip6_ranges.append(mech.value)
+        elif mech.mechanism in ("include", "redirect") and mech.value:
+            child, child_lookups = _walk_spf_tree(
+                mech.value, depth + 1, max_depth, visited,
+            )
+            node.children.append(child)
+            lookups += child_lookups
+        elif mech.mechanism in ("a", "mx"):
+            lookups += 1
+
+    return node, lookups
+
+
+def _collect_ranges(node: SPFIncludeNode) -> tuple[list[str], list[str]]:
+    """Flatten all ip4/ip6 ranges from an include tree."""
+    ip4: list[str] = list(node.ip4_ranges)
+    ip6: list[str] = list(node.ip6_ranges)
+    for child in node.children:
+        c4, c6 = _collect_ranges(child)
+        ip4.extend(c4)
+        ip6.extend(c6)
+    return ip4, ip6
+
+
+def _collect_services(node: SPFIncludeNode) -> list[str]:
+    """Collect all mapped service names from an include tree."""
+    services: list[str] = []
+    if node.service:
+        services.append(node.service)
+    for child in node.children:
+        services.extend(_collect_services(child))
+    return services
+
+
+def _ip_from_cidr(cidr: str) -> str | None:
+    """Extract a single representative IP from a CIDR or bare IP."""
+    ip = cidr.split("/")[0]
+    parts = ip.split(".")
+    if len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
+        return ip
+    return None
+
+
+async def enumerate_spf(
+    domain: str,
+    spf_result: SPFResult,
+    *,
+    timeout: int = PASSIVE_TIMEOUT,
+) -> SPFIntelResult:
+    """Deep SPF enumeration: parse mechanisms, resolve include tree, enrich IPs.
+
+    All queries are passive DNS lookups — zero traffic to the target.
+    """
+    if not spf_result.exists or not spf_result.raw:
+        return SPFIntelResult(domain=domain)
+
+    try:
+        mechanisms = _parse_spf_mechanisms(spf_result.raw)
+
+        root_ip4: list[str] = []
+        root_ip6: list[str] = []
+        include_domains: list[str] = []
+        redirect_domain: str | None = None
+        root_lookups = 0
+
+        for mech in mechanisms:
+            if mech.mechanism == "ip4" and mech.value:
+                root_ip4.append(mech.value)
+            elif mech.mechanism == "ip6" and mech.value:
+                root_ip6.append(mech.value)
+            elif mech.mechanism == "include" and mech.value:
+                include_domains.append(mech.value)
+            elif mech.mechanism == "redirect" and mech.value:
+                redirect_domain = mech.value
+            elif mech.mechanism in ("a", "mx"):
+                root_lookups += 1
+
+        # Resolve include tree in executor (blocking DNS).
+        visited: set[str] = {domain.lower().rstrip(".")}
+        include_tree: list[SPFIncludeNode] = []
+        total_lookups = root_lookups
+
+        all_targets = include_domains + ([redirect_domain] if redirect_domain else [])
+
+        async def _resolve_one(inc_domain: str) -> tuple[SPFIncludeNode, int]:
+            return await _bounded_executor(
+                _walk_spf_tree, inc_domain, 1, 10, visited,
+            )
+
+        if all_targets:
+            results = await asyncio.wait_for(
+                asyncio.gather(*[_resolve_one(d) for d in all_targets], return_exceptions=True),
+                timeout=timeout,
+            )
+            for r in results:
+                if isinstance(r, Exception):
+                    logger.debug("SPF include resolution failed: %s", r)
+                    continue
+                node, lookups = r
+                include_tree.append(node)
+                total_lookups += lookups
+
+        # Collect all ranges from root + include tree.
+        all_ip4 = list(root_ip4)
+        all_ip6 = list(root_ip6)
+        for node in include_tree:
+            c4, c6 = _collect_ranges(node)
+            all_ip4.extend(c4)
+            all_ip6.extend(c6)
+
+        # Collect services.
+        services: list[str] = []
+        for inc in include_domains:
+            svc = _map_include_to_service(inc)
+            if svc and svc not in services:
+                services.append(svc)
+        for node in include_tree:
+            for svc in _collect_services(node):
+                if svc and svc not in services:
+                    services.append(svc)
+
+        # Extract unique IPs for enrichment (take first IP from each CIDR).
+        unique_ips: list[str] = []
+        seen_ips: set[str] = set()
+        ip_sources: dict[str, str] = {}
+        for cidr in all_ip4:
+            ip = _ip_from_cidr(cidr)
+            if ip and ip not in seen_ips:
+                seen_ips.add(ip)
+                unique_ips.append(ip)
+                ip_sources[ip] = f"ip4:{cidr}"
+
+        # Enrich IPs via Cymru (reuse existing functions).
+        senders: list[SPFSenderInfo] = []
+        if unique_ips:
+            try:
+                origin_tasks = [
+                    _bounded_executor(_cymru_origin_lookup, ip)
+                    for ip in unique_ips
+                ]
+                origin_raws = await asyncio.wait_for(
+                    asyncio.gather(*origin_tasks, return_exceptions=True),
+                    timeout=timeout,
+                )
+
+                ip_parsed: dict[str, tuple[int | None, str, str, str]] = {}
+                unique_asns: set[int] = set()
+                for ip, raw in zip(unique_ips, origin_raws):
+                    if isinstance(raw, Exception) or not raw:
+                        ip_parsed[ip] = (None, "", "", "")
+                    else:
+                        parsed = _parse_cymru_origin(raw)
+                        ip_parsed[ip] = parsed
+                        if parsed[0]:
+                            unique_asns.add(parsed[0])
+
+                asn_name_tasks = [
+                    _bounded_executor(_cymru_asn_lookup, asn)
+                    for asn in unique_asns
+                ]
+                asn_name_raws = await asyncio.wait_for(
+                    asyncio.gather(*asn_name_tasks, return_exceptions=True),
+                    timeout=timeout,
+                )
+                asn_name_map: dict[int, str] = {}
+                for asn, raw in zip(unique_asns, asn_name_raws):
+                    if not isinstance(raw, Exception) and raw:
+                        asn_name_map[asn] = _parse_cymru_asn_name(raw)
+
+                for ip in unique_ips:
+                    asn, prefix, cc, registry = ip_parsed.get(ip, (None, "", "", ""))
+                    asn_name = asn_name_map.get(asn, "") if asn else ""
+                    provider = _infer_provider(asn_name) if asn_name else ""
+                    senders.append(SPFSenderInfo(
+                        ip=ip,
+                        source=ip_sources.get(ip, ""),
+                        asn=asn,
+                        asn_name=asn_name,
+                        prefix=prefix,
+                        country_code=cc,
+                        provider=provider,
+                    ))
+            except Exception as exc:
+                logger.debug("SPF IP enrichment failed: %s", exc)
+
+        exceeds = total_lookups > 10
+        if exceeds:
+            spf_result.issues.append(
+                f"SPF exceeds 10-lookup limit ({total_lookups} lookups) — "
+                "receiving servers may return permerror"
+            )
+
+        intel = SPFIntelResult(
+            domain=domain,
+            mechanisms=mechanisms,
+            include_tree=include_tree,
+            ip4_ranges=all_ip4,
+            ip6_ranges=all_ip6,
+            senders=senders,
+            services_detected=services,
+            dns_lookup_count=total_lookups,
+            exceeds_lookup_limit=exceeds,
+        )
+        return intel
+
+    except asyncio.TimeoutError:
+        return SPFIntelResult(domain=domain, error="SPF enumeration timed out")
+    except Exception as exc:
+        logger.warning("SPF enumeration failed for %s: %s", domain, exc)
+        return SPFIntelResult(domain=domain, error=str(exc))
 
 
 def _parse_dmarc(txt_records: list[str]) -> DMARCResult:

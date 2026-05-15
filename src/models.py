@@ -488,6 +488,49 @@ class DNSResult(BaseModel):
     error: str | None = None
 
 
+class SPFMechanism(BaseModel):
+    """A single parsed SPF mechanism (ip4, ip6, a, mx, include, redirect, etc.)."""
+    qualifier: str = Field(default="+", description="'+' pass, '-' fail, '~' softfail, '?' neutral.")
+    mechanism: str = Field(..., description="Mechanism type: ip4, ip6, a, mx, include, redirect, all, etc.")
+    value: str = Field(default="", description="Mechanism value (IP, CIDR, domain).")
+
+
+class SPFIncludeNode(BaseModel):
+    """One node in the SPF include resolution tree."""
+    domain: str
+    raw_record: str | None = None
+    service: str = Field(default="", description="Mapped service name, e.g. 'Google Workspace'.")
+    ip4_ranges: list[str] = Field(default_factory=list)
+    ip6_ranges: list[str] = Field(default_factory=list)
+    children: list[SPFIncludeNode] = Field(default_factory=list)
+    error: str | None = None
+
+
+class SPFSenderInfo(BaseModel):
+    """An IP address extracted from SPF with ASN enrichment."""
+    ip: str
+    source: str = Field(default="", description="Which SPF mechanism/include produced this IP.")
+    asn: int | None = None
+    asn_name: str = ""
+    prefix: str = ""
+    country_code: str = ""
+    provider: str = ""
+
+
+class SPFIntelResult(BaseModel):
+    """Full SPF intelligence: mechanisms, include tree, resolved IPs, enrichment."""
+    domain: str
+    mechanisms: list[SPFMechanism] = Field(default_factory=list)
+    include_tree: list[SPFIncludeNode] = Field(default_factory=list)
+    ip4_ranges: list[str] = Field(default_factory=list, description="All ip4 CIDRs/addresses from SPF chain.")
+    ip6_ranges: list[str] = Field(default_factory=list, description="All ip6 CIDRs/addresses from SPF chain.")
+    senders: list[SPFSenderInfo] = Field(default_factory=list, description="Enriched sender IPs (ASN/org/country).")
+    services_detected: list[str] = Field(default_factory=list, description="Mapped third-party services from includes.")
+    dns_lookup_count: int = Field(default=0, description="Total DNS lookups in SPF chain (RFC 7208 limit: 10).")
+    exceeds_lookup_limit: bool = Field(default=False, description="True if >10 DNS lookups required.")
+    error: str | None = None
+
+
 class SPFResult(BaseModel):
     raw: str | None = None
     exists: bool = False
@@ -497,6 +540,7 @@ class SPFResult(BaseModel):
     )
     includes: list[str] = Field(default_factory=list, description="SPF include: targets.")
     issues: list[str] = Field(default_factory=list)
+    intel: SPFIntelResult | None = Field(default=None, description="Deep SPF enumeration results.")
 
 
 class DMARCResult(BaseModel):
@@ -1252,6 +1296,8 @@ class DomainSummary(BaseModel):
     cloud_buckets_found: int = 0
     cloud_services_found: int = 0
     exposed_databases_found: int = 0
+    spf_senders_found: int = Field(default=0, description="Unique IPs/CIDRs in SPF chain.")
+    spf_services_found: int = Field(default=0, description="Third-party services identified in SPF includes.")
     screenshots_taken: int = 0
     typosquat_candidates: int = Field(default=0, description="Registered lookalike domains found.")
     waf_detected: str = Field(default="", description="WAF/firewall product detected by C99 (empty if none).")

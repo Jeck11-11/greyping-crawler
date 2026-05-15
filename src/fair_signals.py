@@ -383,6 +383,17 @@ def _build_vulnerability(result: DomainResult) -> FAIRFactor:
                 evidence=issues,
             ))
 
+        # SPF lookup limit exceeded — causes permerror, breaks email auth.
+        if email_sec.spf.intel and email_sec.spf.intel.exceeds_lookup_limit:
+            signals.append(FAIRSignal(
+                name="spf_lookup_limit_exceeded",
+                score=65,
+                weight=1.0,
+                evidence=[
+                    f"SPF chain requires {email_sec.spf.intel.dns_lookup_count} DNS lookups (RFC limit: 10)",
+                ],
+            ))
+
     # Nuclei vulnerability findings.
     nuclei_findings = (
         result.nuclei.findings if result.nuclei and result.nuclei.findings else []

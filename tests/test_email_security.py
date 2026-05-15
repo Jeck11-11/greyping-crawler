@@ -1,5 +1,6 @@
 """Tests for email security (SPF/DKIM/DMARC) and expanded DNS lookups."""
 
+import pytest
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
@@ -16,15 +17,20 @@ from src.models import (
     MXRecord,
     PassiveIntelSlim,
     RDAPResult,
+    SPFIntelResult,
     SPFResult,
+    SPFSenderInfo,
     WaybackResult,
 )
 from src.fair_signals import compute_fair_signals
 from src.passive_intel import (
     _detect_mail_providers,
     _grade_email_security,
+    _map_include_to_service,
     _parse_dmarc,
     _parse_spf,
+    _parse_spf_mechanisms,
+    enumerate_spf,
 )
 
 
@@ -271,3 +277,299 @@ class TestEmailSecurityIntegration:
         fair = r["risk_assessment"]["fair_signals"]
         ctrl_names = [s["name"] for s in fair["control_strength"]["signals"]]
         assert "email_security_posture" in ctrl_names
+
+
+# ---------------------------------------------------------------------------
+# Unit tests — SPF mechanism parsing
+# ---------------------------------------------------------------------------
+
+class TestSPFMechanismParsing:
+    def test_ip4_mechanisms(self):
+        mechs = _parse_spf_mechanisms("v=spf1 ip4:192.168.1.0/24 ip4:10.0.0.1 -all")
+        ip4s = [m for m in mechs if m.mechanism == "ip4"]
+        assert len(ip4s) == 2
+        assert ip4s[0].value == "192.168.1.0/24"
+        assert ip4s[1].value == "10.0.0.1"
+
+    def test_ip6_mechanisms(self):
+        mechs = _parse_spf_mechanisms("v=spf1 ip6:2001:db8::/32 -all")
+        ip6s = [m for m in mechs if m.mechanism == "ip6"]
+        assert len(ip6s) == 1
+        assert ip6s[0].value == "2001:db8::/32"
+
+    def test_include_mechanisms(self):
+        mechs = _parse_spf_mechanisms("v=spf1 include:_spf.google.com include:spf.protection.outlook.com -all")
+        includes = [m for m in mechs if m.mechanism == "include"]
+        assert len(includes) == 2
+        assert includes[0].value == "_spf.google.com"
+        assert includes[1].value == "spf.protection.outlook.com"
+
+    def test_redirect(self):
+        mechs = _parse_spf_mechanisms("v=spf1 redirect=_spf.example.com")
+        redirects = [m for m in mechs if m.mechanism == "redirect"]
+        assert len(redirects) == 1
+        assert redirects[0].value == "_spf.example.com"
+
+    def test_a_and_mx_mechanisms(self):
+        mechs = _parse_spf_mechanisms("v=spf1 a mx -all")
+        assert any(m.mechanism == "a" for m in mechs)
+        assert any(m.mechanism == "mx" for m in mechs)
+
+    def test_qualifiers(self):
+        mechs = _parse_spf_mechanisms("v=spf1 +a -mx ~ip4:10.0.0.1 ?all")
+        a_mech = next(m for m in mechs if m.mechanism == "a")
+        assert a_mech.qualifier == "+"
+        mx_mech = next(m for m in mechs if m.mechanism == "mx")
+        assert mx_mech.qualifier == "-"
+        ip4_mech = next(m for m in mechs if m.mechanism == "ip4")
+        assert ip4_mech.qualifier == "~"
+
+    def test_empty_record(self):
+        mechs = _parse_spf_mechanisms("v=spf1")
+        assert mechs == []
+
+    def test_complex_real_world_spf(self):
+        raw = "v=spf1 ip4:198.51.100.0/24 include:_spf.google.com include:servers.mcsv.net a mx ~all"
+        mechs = _parse_spf_mechanisms(raw)
+        types = [m.mechanism for m in mechs]
+        assert "ip4" in types
+        assert "include" in types
+        assert "a" in types
+        assert "mx" in types
+        assert "all" in types
+
+
+# ---------------------------------------------------------------------------
+# Unit tests — SPF include service mapping
+# ---------------------------------------------------------------------------
+
+class TestSPFServiceMapping:
+    def test_google_workspace(self):
+        assert _map_include_to_service("_spf.google.com") == "Google Workspace"
+
+    def test_microsoft_365(self):
+        assert _map_include_to_service("spf.protection.outlook.com") == "Microsoft 365"
+
+    def test_sendgrid(self):
+        assert _map_include_to_service("sendgrid.net") == "SendGrid"
+
+    def test_mailchimp(self):
+        assert _map_include_to_service("servers.mcsv.net") == "Mailchimp"
+
+    def test_amazon_ses(self):
+        assert _map_include_to_service("amazonses.com") == "Amazon SES"
+
+    def test_hubspot(self):
+        assert _map_include_to_service("spf1.hubspot.com") == "HubSpot"
+
+    def test_zendesk(self):
+        assert _map_include_to_service("mail.zendesk.com") == "Zendesk"
+
+    def test_unknown_domain(self):
+        assert _map_include_to_service("custom.mailserver.example.com") == ""
+
+
+# ---------------------------------------------------------------------------
+# Unit tests — SPF enumeration (mocked DNS)
+# ---------------------------------------------------------------------------
+
+class TestEnumerateSPF:
+    @pytest.mark.asyncio
+    async def test_no_spf_returns_empty(self):
+        spf = SPFResult(exists=False)
+        result = await enumerate_spf("example.com", spf)
+        assert result.domain == "example.com"
+        assert result.mechanisms == []
+        assert result.senders == []
+
+    @pytest.mark.asyncio
+    async def test_ip4_only_record(self):
+        spf = SPFResult(
+            exists=True,
+            raw="v=spf1 ip4:198.51.100.0/24 ip4:203.0.113.5 -all",
+        )
+        with patch("src.passive_intel._resolve_spf_record", return_value=None):
+            with patch("src.passive_intel._cymru_origin_lookup", return_value="13335 | 198.51.100.0/24 | US | arin | 2010-01-01"):
+                with patch("src.passive_intel._cymru_asn_lookup", return_value="13335 | US | arin | 2010-01-01 | CLOUDFLARENET, US"):
+                    result = await enumerate_spf("example.com", spf)
+
+        assert len(result.ip4_ranges) == 2
+        assert "198.51.100.0/24" in result.ip4_ranges
+        assert "203.0.113.5" in result.ip4_ranges
+        assert len(result.senders) == 2
+
+    @pytest.mark.asyncio
+    async def test_include_service_detection(self):
+        spf = SPFResult(
+            exists=True,
+            raw="v=spf1 include:_spf.google.com include:sendgrid.net -all",
+            includes=["_spf.google.com", "sendgrid.net"],
+        )
+        google_spf = "v=spf1 ip4:35.190.247.0/24 ~all"
+        sendgrid_spf = "v=spf1 ip4:167.89.0.0/17 ~all"
+
+        def mock_resolve(domain):
+            if "google" in domain:
+                return google_spf
+            if "sendgrid" in domain:
+                return sendgrid_spf
+            return None
+
+        with patch("src.passive_intel._resolve_spf_record", side_effect=mock_resolve):
+            with patch("src.passive_intel._cymru_origin_lookup", return_value=None):
+                result = await enumerate_spf("example.com", spf)
+
+        assert "Google Workspace" in result.services_detected
+        assert "SendGrid" in result.services_detected
+        assert "35.190.247.0/24" in result.ip4_ranges
+        assert "167.89.0.0/17" in result.ip4_ranges
+
+    @pytest.mark.asyncio
+    async def test_dns_lookup_counting(self):
+        spf = SPFResult(
+            exists=True,
+            raw="v=spf1 include:a.com include:b.com include:c.com include:d.com a mx -all",
+            includes=["a.com", "b.com", "c.com", "d.com"],
+        )
+
+        counter = [0]
+        def mock_resolve(domain):
+            counter[0] += 1
+            suffix = counter[0]
+            return f"v=spf1 ip4:10.0.0.{suffix} include:child{suffix}a.com include:child{suffix}b.com -all"
+
+        with patch("src.passive_intel._resolve_spf_record", side_effect=mock_resolve):
+            with patch("src.passive_intel._cymru_origin_lookup", return_value=None):
+                result = await enumerate_spf("example.com", spf)
+
+        assert result.dns_lookup_count > 10
+        assert result.exceeds_lookup_limit is True
+
+    @pytest.mark.asyncio
+    async def test_redirect_mechanism(self):
+        spf = SPFResult(
+            exists=True,
+            raw="v=spf1 redirect=_spf.example.com",
+        )
+        redirect_spf = "v=spf1 ip4:192.0.2.0/24 -all"
+
+        def mock_resolve(domain):
+            if domain == "_spf.example.com":
+                return redirect_spf
+            return None
+
+        with patch("src.passive_intel._resolve_spf_record", side_effect=mock_resolve):
+            with patch("src.passive_intel._cymru_origin_lookup", return_value=None):
+                result = await enumerate_spf("example.com", spf)
+
+        assert "192.0.2.0/24" in result.ip4_ranges
+        assert len(result.include_tree) == 1
+
+    @pytest.mark.asyncio
+    async def test_ip_enrichment(self):
+        spf = SPFResult(
+            exists=True,
+            raw="v=spf1 ip4:198.51.100.1 -all",
+        )
+        with patch("src.passive_intel._cymru_origin_lookup", return_value="15169 | 198.51.100.0/24 | US | arin | 2012"):
+            with patch("src.passive_intel._cymru_asn_lookup", return_value="15169 | US | arin | 2012-01-01 | GOOGLE, US"):
+                result = await enumerate_spf("example.com", spf)
+
+        assert len(result.senders) == 1
+        sender = result.senders[0]
+        assert sender.ip == "198.51.100.1"
+        assert sender.asn == 15169
+        assert "GOOGLE" in sender.asn_name
+        assert sender.country_code == "US"
+        assert sender.provider == "Google Cloud"
+
+    @pytest.mark.asyncio
+    async def test_handles_dns_failure_gracefully(self):
+        spf = SPFResult(
+            exists=True,
+            raw="v=spf1 include:broken.example.com -all",
+            includes=["broken.example.com"],
+        )
+        with patch("src.passive_intel._resolve_spf_record", return_value=None):
+            result = await enumerate_spf("example.com", spf)
+
+        assert result.error is None
+        assert len(result.include_tree) == 1
+        assert result.include_tree[0].error is not None
+
+    @pytest.mark.asyncio
+    async def test_ipv6_ranges_collected(self):
+        spf = SPFResult(
+            exists=True,
+            raw="v=spf1 ip6:2001:db8::/32 ip4:10.0.0.1 -all",
+        )
+        with patch("src.passive_intel._cymru_origin_lookup", return_value=None):
+            result = await enumerate_spf("example.com", spf)
+
+        assert "2001:db8::/32" in result.ip6_ranges
+        assert "10.0.0.1" in result.ip4_ranges
+
+
+# ---------------------------------------------------------------------------
+# FAIR signal — SPF lookup limit exceeded
+# ---------------------------------------------------------------------------
+
+class TestFAIRSPFLookupLimit:
+    def test_exceeds_limit_fires_signal(self):
+        result = DomainResult(
+            target="https://example.com",
+            dns=DNSGroup(email_security=EmailSecurityResult(
+                domain="example.com",
+                spf=SPFResult(
+                    exists=True,
+                    raw="v=spf1 include:a include:b -all",
+                    intel=SPFIntelResult(
+                        domain="example.com",
+                        dns_lookup_count=14,
+                        exceeds_lookup_limit=True,
+                    ),
+                ),
+                grade="C",
+            )),
+        )
+        signals = compute_fair_signals(result, scan_mode="full")
+        vuln_names = [s.name for s in signals.vulnerability.signals]
+        assert "spf_lookup_limit_exceeded" in vuln_names
+
+        sig = next(s for s in signals.vulnerability.signals if s.name == "spf_lookup_limit_exceeded")
+        assert sig.score == 65
+        assert "14" in sig.evidence[0]
+
+    def test_under_limit_no_signal(self):
+        result = DomainResult(
+            target="https://example.com",
+            dns=DNSGroup(email_security=EmailSecurityResult(
+                domain="example.com",
+                spf=SPFResult(
+                    exists=True,
+                    raw="v=spf1 include:a -all",
+                    intel=SPFIntelResult(
+                        domain="example.com",
+                        dns_lookup_count=5,
+                        exceeds_lookup_limit=False,
+                    ),
+                ),
+                grade="B",
+            )),
+        )
+        signals = compute_fair_signals(result, scan_mode="full")
+        vuln_names = [s.name for s in signals.vulnerability.signals]
+        assert "spf_lookup_limit_exceeded" not in vuln_names
+
+    def test_no_intel_no_signal(self):
+        result = DomainResult(
+            target="https://example.com",
+            dns=DNSGroup(email_security=EmailSecurityResult(
+                domain="example.com",
+                spf=SPFResult(exists=True, raw="v=spf1 -all"),
+                grade="A",
+            )),
+        )
+        signals = compute_fair_signals(result, scan_mode="full")
+        vuln_names = [s.name for s in signals.vulnerability.signals]
+        assert "spf_lookup_limit_exceeded" not in vuln_names

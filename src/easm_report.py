@@ -665,6 +665,64 @@ def _classify_email_security(result: DomainResult) -> list[PrioritizedFinding]:
             recommended_action="Verify DKIM is configured with your email provider. Non-standard selectors may exist.",
             source_field="passive_intel.email_security",
         ))
+
+    # SPF deep intel findings.
+    spf_intel = es.spf.intel
+    if spf_intel:
+        if spf_intel.exceeds_lookup_limit:
+            findings.append(PrioritizedFinding(
+                id="spf_lookup_limit_exceeded",
+                title=f"SPF exceeds 10-lookup limit ({spf_intel.dns_lookup_count} lookups)",
+                category="email_security",
+                severity="medium",
+                classification=FindingClassification.confirmed_issue,
+                confidence="high",
+                owner=FindingOwner.customer,
+                why_it_matters="RFC 7208 limits SPF to 10 DNS lookups. Exceeding this causes receiving servers to return permerror, breaking email authentication.",
+                business_impact="Email delivery failures and SPF bypass",
+                evidence=[f"SPF chain requires {spf_intel.dns_lookup_count} DNS lookups (limit: 10)"],
+                recommended_action="Flatten SPF includes by replacing nested includes with direct ip4/ip6 mechanisms, or use an SPF flattening service.",
+                source_field="passive_intel.email_security.spf.intel",
+            ))
+
+        if spf_intel.services_detected:
+            findings.append(PrioritizedFinding(
+                id="spf_services_enumerated",
+                title=f"{len(spf_intel.services_detected)} email service(s) identified via SPF",
+                category="email_security",
+                severity="info",
+                classification=FindingClassification.informational,
+                confidence="high",
+                owner=FindingOwner.informational,
+                why_it_matters="SPF includes reveal third-party email services used by the organisation.",
+                business_impact="Attack surface awareness — each service is a potential phishing vector",
+                evidence=[f"Services: {', '.join(spf_intel.services_detected)}"],
+                recommended_action="Audit whether all listed services are still actively used. Remove unused includes.",
+                source_field="passive_intel.email_security.spf.intel",
+            ))
+
+        if spf_intel.senders:
+            countries = sorted({s.country_code for s in spf_intel.senders if s.country_code})
+            providers = sorted({s.provider for s in spf_intel.senders if s.provider})
+            findings.append(PrioritizedFinding(
+                id="spf_senders_enumerated",
+                title=f"{len(spf_intel.senders)} sender IP(s) resolved from SPF chain",
+                category="email_security",
+                severity="info",
+                classification=FindingClassification.informational,
+                confidence="high",
+                owner=FindingOwner.informational,
+                why_it_matters="SPF-authorized IP addresses reveal email sending infrastructure and hosting providers.",
+                business_impact="Infrastructure intelligence for security assessment",
+                evidence=[
+                    f"IP ranges: {len(spf_intel.ip4_ranges)} IPv4, {len(spf_intel.ip6_ranges)} IPv6",
+                    *(f"Provider: {p}" for p in providers[:5]),
+                    *(f"Country: {c}" for c in countries[:5]),
+                ],
+                recommended_action="Review authorised sender list for unexpected or unused IP ranges.",
+                source_field="passive_intel.email_security.spf.intel",
+            ))
+
     return findings
 
 
