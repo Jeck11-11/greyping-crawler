@@ -723,6 +723,40 @@ def _classify_email_security(result: DomainResult) -> list[PrioritizedFinding]:
                 source_field="passive_intel.email_security.spf.intel",
             ))
 
+    # MTA-STS
+    if not es.mta_sts.exists:
+        findings.append(PrioritizedFinding(
+            id="email_no_mta_sts",
+            title="No MTA-STS policy configured",
+            category="email_security",
+            severity="low",
+            classification=FindingClassification.informational,
+            confidence="high",
+            owner=FindingOwner.customer,
+            why_it_matters="MTA-STS enforces TLS for inbound email, preventing downgrade attacks.",
+            business_impact="Email in transit may be intercepted via TLS stripping",
+            evidence=["No _mta-sts TXT record found"],
+            recommended_action="Publish an MTA-STS policy to enforce TLS for inbound SMTP connections.",
+            source_field="passive_intel.email_security",
+        ))
+
+    # BIMI
+    if not es.bimi.exists:
+        findings.append(PrioritizedFinding(
+            id="email_no_bimi",
+            title="No BIMI record configured",
+            category="email_security",
+            severity="info",
+            classification=FindingClassification.informational,
+            confidence="high",
+            owner=FindingOwner.not_actionable,
+            why_it_matters="BIMI displays your brand logo in email clients, improving trust and recognition.",
+            business_impact="Missed brand visibility in email clients that support BIMI",
+            evidence=["No default._bimi TXT record found"],
+            recommended_action="Consider adding a BIMI record with your brand logo SVG and optional VMC certificate.",
+            source_field="passive_intel.email_security",
+        ))
+
     return findings
 
 
@@ -779,6 +813,86 @@ def _classify_dns_findings(result: DomainResult) -> list[PrioritizedFinding]:
             business_impact="Accessibility gap for IPv6-only networks",
             evidence=["No AAAA records resolved"],
             recommended_action="Consider adding AAAA records if your hosting supports IPv6.",
+            source_field="passive_intel.dns",
+        ))
+
+    if dns.hinfo_records:
+        findings.append(PrioritizedFinding(
+            id="dns_hinfo_exposed",
+            title="HINFO records expose host OS/hardware details",
+            category="dns",
+            severity="medium",
+            classification=FindingClassification.confirmed_issue,
+            confidence="high",
+            owner=FindingOwner.customer,
+            why_it_matters="HINFO records reveal CPU and OS details, aiding targeted attacks.",
+            business_impact="Information leakage enables targeted exploitation",
+            evidence=[f"{r.cpu} / {r.os}" for r in dns.hinfo_records[:3]],
+            recommended_action="Remove HINFO records unless explicitly required.",
+            source_field="passive_intel.dns",
+        ))
+
+    if dns.loc_records:
+        findings.append(PrioritizedFinding(
+            id="dns_loc_exposed",
+            title="LOC records expose physical location",
+            category="dns",
+            severity="low",
+            classification=FindingClassification.informational,
+            confidence="high",
+            owner=FindingOwner.customer,
+            why_it_matters="LOC records publish geographic coordinates, potentially revealing data center or office locations.",
+            business_impact="Physical security intelligence leakage",
+            evidence=[f"lat={r.latitude:.4f}, lon={r.longitude:.4f}" for r in dns.loc_records[:3]],
+            recommended_action="Remove LOC records if physical location should not be publicly disclosed.",
+            source_field="passive_intel.dns",
+        ))
+
+    if dns.rp_records:
+        findings.append(PrioritizedFinding(
+            id="dns_rp_exposed",
+            title="RP records expose responsible person contact",
+            category="dns",
+            severity="low",
+            classification=FindingClassification.informational,
+            confidence="high",
+            owner=FindingOwner.customer,
+            why_it_matters="RP records reveal administrator email addresses, useful for social engineering.",
+            business_impact="Contact information leakage for targeted phishing",
+            evidence=[f"mbox={r.mbox}" for r in dns.rp_records[:3]],
+            recommended_action="Remove RP records if admin contacts should not be publicly exposed.",
+            source_field="passive_intel.dns",
+        ))
+
+    if dns.ds_records:
+        findings.append(PrioritizedFinding(
+            id="dns_ds_records_found",
+            title="DNSSEC delegation signer (DS) records found",
+            category="dns",
+            severity="info",
+            classification=FindingClassification.informational,
+            confidence="high",
+            owner=FindingOwner.not_actionable,
+            why_it_matters="DS records complete the DNSSEC chain of trust from the parent zone.",
+            business_impact="Strong DNS integrity protection",
+            evidence=[f"key_tag={r.key_tag}, algo={r.algorithm}" for r in dns.ds_records[:3]],
+            recommended_action="No action needed — this is a positive finding.",
+            source_field="passive_intel.dns",
+        ))
+
+    if dns.naptr_records:
+        findings.append(PrioritizedFinding(
+            id="dns_naptr_found",
+            title="NAPTR records reveal service infrastructure",
+            category="dns",
+            severity="info",
+            classification=FindingClassification.informational,
+            confidence="high",
+            owner=FindingOwner.not_actionable,
+            why_it_matters="NAPTR records reveal SIP/VoIP and other service endpoints.",
+            business_impact="Infrastructure intelligence — SIP/VoIP services exposed",
+            evidence=[f"service={r.service}, replacement={r.replacement}" for r in dns.naptr_records[:3]],
+            recommended_action="Ensure exposed services are properly secured.",
             source_field="passive_intel.dns",
         ))
 

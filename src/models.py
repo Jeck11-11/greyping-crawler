@@ -472,6 +472,63 @@ class CAARecord(BaseModel):
     ttl: int = 0
 
 
+class TLSARecord(BaseModel):
+    usage: int = Field(0, description="Certificate usage: 0=CA, 1=EE, 2=Trust anchor, 3=Domain-issued.")
+    selector: int = Field(0, description="Selector: 0=full cert, 1=SubjectPublicKeyInfo.")
+    matching_type: int = Field(0, description="Matching type: 0=exact, 1=SHA-256, 2=SHA-512.")
+    certificate_data: str = Field("", description="Hex-encoded certificate association data.")
+    port: int = Field(0, description="Port from the TLSA query name (e.g. 25, 443).")
+    protocol: str = Field("tcp", description="Protocol from the TLSA query name.")
+    ttl: int = 0
+
+
+class SSHFPRecord(BaseModel):
+    algorithm: int = Field(0, description="Key algorithm: 1=RSA, 2=DSA, 3=ECDSA, 4=Ed25519.")
+    fingerprint_type: int = Field(0, description="Hash type: 1=SHA-1, 2=SHA-256.")
+    fingerprint: str = Field("", description="Hex-encoded key fingerprint.")
+    ttl: int = 0
+
+
+class DSRecord(BaseModel):
+    key_tag: int = 0
+    algorithm: int = Field(0, description="DNSSEC algorithm number.")
+    digest_type: int = Field(0, description="Digest type: 1=SHA-1, 2=SHA-256, 4=SHA-384.")
+    digest: str = Field("", description="Hex-encoded digest.")
+    ttl: int = 0
+
+
+class NAPTRRecord(BaseModel):
+    order: int = 0
+    preference: int = 0
+    flags: str = Field("", description="NAPTR flags (e.g. 'S', 'A', 'U').")
+    service: str = Field("", description="Service field (e.g. 'SIP+D2U', 'E2U+sip').")
+    regexp: str = Field("", description="Regular expression for URI rewriting.")
+    replacement: str = Field("", description="Replacement domain name.")
+    ttl: int = 0
+
+
+class LOCRecord(BaseModel):
+    latitude: float = Field(0.0, description="Latitude in decimal degrees.")
+    longitude: float = Field(0.0, description="Longitude in decimal degrees.")
+    altitude: float = Field(0.0, description="Altitude in meters above sea level.")
+    size: float = Field(0.0, description="Diameter of sphere enclosing the location (meters).")
+    horizontal_precision: float = Field(0.0, description="Horizontal precision (meters).")
+    vertical_precision: float = Field(0.0, description="Vertical precision (meters).")
+    ttl: int = 0
+
+
+class RPRecord(BaseModel):
+    mbox: str = Field("", description="Email address of responsible person (encoded as DNS name).")
+    txt_domain: str = Field("", description="Domain name with TXT record containing additional info.")
+    ttl: int = 0
+
+
+class HINFORecord(BaseModel):
+    cpu: str = Field("", description="CPU type string.")
+    os: str = Field("", description="Operating system string.")
+    ttl: int = 0
+
+
 class DNSResult(BaseModel):
     domain: str
     a_records: list[ARecord] = Field(default_factory=list)
@@ -485,6 +542,13 @@ class DNSResult(BaseModel):
     caa_records: list[CAARecord] = Field(default_factory=list, description="CAA records — which CAs may issue certs.")
     ptr_records: list[str] = Field(default_factory=list, description="Reverse DNS lookup results for A records.")
     dnssec: bool | None = Field(default=None, description="True if DNSSEC is enabled (DNSKEY found).")
+    tlsa_records: list[TLSARecord] = Field(default_factory=list, description="DANE/TLSA certificate association records.")
+    sshfp_records: list[SSHFPRecord] = Field(default_factory=list, description="SSH key fingerprints published in DNS.")
+    ds_records: list[DSRecord] = Field(default_factory=list, description="DNSSEC delegation signer records.")
+    naptr_records: list[NAPTRRecord] = Field(default_factory=list, description="Naming authority pointer records (SIP/VoIP).")
+    loc_records: list[LOCRecord] = Field(default_factory=list, description="Geographic location records.")
+    rp_records: list[RPRecord] = Field(default_factory=list, description="Responsible person records.")
+    hinfo_records: list[HINFORecord] = Field(default_factory=list, description="Host information records (CPU/OS).")
     error: str | None = None
 
 
@@ -559,11 +623,30 @@ class DKIMResult(BaseModel):
     issues: list[str] = Field(default_factory=list)
 
 
+class MTASTSResult(BaseModel):
+    raw: str | None = None
+    exists: bool = False
+    version: str = Field(default="", description="MTA-STS version (e.g. 'STSv1').")
+    sts_id: str = Field(default="", description="MTA-STS policy ID.")
+    issues: list[str] = Field(default_factory=list)
+
+
+class BIMIResult(BaseModel):
+    raw: str | None = None
+    exists: bool = False
+    version: str = Field(default="", description="BIMI version (e.g. 'BIMI1').")
+    logo_url: str = Field(default="", description="URL to the brand logo SVG (l= tag).")
+    authority_url: str = Field(default="", description="URL to the VMC certificate (a= tag).")
+    issues: list[str] = Field(default_factory=list)
+
+
 class EmailSecurityResult(BaseModel):
     domain: str
     spf: SPFResult = Field(default_factory=SPFResult)
     dmarc: DMARCResult = Field(default_factory=DMARCResult)
     dkim: DKIMResult = Field(default_factory=DKIMResult)
+    mta_sts: MTASTSResult = Field(default_factory=MTASTSResult)
+    bimi: BIMIResult = Field(default_factory=BIMIResult)
     mail_providers: list[str] = Field(
         default_factory=list,
         description="Inferred mail providers from MX records (e.g. 'Google Workspace', 'Microsoft 365').",

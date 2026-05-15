@@ -52,6 +52,13 @@ _SKIP_NAMES = frozenset({
     "caa_records",
     "ptr_records",
     "cname_chain",
+    "tlsa_records",
+    "sshfp_records",
+    "ds_records",
+    "naptr_records",
+    "loc_records",
+    "rp_records",
+    "hinfo_records",
     # Passive intel lists
     "issuers",
     "recent_snapshots",

@@ -31,17 +31,24 @@ from .models import (
     ARecord,
     AAAARecord,
     ASNInfo,
+    BIMIResult,
     CAARecord,
     CNAMERecord,
     CTResult,
     DKIMResult,
     DMARCResult,
     DNSResult,
+    DSRecord,
     EmailSecurityResult,
+    HINFORecord,
     IPEnrichmentResult,
+    LOCRecord,
+    MTASTSResult,
     MXRecordFull,
+    NAPTRRecord,
     NSRecord,
     RDAPResult,
+    RPRecord,
     SOARecord,
     SPFIncludeNode,
     SPFIntelResult,
@@ -49,6 +56,8 @@ from .models import (
     SPFResult,
     SPFSenderInfo,
     SRVRecord,
+    SSHFPRecord,
+    TLSARecord,
     TXTRecord,
     WaybackResult,
 )
@@ -160,8 +169,145 @@ def _check_dnssec(domain: str) -> bool | None:
         return None
 
 
+_TLSA_PORTS = [
+    (25, "tcp"),
+    (443, "tcp"),
+    (993, "tcp"),
+    (995, "tcp"),
+]
+
+
+def _resolve_tlsa(domain: str) -> list[TLSARecord]:
+    records: list[TLSARecord] = []
+    for port, proto in _TLSA_PORTS:
+        try:
+            answers = dns.resolver.resolve(f"_{port}._{proto}.{domain}", "TLSA", lifetime=DNS_LIFETIME)
+            ttl = answers.rrset.ttl if hasattr(answers, "rrset") else 0
+            for rr in answers:
+                records.append(TLSARecord(
+                    usage=rr.usage,
+                    selector=rr.selector,
+                    matching_type=rr.mtype,
+                    certificate_data=rr.cert.hex(),
+                    port=port,
+                    protocol=proto,
+                    ttl=ttl,
+                ))
+        except Exception:
+            continue
+    return records
+
+
+def _resolve_sshfp(domain: str) -> list[SSHFPRecord]:
+    try:
+        answers = dns.resolver.resolve(domain, "SSHFP", lifetime=DNS_LIFETIME)
+        ttl = answers.rrset.ttl if hasattr(answers, "rrset") else 0
+        return [
+            SSHFPRecord(
+                algorithm=rr.algorithm,
+                fingerprint_type=rr.fp_type,
+                fingerprint=rr.fingerprint.hex(),
+                ttl=ttl,
+            )
+            for rr in answers
+        ]
+    except Exception:
+        return []
+
+
+def _resolve_ds(domain: str) -> list[DSRecord]:
+    try:
+        answers = dns.resolver.resolve(domain, "DS", lifetime=DNS_LIFETIME)
+        ttl = answers.rrset.ttl if hasattr(answers, "rrset") else 0
+        return [
+            DSRecord(
+                key_tag=rr.key_tag,
+                algorithm=rr.algorithm,
+                digest_type=rr.digest_type,
+                digest=rr.digest.hex(),
+                ttl=ttl,
+            )
+            for rr in answers
+        ]
+    except Exception:
+        return []
+
+
+def _resolve_naptr(domain: str) -> list[NAPTRRecord]:
+    try:
+        answers = dns.resolver.resolve(domain, "NAPTR", lifetime=DNS_LIFETIME)
+        ttl = answers.rrset.ttl if hasattr(answers, "rrset") else 0
+        return [
+            NAPTRRecord(
+                order=rr.order,
+                preference=rr.preference,
+                flags=rr.flags.decode("ascii", errors="replace") if isinstance(rr.flags, bytes) else str(rr.flags),
+                service=rr.service.decode("ascii", errors="replace") if isinstance(rr.service, bytes) else str(rr.service),
+                regexp=rr.regexp.decode("utf-8", errors="replace") if isinstance(rr.regexp, bytes) else str(rr.regexp),
+                replacement=str(rr.replacement).rstrip("."),
+                ttl=ttl,
+            )
+            for rr in answers
+        ]
+    except Exception:
+        return []
+
+
+def _resolve_loc(domain: str) -> list[LOCRecord]:
+    try:
+        answers = dns.resolver.resolve(domain, "LOC", lifetime=DNS_LIFETIME)
+        ttl = answers.rrset.ttl if hasattr(answers, "rrset") else 0
+        return [
+            LOCRecord(
+                latitude=rr.float_latitude,
+                longitude=rr.float_longitude,
+                altitude=(rr.altitude / 100.0) - 100000.0,
+                size=rr.size / 100.0,
+                horizontal_precision=rr.horizontal_precision / 100.0,
+                vertical_precision=rr.vertical_precision / 100.0,
+                ttl=ttl,
+            )
+            for rr in answers
+        ]
+    except Exception:
+        return []
+
+
+def _resolve_rp(domain: str) -> list[RPRecord]:
+    try:
+        answers = dns.resolver.resolve(domain, "RP", lifetime=DNS_LIFETIME)
+        ttl = answers.rrset.ttl if hasattr(answers, "rrset") else 0
+        return [
+            RPRecord(
+                mbox=str(rr.mbox).rstrip(".").replace(".", "@", 1),
+                txt_domain=str(rr.txt).rstrip("."),
+                ttl=ttl,
+            )
+            for rr in answers
+        ]
+    except Exception:
+        return []
+
+
+def _resolve_hinfo(domain: str) -> list[HINFORecord]:
+    try:
+        answers = dns.resolver.resolve(domain, "HINFO", lifetime=DNS_LIFETIME)
+        ttl = answers.rrset.ttl if hasattr(answers, "rrset") else 0
+        return [
+            HINFORecord(
+                cpu=rr.cpu.decode("utf-8", errors="replace") if isinstance(rr.cpu, bytes) else str(rr.cpu),
+                os=rr.os.decode("utf-8", errors="replace") if isinstance(rr.os, bytes) else str(rr.os),
+                ttl=ttl,
+            )
+            for rr in answers
+        ]
+    except Exception:
+        return []
+
+
 async def query_dns(domain: str, *, timeout: int = PASSIVE_TIMEOUT) -> DNSResult:
-    """Resolve A, AAAA, MX, NS, TXT, CNAME, SOA, SRV, CAA, PTR, and DNSSEC.
+    """Resolve A, AAAA, MX, NS, TXT, CNAME, SOA, SRV, CAA, PTR, DNSSEC,
+    TLSA, SSHFP, DS, NAPTR, LOC, RP, and HINFO.
 
     A/AAAA use the system resolver (stdlib socket) for maximum compat.
     All other types use dnspython.
@@ -198,14 +344,25 @@ async def query_dns(domain: str, *, timeout: int = PASSIVE_TIMEOUT) -> DNSResult
         srv_task = loop.run_in_executor(None, _resolve_srv, domain)
         caa_task = loop.run_in_executor(None, _resolve_caa, domain)
         dnssec_task = loop.run_in_executor(None, _check_dnssec, domain)
+        tlsa_task = loop.run_in_executor(None, _resolve_tlsa, domain)
+        sshfp_task = loop.run_in_executor(None, _resolve_sshfp, domain)
+        ds_task = loop.run_in_executor(None, _resolve_ds, domain)
+        naptr_task = loop.run_in_executor(None, _resolve_naptr, domain)
+        loc_task = loop.run_in_executor(None, _resolve_loc, domain)
+        rp_task = loop.run_in_executor(None, _resolve_rp, domain)
+        hinfo_task = loop.run_in_executor(None, _resolve_hinfo, domain)
 
         (
             a_records, aaaa_records, mx_raw, ns_raw, txt_raw, cname_raw,
             soa_record, srv_records, caa_records, dnssec,
+            tlsa_records, sshfp_records, ds_records, naptr_records,
+            loc_records, rp_records, hinfo_records,
         ) = await asyncio.wait_for(
             asyncio.gather(
                 a_task, aaaa_task, mx_task, ns_task, txt_task, cname_task,
                 soa_task, srv_task, caa_task, dnssec_task,
+                tlsa_task, sshfp_task, ds_task, naptr_task,
+                loc_task, rp_task, hinfo_task,
             ),
             timeout=timeout,
         )
@@ -281,6 +438,13 @@ async def query_dns(domain: str, *, timeout: int = PASSIVE_TIMEOUT) -> DNSResult
             caa_records=caa_records,
             ptr_records=[r for r in ptr_results if isinstance(r, str) and r],
             dnssec=dnssec,
+            tlsa_records=tlsa_records,
+            sshfp_records=sshfp_records,
+            ds_records=ds_records,
+            naptr_records=naptr_records,
+            loc_records=loc_records,
+            rp_records=rp_records,
+            hinfo_records=hinfo_records,
         )
     except asyncio.TimeoutError:
         return DNSResult(domain=domain, error="DNS resolution timed out")
@@ -910,6 +1074,55 @@ def _check_dkim(domain: str) -> DKIMResult:
     )
 
 
+def _check_mta_sts(domain: str) -> MTASTSResult:
+    try:
+        answers = dns.resolver.resolve(f"_mta-sts.{domain}", "TXT", lifetime=DNS_LIFETIME)
+        for rr in answers:
+            txt = b"".join(rr.strings).decode("utf-8", errors="replace")
+            if txt.lower().startswith("v=stsv1"):
+                version = ""
+                sts_id = ""
+                for part in txt.split(";"):
+                    part = part.strip()
+                    if part.lower().startswith("v="):
+                        version = part.split("=", 1)[1].strip()
+                    elif part.lower().startswith("id="):
+                        sts_id = part.split("=", 1)[1].strip()
+                return MTASTSResult(raw=txt, exists=True, version=version, sts_id=sts_id)
+    except Exception:
+        pass
+    return MTASTSResult(exists=False, issues=["No MTA-STS TXT record found"])
+
+
+def _check_bimi(domain: str) -> BIMIResult:
+    try:
+        answers = dns.resolver.resolve(f"default._bimi.{domain}", "TXT", lifetime=DNS_LIFETIME)
+        for rr in answers:
+            txt = b"".join(rr.strings).decode("utf-8", errors="replace")
+            if txt.lower().startswith("v=bimi1"):
+                version = ""
+                logo_url = ""
+                authority_url = ""
+                for part in txt.split(";"):
+                    part = part.strip()
+                    if part.lower().startswith("v="):
+                        version = part.split("=", 1)[1].strip()
+                    elif part.lower().startswith("l="):
+                        logo_url = part.split("=", 1)[1].strip()
+                    elif part.lower().startswith("a="):
+                        authority_url = part.split("=", 1)[1].strip()
+                issues: list[str] = []
+                if not logo_url:
+                    issues.append("BIMI record has no logo URL (l= tag)")
+                return BIMIResult(
+                    raw=txt, exists=True, version=version,
+                    logo_url=logo_url, authority_url=authority_url, issues=issues,
+                )
+    except Exception:
+        pass
+    return BIMIResult(exists=False, issues=["No BIMI record found"])
+
+
 def _detect_mail_providers(mx_records: list[MXRecord]) -> list[str]:
     """Map MX hostnames to friendly provider names."""
     providers: set[str] = set()
@@ -924,6 +1137,7 @@ def _detect_mail_providers(mx_records: list[MXRecord]) -> list[str]:
 
 def _grade_email_security(
     spf: SPFResult, dmarc: DMARCResult, dkim: DKIMResult,
+    mta_sts: MTASTSResult | None = None, bimi: BIMIResult | None = None,
 ) -> str:
     """Assign an A-F grade to overall email security posture."""
     score = 0
@@ -951,6 +1165,14 @@ def _grade_email_security(
     # DKIM contribution (0-30)
     if dkim.selectors_found:
         score += 30
+
+    # MTA-STS bonus (0-10)
+    if mta_sts and mta_sts.exists:
+        score += 10
+
+    # BIMI bonus (0-5)
+    if bimi and bimi.exists and bimi.logo_url:
+        score += 5
 
     if score >= 90:
         return "A"
@@ -982,9 +1204,11 @@ async def query_email_security(
         )
         # DKIM selector probing (multiple DNS queries, heavier).
         dkim_task = _bounded_executor(_check_dkim, domain)
+        mta_sts_task = _bounded_executor(_check_mta_sts, domain)
+        bimi_task = _bounded_executor(_check_bimi, domain)
 
-        domain_txts_raw, dmarc_txts_raw, dkim = await asyncio.wait_for(
-            asyncio.gather(txt_task, dmarc_task, dkim_task),
+        domain_txts_raw, dmarc_txts_raw, dkim, mta_sts, bimi = await asyncio.wait_for(
+            asyncio.gather(txt_task, dmarc_task, dkim_task, mta_sts_task, bimi_task),
             timeout=timeout,
         )
 
@@ -1000,13 +1224,15 @@ async def query_email_security(
         spf = _parse_spf(domain_txts)
         dmarc = _parse_dmarc(dmarc_txts)
         providers = _detect_mail_providers(mx_records or [])
-        grade = _grade_email_security(spf, dmarc, dkim)
+        grade = _grade_email_security(spf, dmarc, dkim, mta_sts, bimi)
 
         return EmailSecurityResult(
             domain=domain,
             spf=spf,
             dmarc=dmarc,
             dkim=dkim,
+            mta_sts=mta_sts,
+            bimi=bimi,
             mail_providers=providers,
             grade=grade,
         )

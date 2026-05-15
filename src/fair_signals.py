@@ -394,6 +394,15 @@ def _build_vulnerability(result: DomainResult) -> FAIRFactor:
                 ],
             ))
 
+        # MTA-STS missing — email vulnerable to TLS downgrade.
+        if not email_sec.mta_sts.exists and (email_sec.spf.exists or email_sec.dmarc.exists):
+            signals.append(FAIRSignal(
+                name="mta_sts_missing",
+                score=30,
+                weight=0.5,
+                evidence=["No MTA-STS policy — inbound email vulnerable to TLS downgrade"],
+            ))
+
     # Nuclei vulnerability findings.
     nuclei_findings = (
         result.nuclei.findings if result.nuclei and result.nuclei.findings else []
@@ -738,6 +747,8 @@ def _build_control_strength(result: DomainResult) -> FAIRFactor:
                 f"SPF={'yes' if email_sec.spf.exists else 'no'}",
                 f"DMARC={email_sec.dmarc.policy or 'missing'}",
                 f"DKIM={len(email_sec.dkim.selectors_found)} selector(s) found",
+                f"MTA-STS={'yes' if email_sec.mta_sts.exists else 'no'}",
+                f"BIMI={'yes' if email_sec.bimi.exists else 'no'}",
             ],
         ))
 
@@ -774,6 +785,15 @@ def _build_control_strength(result: DomainResult) -> FAIRFactor:
             score=80 if dns.dnssec else 15,
             weight=0.7,
             evidence=["DNSSEC enabled" if dns.dnssec else "DNSSEC not enabled"],
+        ))
+
+    # DS + DNSKEY = complete DNSSEC chain of trust.
+    if dns and not dns.error and dns.ds_records and dns.dnssec:
+        signals.append(FAIRSignal(
+            name="dnssec_full_chain",
+            score=90,
+            weight=0.5,
+            evidence=[f"DNSSEC + {len(dns.ds_records)} DS record(s) = complete chain of trust"],
         ))
 
     # CAA records — restrict which CAs can issue certificates.
@@ -898,6 +918,24 @@ def _build_loss_magnitude(result: DomainResult) -> FAIRFactor:
             weight=1.1,
             evidence=[f"{i.ioc_type}" for i in sensitive_iocs[:3]],
         ))
+
+    # DNS information leakage — HINFO/LOC/RP records expose sensitive details.
+    dns = result.dns.records if result.dns else None
+    if dns and not dns.error:
+        info_leak_evidence: list[str] = []
+        if dns.hinfo_records:
+            info_leak_evidence.append(f"HINFO exposes OS/hardware: {dns.hinfo_records[0].cpu}/{dns.hinfo_records[0].os}")
+        if dns.loc_records:
+            info_leak_evidence.append("LOC exposes physical coordinates")
+        if dns.rp_records:
+            info_leak_evidence.append(f"RP exposes admin contact: {dns.rp_records[0].mbox}")
+        if info_leak_evidence:
+            signals.append(FAIRSignal(
+                name="dns_information_leakage",
+                score=min(100, 25 * len(info_leak_evidence)),
+                weight=0.6,
+                evidence=info_leak_evidence,
+            ))
 
     # Broad email surface = broader phishing blast radius if credentials leak.
     email_count = len(result.emails)

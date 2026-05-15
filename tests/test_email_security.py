@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from src.app import app
 from src.models import (
+    BIMIResult,
     CTResult,
     DKIMResult,
     DMARCResult,
@@ -14,6 +15,7 @@ from src.models import (
     DNSResult,
     DomainResult,
     EmailSecurityResult,
+    MTASTSResult,
     MXRecord,
     PassiveIntelSlim,
     RDAPResult,
@@ -24,6 +26,8 @@ from src.models import (
 )
 from src.fair_signals import compute_fair_signals
 from src.passive_intel import (
+    _check_bimi,
+    _check_mta_sts,
     _detect_mail_providers,
     _grade_email_security,
     _map_include_to_service,
@@ -573,3 +577,136 @@ class TestFAIRSPFLookupLimit:
         signals = compute_fair_signals(result, scan_mode="full")
         vuln_names = [s.name for s in signals.vulnerability.signals]
         assert "spf_lookup_limit_exceeded" not in vuln_names
+
+
+# ---------------------------------------------------------------------------
+# MTA-STS
+# ---------------------------------------------------------------------------
+
+class TestMTASTS:
+    def test_found(self):
+        from types import SimpleNamespace
+        rr = SimpleNamespace(strings=[b"v=STSv1; id=20240101T000000Z"])
+
+        def fake_resolve(name, rdtype, lifetime=None):
+            answer = unittest.mock.MagicMock()
+            answer.__iter__ = unittest.mock.MagicMock(return_value=iter([rr]))
+            return answer
+
+        import unittest.mock
+        with patch("src.passive_intel.dns.resolver.resolve", side_effect=fake_resolve):
+            result = _check_mta_sts("example.com")
+
+        assert result.exists is True
+        assert result.version == "STSv1"
+        assert result.sts_id == "20240101T000000Z"
+        assert result.issues == []
+
+    def test_not_found(self):
+        import dns.resolver
+        with patch("src.passive_intel.dns.resolver.resolve", side_effect=dns.resolver.NXDOMAIN()):
+            result = _check_mta_sts("example.com")
+
+        assert result.exists is False
+        assert len(result.issues) == 1
+
+
+# ---------------------------------------------------------------------------
+# BIMI
+# ---------------------------------------------------------------------------
+
+class TestBIMI:
+    def test_with_logo(self):
+        from types import SimpleNamespace
+        rr = SimpleNamespace(strings=[b"v=BIMI1; l=https://example.com/logo.svg; a=https://example.com/vmc.pem"])
+
+        import unittest.mock
+        def fake_resolve(name, rdtype, lifetime=None):
+            answer = unittest.mock.MagicMock()
+            answer.__iter__ = unittest.mock.MagicMock(return_value=iter([rr]))
+            return answer
+
+        with patch("src.passive_intel.dns.resolver.resolve", side_effect=fake_resolve):
+            result = _check_bimi("example.com")
+
+        assert result.exists is True
+        assert result.version == "BIMI1"
+        assert result.logo_url == "https://example.com/logo.svg"
+        assert result.authority_url == "https://example.com/vmc.pem"
+        assert result.issues == []
+
+    def test_without_logo_has_issue(self):
+        from types import SimpleNamespace
+        rr = SimpleNamespace(strings=[b"v=BIMI1; l=; a="])
+
+        import unittest.mock
+        def fake_resolve(name, rdtype, lifetime=None):
+            answer = unittest.mock.MagicMock()
+            answer.__iter__ = unittest.mock.MagicMock(return_value=iter([rr]))
+            return answer
+
+        with patch("src.passive_intel.dns.resolver.resolve", side_effect=fake_resolve):
+            result = _check_bimi("example.com")
+
+        assert result.exists is True
+        assert result.logo_url == ""
+        assert any("no logo" in i.lower() for i in result.issues)
+
+    def test_not_found(self):
+        import dns.resolver
+        with patch("src.passive_intel.dns.resolver.resolve", side_effect=dns.resolver.NXDOMAIN()):
+            result = _check_bimi("example.com")
+        assert result.exists is False
+
+
+# ---------------------------------------------------------------------------
+# Grading with MTA-STS and BIMI bonuses
+# ---------------------------------------------------------------------------
+
+class TestGradingBonuses:
+    def test_mta_sts_bonus(self):
+        spf = SPFResult(exists=True, all_qualifier="-all")
+        dmarc = DMARCResult(exists=True, policy="reject")
+        dkim = DKIMResult(selectors_found=["google"])
+        grade_without = _grade_email_security(spf, dmarc, dkim)
+        grade_with = _grade_email_security(spf, dmarc, dkim, mta_sts=MTASTSResult(exists=True))
+        assert grade_with == "A"
+        # Without MTA-STS, score is 100 which is still A, but the score increases
+        assert grade_without == "A"  # SPF(30)+DMARC(40)+DKIM(30)=100 already A
+
+    def test_mta_sts_can_push_grade_up(self):
+        spf = SPFResult(exists=True, all_qualifier="~all")
+        dmarc = DMARCResult(exists=True, policy="quarantine")
+        dkim = DKIMResult(selectors_found=["google"])
+        # ~all(20) + quarantine(30) + dkim(30) = 80 → B
+        grade_without = _grade_email_security(spf, dmarc, dkim)
+        assert grade_without == "B"
+        # With MTA-STS: 80+10=90 → A
+        grade_with = _grade_email_security(spf, dmarc, dkim, mta_sts=MTASTSResult(exists=True))
+        assert grade_with == "A"
+
+    def test_bimi_bonus(self):
+        spf = SPFResult(exists=True, all_qualifier="~all")
+        dmarc = DMARCResult(exists=True, policy="quarantine")
+        dkim = DKIMResult(selectors_found=["google"])
+        # 80 + 10 (mta-sts) + 5 (bimi) = 95 → A
+        grade = _grade_email_security(
+            spf, dmarc, dkim,
+            mta_sts=MTASTSResult(exists=True),
+            bimi=BIMIResult(exists=True, logo_url="https://example.com/logo.svg"),
+        )
+        assert grade == "A"
+
+    def test_bimi_without_logo_no_bonus(self):
+        spf = SPFResult(exists=True, all_qualifier="-all")
+        dmarc = DMARCResult(exists=True, policy="quarantine")
+        dkim = DKIMResult(selectors_found=[])
+        # -all(30) + quarantine(30) = 60 → C
+        grade_without = _grade_email_security(spf, dmarc, dkim)
+        assert grade_without == "C"
+        # BIMI without logo should not add bonus
+        grade_with = _grade_email_security(
+            spf, dmarc, dkim,
+            bimi=BIMIResult(exists=True, logo_url=""),
+        )
+        assert grade_with == "C"
