@@ -11,12 +11,15 @@ from src.cloud_assets import (
     _PROVIDERS,
     _classify_response,
     _generate_candidates,
+    detect_cloud_services_from_dns,
+    detect_exposed_databases_from_dns,
     discover_cloud_assets,
 )
 from src.fair_signals import compute_fair_signals
 from src.models import (
     CloudAssetFinding,
     CloudAssetResult,
+    CloudServiceFinding,
     DomainResult,
 )
 
@@ -621,3 +624,356 @@ class TestFAIRExposedCloudStorage:
         bucket_signals = compute_fair_signals(with_bucket, scan_mode="full")
 
         assert bucket_signals.vulnerability.score > bare_signals.vulnerability.score
+
+
+# ---------------------------------------------------------------------------
+# New provider response classification
+# ---------------------------------------------------------------------------
+
+class TestClassifyResponseDigitalOceanSpaces:
+    def test_public(self):
+        body = '<?xml version="1.0"?><ListBucketResult><Name>test</Name></ListBucketResult>'
+        assert _classify_response(body, _PROVIDERS["digitalocean_spaces"]) == "public"
+
+    def test_private(self):
+        body = '<Error><Code>AccessDenied</Code></Error>'
+        assert _classify_response(body, _PROVIDERS["digitalocean_spaces"]) == "exists_private"
+
+    def test_not_found(self):
+        body = '<Error><Code>NoSuchBucket</Code></Error>'
+        assert _classify_response(body, _PROVIDERS["digitalocean_spaces"]) is None
+
+
+class TestClassifyResponseBackblazeB2:
+    def test_public(self):
+        body = '<?xml version="1.0"?><ListBucketResult><Name>test</Name></ListBucketResult>'
+        assert _classify_response(body, _PROVIDERS["backblaze_b2"]) == "public"
+
+    def test_private(self):
+        body = '<Error><Code>AccessDenied</Code></Error>'
+        assert _classify_response(body, _PROVIDERS["backblaze_b2"]) == "exists_private"
+
+    def test_not_found(self):
+        body = '<Error><Code>NoSuchBucket</Code></Error>'
+        assert _classify_response(body, _PROVIDERS["backblaze_b2"]) is None
+
+    def test_not_found_no_such_key(self):
+        body = '<Error><Code>NoSuchKey</Code></Error>'
+        assert _classify_response(body, _PROVIDERS["backblaze_b2"]) is None
+
+
+class TestClassifyResponseAlibabaOSS:
+    def test_public_list(self):
+        body = '<?xml version="1.0"?><ListBucketResult><Name>test</Name></ListBucketResult>'
+        assert _classify_response(body, _PROVIDERS["alibaba_oss"]) == "public"
+
+    def test_public_contents(self):
+        body = '<Contents><Key>file.txt</Key></Contents>'
+        assert _classify_response(body, _PROVIDERS["alibaba_oss"]) == "public"
+
+    def test_private(self):
+        body = '<Error><Code>AccessDenied</Code></Error>'
+        assert _classify_response(body, _PROVIDERS["alibaba_oss"]) == "exists_private"
+
+    def test_private_invalid_key(self):
+        body = '<Error><Code>InvalidAccessKeyId</Code></Error>'
+        assert _classify_response(body, _PROVIDERS["alibaba_oss"]) == "exists_private"
+
+    def test_not_found(self):
+        body = '<Error><Code>NoSuchBucket</Code></Error>'
+        assert _classify_response(body, _PROVIDERS["alibaba_oss"]) is None
+
+
+# ---------------------------------------------------------------------------
+# DNS-based cloud service detection
+# ---------------------------------------------------------------------------
+
+class _FakeCNAME:
+    def __init__(self, target: str):
+        self.target = target
+
+class _FakeMX:
+    def __init__(self, host: str):
+        self.host = host
+
+class _FakeTXT:
+    def __init__(self, data: str):
+        self.data = data
+
+
+class TestDetectCloudServicesFromDNS:
+    def test_cloudfront_cname(self):
+        records = [_FakeCNAME("d12345.cloudfront.net")]
+        findings = detect_cloud_services_from_dns(cname_records=records)
+        assert len(findings) == 1
+        assert findings[0].service == "aws_cloudfront"
+        assert findings[0].provider == "aws"
+        assert findings[0].record_type == "CNAME"
+
+    def test_azure_app_service_cname(self):
+        records = [_FakeCNAME("myapp.azurewebsites.net")]
+        findings = detect_cloud_services_from_dns(cname_records=records)
+        assert len(findings) == 1
+        assert findings[0].service == "azure_app_service"
+        assert findings[0].provider == "azure"
+
+    def test_multiple_cname_services(self):
+        records = [
+            _FakeCNAME("d12345.cloudfront.net"),
+            _FakeCNAME("myapp.azurewebsites.net"),
+            _FakeCNAME("example.netlify.app"),
+        ]
+        findings = detect_cloud_services_from_dns(cname_records=records)
+        services = {f.service for f in findings}
+        assert "aws_cloudfront" in services
+        assert "azure_app_service" in services
+        assert "netlify" in services
+
+    def test_deduplication(self):
+        records = [
+            _FakeCNAME("a.cloudfront.net"),
+            _FakeCNAME("b.cloudfront.net"),
+        ]
+        findings = detect_cloud_services_from_dns(cname_records=records)
+        assert len(findings) == 1
+
+    def test_mx_microsoft_365(self):
+        records = [_FakeMX("example-com.mail.protection.outlook.com")]
+        findings = detect_cloud_services_from_dns(mx_records=records)
+        assert len(findings) == 1
+        assert findings[0].service == "microsoft_365"
+        assert findings[0].record_type == "MX"
+
+    def test_mx_google_workspace(self):
+        records = [_FakeMX("alt1.aspmx.l.google.com")]
+        findings = detect_cloud_services_from_dns(mx_records=records)
+        assert len(findings) == 1
+        assert findings[0].service == "google_workspace"
+
+    def test_txt_google_verification(self):
+        records = [_FakeTXT("google-site-verification=abc123")]
+        findings = detect_cloud_services_from_dns(txt_records=records)
+        assert len(findings) == 1
+        assert findings[0].service == "google_workspace"
+        assert findings[0].record_type == "TXT"
+
+    def test_txt_microsoft_verification(self):
+        records = [_FakeTXT("MS=ms12345678")]
+        findings = detect_cloud_services_from_dns(txt_records=records)
+        assert len(findings) == 1
+        assert findings[0].service == "microsoft_365"
+
+    def test_txt_aws_ses(self):
+        records = [_FakeTXT("amazonses:abc123")]
+        findings = detect_cloud_services_from_dns(txt_records=records)
+        assert len(findings) == 1
+        assert findings[0].service == "aws_ses"
+        assert findings[0].provider == "aws"
+
+    def test_combined_cname_mx_txt(self):
+        findings = detect_cloud_services_from_dns(
+            cname_records=[_FakeCNAME("d12345.cloudfront.net")],
+            mx_records=[_FakeMX("example-com.mail.protection.outlook.com")],
+            txt_records=[_FakeTXT("google-site-verification=abc123")],
+        )
+        services = {f.service for f in findings}
+        assert "aws_cloudfront" in services
+        assert "microsoft_365" in services
+        assert "google_workspace" in services
+
+    def test_empty_inputs(self):
+        assert detect_cloud_services_from_dns() == []
+        assert detect_cloud_services_from_dns(cname_records=[], mx_records=[], txt_records=[]) == []
+
+    def test_none_inputs(self):
+        assert detect_cloud_services_from_dns(cname_records=None, mx_records=None, txt_records=None) == []
+
+    def test_string_records(self):
+        findings = detect_cloud_services_from_dns(cname_records=["d12345.cloudfront.net"])
+        assert len(findings) == 1
+        assert findings[0].service == "aws_cloudfront"
+
+    def test_github_pages(self):
+        records = [_FakeCNAME("example.github.io")]
+        findings = detect_cloud_services_from_dns(cname_records=records)
+        assert len(findings) == 1
+        assert findings[0].service == "github_pages"
+
+    def test_heroku(self):
+        records = [_FakeCNAME("example.herokuapp.com")]
+        findings = detect_cloud_services_from_dns(cname_records=records)
+        assert len(findings) == 1
+        assert findings[0].service == "heroku"
+
+    def test_vercel(self):
+        records = [_FakeCNAME("example.vercel.app")]
+        findings = detect_cloud_services_from_dns(cname_records=records)
+        assert len(findings) == 1
+        assert findings[0].service == "vercel"
+
+    def test_severity_is_info(self):
+        records = [_FakeCNAME("d12345.cloudfront.net")]
+        findings = detect_cloud_services_from_dns(cname_records=records)
+        assert findings[0].severity == "info"
+        assert findings[0].is_database is False
+
+    def test_txt_dedup_with_cname(self):
+        """If google_workspace already found via MX, TXT verification doesn't duplicate it."""
+        findings = detect_cloud_services_from_dns(
+            mx_records=[_FakeMX("aspmx.l.google.com")],
+            txt_records=[_FakeTXT("google-site-verification=abc123")],
+        )
+        google_findings = [f for f in findings if f.service == "google_workspace"]
+        assert len(google_findings) == 1
+
+
+# ---------------------------------------------------------------------------
+# DNS-based exposed database detection
+# ---------------------------------------------------------------------------
+
+class TestDetectExposedDatabasesFromDNS:
+    def test_aws_rds(self):
+        records = [_FakeCNAME("mydb.abc123.us-east-1.rds.amazonaws.com")]
+        findings = detect_exposed_databases_from_dns(cname_records=records)
+        assert len(findings) == 1
+        assert findings[0].service == "aws_rds"
+        assert findings[0].provider == "aws"
+        assert findings[0].is_database is True
+        assert findings[0].severity == "high"
+
+    def test_azure_sql(self):
+        records = [_FakeCNAME("myserver.database.windows.net")]
+        findings = detect_exposed_databases_from_dns(cname_records=records)
+        assert len(findings) == 1
+        assert findings[0].service == "azure_sql"
+        assert findings[0].is_database is True
+
+    def test_azure_cosmosdb(self):
+        records = [_FakeCNAME("myaccount.documents.azure.com")]
+        findings = detect_exposed_databases_from_dns(cname_records=records)
+        assert len(findings) == 1
+        assert findings[0].service == "azure_cosmosdb"
+
+    def test_azure_cosmosdb_mongo(self):
+        records = [_FakeCNAME("myaccount.mongo.cosmos.azure.com")]
+        findings = detect_exposed_databases_from_dns(cname_records=records)
+        assert len(findings) == 1
+        assert findings[0].service == "azure_cosmosdb_mongo"
+
+    def test_aws_elasticache(self):
+        records = [_FakeCNAME("mycluster.abc123.0001.use1.cache.amazonaws.com")]
+        findings = detect_exposed_databases_from_dns(cname_records=records)
+        assert len(findings) == 1
+        assert findings[0].service == "aws_elasticache"
+
+    def test_aws_redshift(self):
+        records = [_FakeCNAME("mycluster.abc123.us-east-1.redshift.amazonaws.com")]
+        findings = detect_exposed_databases_from_dns(cname_records=records)
+        assert len(findings) == 1
+        assert findings[0].service == "aws_redshift"
+
+    def test_multiple_databases(self):
+        records = [
+            _FakeCNAME("db1.abc.us-east-1.rds.amazonaws.com"),
+            _FakeCNAME("myserver.database.windows.net"),
+        ]
+        findings = detect_exposed_databases_from_dns(cname_records=records)
+        assert len(findings) == 2
+        services = {f.service for f in findings}
+        assert "aws_rds" in services
+        assert "azure_sql" in services
+
+    def test_deduplication_same_target(self):
+        records = [
+            _FakeCNAME("mydb.rds.amazonaws.com"),
+            _FakeCNAME("mydb.rds.amazonaws.com"),
+        ]
+        findings = detect_exposed_databases_from_dns(cname_records=records)
+        assert len(findings) == 1
+
+    def test_no_databases(self):
+        records = [_FakeCNAME("d12345.cloudfront.net")]
+        findings = detect_exposed_databases_from_dns(cname_records=records)
+        assert findings == []
+
+    def test_empty_input(self):
+        assert detect_exposed_databases_from_dns() == []
+        assert detect_exposed_databases_from_dns(cname_records=[]) == []
+
+    def test_none_input(self):
+        assert detect_exposed_databases_from_dns(cname_records=None) == []
+
+    def test_string_records(self):
+        findings = detect_exposed_databases_from_dns(cname_records=["mydb.rds.amazonaws.com"])
+        assert len(findings) == 1
+        assert findings[0].service == "aws_rds"
+
+    def test_fingerprint_generated(self):
+        records = [_FakeCNAME("mydb.rds.amazonaws.com")]
+        findings = detect_exposed_databases_from_dns(cname_records=records)
+        assert findings[0].fingerprint
+        assert len(findings[0].fingerprint) > 0
+
+
+# ---------------------------------------------------------------------------
+# FAIR signal: exposed cloud database
+# ---------------------------------------------------------------------------
+
+class TestFAIRExposedCloudDatabase:
+    def test_database_endpoint_fires_signal(self):
+        result = DomainResult(
+            target="https://example.com",
+            cloud_assets=CloudAssetResult(
+                domain="example.com",
+                findings=[],
+                cloud_services=[
+                    CloudServiceFinding(
+                        service="aws_rds",
+                        provider="aws",
+                        record_type="CNAME",
+                        record_value="mydb.rds.amazonaws.com",
+                        is_database=True,
+                        severity="high",
+                    ),
+                ],
+            ),
+        )
+        signals = compute_fair_signals(result, scan_mode="full")
+        vuln_names = [s.name for s in signals.vulnerability.signals]
+        assert "exposed_cloud_database" in vuln_names
+
+        sig = next(s for s in signals.vulnerability.signals if s.name == "exposed_cloud_database")
+        assert sig.score == 85
+        assert sig.weight == 1.5
+
+    def test_multiple_databases_increase_score(self):
+        result = DomainResult(
+            target="https://example.com",
+            cloud_assets=CloudAssetResult(
+                domain="example.com",
+                findings=[],
+                cloud_services=[
+                    CloudServiceFinding(service="aws_rds", provider="aws", record_value="db1.rds.amazonaws.com", is_database=True, severity="high"),
+                    CloudServiceFinding(service="azure_sql", provider="azure", record_value="db2.database.windows.net", is_database=True, severity="high"),
+                    CloudServiceFinding(service="azure_redis", provider="azure", record_value="cache.redis.cache.windows.net", is_database=True, severity="high"),
+                ],
+            ),
+        )
+        signals = compute_fair_signals(result, scan_mode="full")
+        sig = next(s for s in signals.vulnerability.signals if s.name == "exposed_cloud_database")
+        assert sig.score == 100
+
+    def test_no_database_no_signal(self):
+        result = DomainResult(
+            target="https://example.com",
+            cloud_assets=CloudAssetResult(
+                domain="example.com",
+                findings=[],
+                cloud_services=[
+                    CloudServiceFinding(service="aws_cloudfront", provider="aws", record_value="d123.cloudfront.net", is_database=False, severity="info"),
+                ],
+            ),
+        )
+        signals = compute_fair_signals(result, scan_mode="full")
+        vuln_names = [s.name for s in signals.vulnerability.signals]
+        assert "exposed_cloud_database" not in vuln_names

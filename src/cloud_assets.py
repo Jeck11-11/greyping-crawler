@@ -1,4 +1,4 @@
-"""Cloud asset discovery — checks for publicly accessible S3, Azure Blob, and GCS buckets."""
+"""Cloud asset discovery — bucket enumeration and DNS-based cloud service detection."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import time
 import httpx
 
 from .config import HTTP_TIMEOUT
-from .models import CloudAssetFinding, CloudAssetResult
+from .models import CloudAssetFinding, CloudAssetResult, CloudServiceFinding
 
 logger = logging.getLogger(__name__)
 
@@ -38,36 +38,112 @@ _PROVIDERS = {
         "private": ["AccessDenied", "Access denied"],
         "public": ["ListBucketResult", "<Contents>"],
     },
+    "digitalocean_spaces": {
+        "url_template": "https://{bucket}.nyc3.digitaloceanspaces.com/",
+        "not_found": ["NoSuchBucket", "The specified bucket does not exist"],
+        "private": ["AccessDenied"],
+        "public": ["ListBucketResult"],
+    },
+    "backblaze_b2": {
+        "url_template": "https://{bucket}.s3.us-west-004.backblazeb2.com/",
+        "not_found": ["NoSuchBucket", "NoSuchKey", "The specified bucket does not exist"],
+        "private": ["AccessDenied"],
+        "public": ["ListBucketResult"],
+    },
+    "alibaba_oss": {
+        "url_template": "https://{bucket}.oss-cn-hangzhou.aliyuncs.com/",
+        "not_found": ["NoSuchBucket", "The specified bucket does not exist"],
+        "private": ["AccessDenied", "InvalidAccessKeyId"],
+        "public": ["ListBucketResult", "<Contents>"],
+    },
+}
+
+# CNAME suffix → (service_name, provider)
+_CLOUD_CNAME_PATTERNS: dict[str, tuple[str, str]] = {
+    ".cloudfront.net": ("aws_cloudfront", "aws"),
+    ".elasticbeanstalk.com": ("aws_elastic_beanstalk", "aws"),
+    ".elb.amazonaws.com": ("aws_elb", "aws"),
+    ".s3.amazonaws.com": ("aws_s3", "aws"),
+    ".s3-website": ("aws_s3_website", "aws"),
+    ".lambda-url.": ("aws_lambda", "aws"),
+    ".azurewebsites.net": ("azure_app_service", "azure"),
+    ".azurefd.net": ("azure_front_door", "azure"),
+    ".azureedge.net": ("azure_cdn", "azure"),
+    ".azure-api.net": ("azure_api_management", "azure"),
+    ".trafficmanager.net": ("azure_traffic_manager", "azure"),
+    ".blob.core.windows.net": ("azure_blob", "azure"),
+    ".appspot.com": ("gcp_app_engine", "gcp"),
+    ".run.app": ("gcp_cloud_run", "gcp"),
+    ".cloudfunctions.net": ("gcp_cloud_functions", "gcp"),
+    ".firebaseapp.com": ("firebase", "gcp"),
+    ".firebaseio.com": ("firebase", "gcp"),
+    ".netlify.app": ("netlify", "netlify"),
+    ".netlify.com": ("netlify", "netlify"),
+    ".vercel.app": ("vercel", "vercel"),
+    ".herokuapp.com": ("heroku", "heroku"),
+    ".herokudns.com": ("heroku", "heroku"),
+    ".github.io": ("github_pages", "github"),
+    ".pages.dev": ("cloudflare_pages", "cloudflare"),
+    ".workers.dev": ("cloudflare_workers", "cloudflare"),
+    ".shopify.com": ("shopify", "shopify"),
+    ".myshopify.com": ("shopify", "shopify"),
+    ".squarespace.com": ("squarespace", "squarespace"),
+    ".wixsite.com": ("wix", "wix"),
+}
+
+# CNAME patterns indicating internet-resolvable database endpoints.
+_DB_ENDPOINT_PATTERNS: dict[str, tuple[str, str]] = {
+    ".rds.amazonaws.com": ("aws_rds", "aws"),
+    ".cache.amazonaws.com": ("aws_elasticache", "aws"),
+    ".redshift.amazonaws.com": ("aws_redshift", "aws"),
+    ".docdb.amazonaws.com": ("aws_documentdb", "aws"),
+    ".database.windows.net": ("azure_sql", "azure"),
+    ".database.azure.com": ("azure_database", "azure"),
+    ".redis.cache.windows.net": ("azure_redis", "azure"),
+    ".documents.azure.com": ("azure_cosmosdb", "azure"),
+    ".mongo.cosmos.azure.com": ("azure_cosmosdb_mongo", "azure"),
+}
+
+# MX patterns → cloud email provider.
+_MX_CLOUD_PATTERNS: dict[str, tuple[str, str]] = {
+    ".mail.protection.outlook.com": ("microsoft_365", "microsoft"),
+    ".google.com": ("google_workspace", "google"),
+    ".googlemail.com": ("google_workspace", "google"),
+    ".pphosted.com": ("proofpoint", "proofpoint"),
+    ".mimecast.com": ("mimecast", "mimecast"),
+}
+
+# TXT record prefixes → cloud verification.
+_TXT_CLOUD_PREFIXES: dict[str, tuple[str, str]] = {
+    "google-site-verification=": ("google_workspace", "google"),
+    "MS=": ("microsoft_365", "microsoft"),
+    "amazonses:": ("aws_ses", "aws"),
+    "firebase=": ("firebase", "gcp"),
+    "atlassian-domain-verification=": ("atlassian", "atlassian"),
+    "facebook-domain-verification=": ("facebook", "meta"),
+    "docusign=": ("docusign", "docusign"),
+    "apple-domain-verification=": ("apple", "apple"),
+    "hubspot-developer-verification=": ("hubspot", "hubspot"),
 }
 
 
 def _generate_candidates(domain: str) -> list[str]:
-    """Generate candidate bucket names from a domain.
-
-    Uses the full domain and the domain without TLD, applying each suffix.
-    Bucket names are lowercased with dots replaced by hyphens.
-    """
+    """Generate candidate bucket names from a domain."""
     domain = domain.lower().strip()
-    # Remove protocol if present
     if "://" in domain:
         domain = domain.split("://", 1)[1]
-    # Remove path/query
     domain = domain.split("/")[0]
-    # Remove port
     domain = domain.split(":")[0]
 
     bases: list[str] = []
-    # Full domain: dots → hyphens for bucket naming
     sanitized_full = domain.replace(".", "-")
     bases.append(sanitized_full)
-    # Domain without TLD
     parts = domain.rsplit(".", 1)
     if len(parts) == 2:
         without_tld = parts[0].replace(".", "-")
         if without_tld != sanitized_full:
             bases.append(without_tld)
     else:
-        # No TLD found, just use as-is
         bases.append(domain.replace(".", "-"))
 
     candidates: list[str] = []
@@ -95,8 +171,85 @@ def _classify_response(body: str, provider_cfg: dict) -> str | None:
     for marker in provider_cfg["not_found"]:
         if marker in body:
             return None
-    # Unrecognised response — treat as not found.
     return None
+
+
+def detect_cloud_services_from_dns(
+    cname_records: list | None = None,
+    mx_records: list | None = None,
+    txt_records: list | None = None,
+) -> list[CloudServiceFinding]:
+    """Detect cloud services from DNS records (CNAME, MX, TXT).
+
+    Pure pattern matching — no HTTP requests.
+    """
+    findings: list[CloudServiceFinding] = []
+    seen: set[str] = set()
+
+    for rec in (cname_records or []):
+        target = (rec.target if hasattr(rec, "target") else str(rec)).lower()
+        for suffix, (service, provider) in _CLOUD_CNAME_PATTERNS.items():
+            if suffix in target and service not in seen:
+                seen.add(service)
+                findings.append(CloudServiceFinding(
+                    service=service,
+                    provider=provider,
+                    record_type="CNAME",
+                    record_value=target,
+                    severity="info",
+                ))
+
+    for rec in (mx_records or []):
+        host = (rec.host if hasattr(rec, "host") else str(rec)).lower()
+        for suffix, (service, provider) in _MX_CLOUD_PATTERNS.items():
+            if host.endswith(suffix) and service not in seen:
+                seen.add(service)
+                findings.append(CloudServiceFinding(
+                    service=service,
+                    provider=provider,
+                    record_type="MX",
+                    record_value=host,
+                    severity="info",
+                ))
+
+    for rec in (txt_records or []):
+        data = (rec.data if hasattr(rec, "data") else str(rec)).strip()
+        for prefix, (service, provider) in _TXT_CLOUD_PREFIXES.items():
+            if data.lower().startswith(prefix.lower()) and service not in seen:
+                seen.add(service)
+                findings.append(CloudServiceFinding(
+                    service=service,
+                    provider=provider,
+                    record_type="TXT",
+                    record_value=data[:80],
+                    severity="info",
+                ))
+
+    return findings
+
+
+def detect_exposed_databases_from_dns(
+    cname_records: list | None = None,
+) -> list[CloudServiceFinding]:
+    """Detect cloud database endpoints resolvable via DNS CNAME records."""
+    findings: list[CloudServiceFinding] = []
+    seen: set[str] = set()
+
+    for rec in (cname_records or []):
+        target = (rec.target if hasattr(rec, "target") else str(rec)).lower()
+        for suffix, (service, provider) in _DB_ENDPOINT_PATTERNS.items():
+            if suffix in target and target not in seen:
+                seen.add(target)
+                findings.append(CloudServiceFinding(
+                    service=service,
+                    provider=provider,
+                    record_type="CNAME",
+                    record_value=target,
+                    is_database=True,
+                    severity="high",
+                ))
+
+    return findings
 
 
 async def discover_cloud_assets(
@@ -174,4 +327,8 @@ async def discover_cloud_assets(
     )
 
 
-__all__ = ["discover_cloud_assets"]
+__all__ = [
+    "discover_cloud_assets",
+    "detect_cloud_services_from_dns",
+    "detect_exposed_databases_from_dns",
+]

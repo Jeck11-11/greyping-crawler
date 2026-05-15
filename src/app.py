@@ -351,6 +351,19 @@ async def _scan_single_target(
     rdap_result = _passive_result(rdap_result, RDAPResult)
     wayback_result = _passive_result(wayback_result, WaybackResult)
 
+    # DNS-based cloud service + database endpoint detection.
+    if not dns_result.error:
+        from .cloud_assets import detect_cloud_services_from_dns, detect_exposed_databases_from_dns
+        cloud_svcs = detect_cloud_services_from_dns(
+            cname_records=dns_result.cname_records,
+            mx_records=dns_result.mx_records,
+            txt_records=dns_result.txt_records,
+        )
+        db_findings = detect_exposed_databases_from_dns(
+            cname_records=dns_result.cname_records,
+        )
+        cloud_assets_result.cloud_services = cloud_svcs + db_findings
+
     c99_subs = c99_subs_result if isinstance(c99_subs_result, list) else []
     if c99_subs and ct_result:
         merged = set(ct_result.subdomains or [])
@@ -640,6 +653,10 @@ async def _scan_single_target(
         open_ports=len(port_scan_result.open_ports) if port_scan_result else 0,
         risky_ports=sum(1 for p in (port_scan_result.open_ports if port_scan_result else []) if p.is_risky),
         cloud_buckets_found=len(cloud_assets_result.findings) if cloud_assets_result else 0,
+        cloud_services_found=len(cloud_assets_result.cloud_services) if cloud_assets_result else 0,
+        exposed_databases_found=sum(
+            1 for s in (cloud_assets_result.cloud_services if cloud_assets_result else []) if s.is_database
+        ),
         screenshots_taken=len(screenshots),
         typosquat_candidates=len(typosquat_result.registered_candidates) if typosquat_result else 0,
         waf_detected=waf_result.firewall if waf_result and waf_result.detected else "",

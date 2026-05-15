@@ -497,6 +497,20 @@ def _build_vulnerability(result: DomainResult) -> FAIRFactor:
                 ],
             ))
 
+    # Exposed cloud database endpoints in DNS.
+    if result.cloud_assets and result.cloud_assets.cloud_services:
+        db_endpoints = [s for s in result.cloud_assets.cloud_services if s.is_database]
+        if db_endpoints:
+            score = min(100, 70 + 15 * len(db_endpoints))
+            signals.append(FAIRSignal(
+                name="exposed_cloud_database",
+                score=score,
+                weight=1.5,
+                evidence=[
+                    f"{db.service}: {db.record_value}" for db in db_endpoints[:5]
+                ],
+            ))
+
     # Weak TLS protocol or cipher suite.
     if ssl and ssl.tls_version:
         ver = ssl.tls_version.upper()

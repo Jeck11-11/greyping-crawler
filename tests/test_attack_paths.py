@@ -44,7 +44,7 @@ class TestAnalyzeAttackPaths:
         ap = analyze_attack_paths(result)
         assert isinstance(ap, AttackPathResult)
         assert ap.paths == []
-        assert ap.chains_evaluated == 10
+        assert ap.chains_evaluated == 11
 
     def test_returns_attack_path_result(self):
         result = _base_result()

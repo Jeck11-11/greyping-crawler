@@ -1036,6 +1036,18 @@ def _detect_cloud_assets(result: DomainResult) -> list[CloudAsset]:
         except Exception:
             pass
 
+    # DNS-based cloud service findings.
+    if result.cloud_assets and result.cloud_assets.cloud_services:
+        for svc in result.cloud_assets.cloud_services:
+            key = f"dns:{svc.service}"
+            if key not in seen:
+                seen.add(key)
+                assets.append(CloudAsset(
+                    asset_type="database" if svc.is_database else "cloud_service",
+                    identifier=f"{svc.service} ({svc.record_value})",
+                    source="dns",
+                ))
+
     return assets
 
 
@@ -1264,6 +1276,53 @@ def _classify_privacy_findings(result: DomainResult) -> list[PrioritizedFinding]
     return findings
 
 
+def _classify_cloud_findings(result: DomainResult) -> list[PrioritizedFinding]:
+    """Emit findings for exposed cloud databases and public buckets."""
+    findings: list[PrioritizedFinding] = []
+    if not result.cloud_assets:
+        return findings
+
+    for svc in result.cloud_assets.cloud_services:
+        if svc.is_database:
+            findings.append(PrioritizedFinding(
+                id="exposed_cloud_database",
+                title=f"Cloud database endpoint in DNS: {svc.service}",
+                category="cloud_infrastructure",
+                severity=FindingSeverity.high,
+                classification=FindingClassification.confirmed_issue,
+                confidence="high",
+                owner=FindingOwner.customer,
+                why_it_matters="Database endpoints resolvable via public DNS may be accessible from the internet.",
+                business_impact="Potential data breach if database accepts external connections",
+                evidence=[
+                    f"Service: {svc.service}",
+                    f"Provider: {svc.provider}",
+                    f"DNS record ({svc.record_type}): {svc.record_value}",
+                ],
+                recommended_action="Restrict database to private subnets/VPC. Remove public DNS records pointing to database endpoints.",
+                source_field="cloud_assets",
+            ))
+
+    for bucket in result.cloud_assets.findings:
+        if bucket.status == "public":
+            findings.append(PrioritizedFinding(
+                id="public_cloud_bucket",
+                title=f"Public {bucket.provider} bucket: {bucket.bucket_name}",
+                category="cloud_infrastructure",
+                severity=FindingSeverity.critical,
+                classification=FindingClassification.confirmed_issue,
+                confidence="high",
+                owner=FindingOwner.customer,
+                why_it_matters="Publicly accessible cloud storage may expose sensitive data.",
+                business_impact="Data breach via unauthenticated bucket access",
+                evidence=[f"URL: {bucket.url}", f"Status: {bucket.status}"] + bucket.evidence,
+                recommended_action="Restrict bucket access. Review and remove any sensitive data.",
+                source_field="cloud_assets",
+            ))
+
+    return findings
+
+
 def build_easm_report(
     result: DomainResult, *, scan_mode: str = "full",
 ) -> EASMReport:
@@ -1285,6 +1344,7 @@ def build_easm_report(
         all_findings.extend(_classify_js_intel(result))
         all_findings.extend(_classify_typosquatting_findings(result))
         all_findings.extend(_classify_privacy_findings(result))
+        all_findings.extend(_classify_cloud_findings(result))
 
         sorted_findings = _sort_findings(all_findings)
 

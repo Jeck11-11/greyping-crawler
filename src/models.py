@@ -1166,9 +1166,27 @@ class CloudAssetFinding(BaseModel):
         return self
 
 
+class CloudServiceFinding(BaseModel):
+    """A cloud service detected via DNS records."""
+    service: str = Field(..., description="e.g. 'aws_cloudfront', 'azure_app_service', 'aws_rds'")
+    provider: str = Field(..., description="e.g. 'aws', 'azure', 'gcp'")
+    record_type: str = Field(default="CNAME", description="DNS record type where found")
+    record_value: str = Field(default="", description="The actual DNS record value")
+    is_database: bool = Field(default=False)
+    severity: str = Field(default="info")
+    fingerprint: str = Field(default="")
+
+    @model_validator(mode="after")
+    def _set_fingerprint(self) -> CloudServiceFinding:
+        if not self.fingerprint:
+            self.fingerprint = _fingerprint("cloudsvc", self.service, self.record_value)
+        return self
+
+
 class CloudAssetResult(BaseModel):
     domain: str
     findings: list[CloudAssetFinding] = Field(default_factory=list)
+    cloud_services: list[CloudServiceFinding] = Field(default_factory=list)
     buckets_checked: int = 0
     scan_duration_seconds: float = 0
     error: str | None = None
@@ -1232,6 +1250,8 @@ class DomainSummary(BaseModel):
     open_ports: int = 0
     risky_ports: int = 0
     cloud_buckets_found: int = 0
+    cloud_services_found: int = 0
+    exposed_databases_found: int = 0
     screenshots_taken: int = 0
     typosquat_candidates: int = Field(default=0, description="Registered lookalike domains found.")
     waf_detected: str = Field(default="", description="WAF/firewall product detected by C99 (empty if none).")
