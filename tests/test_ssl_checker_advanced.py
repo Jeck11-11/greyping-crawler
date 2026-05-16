@@ -88,6 +88,67 @@ class TestCipherDetection:
         assert any("Weak cipher" in i for i in result.issues)
 
 
+class TestCipherStrength:
+    def test_strong_256_bits(self):
+        cert = _make_cert()
+        result = _parse_cert(
+            cert, "example.com",
+            tls_version="TLSv1.3", cipher="TLS_AES_256_GCM_SHA384", cipher_bits=256,
+        )
+        assert result.cipher_bits == 256
+        assert result.cipher_strength == "strong"
+        assert not any("key length" in i.lower() for i in result.issues)
+
+    def test_acceptable_128_bits(self):
+        cert = _make_cert()
+        result = _parse_cert(
+            cert, "example.com",
+            tls_version="TLSv1.2", cipher="ECDHE-RSA-AES128-GCM-SHA256", cipher_bits=128,
+        )
+        assert result.cipher_strength == "acceptable"
+        assert not any("key length" in i.lower() for i in result.issues)
+
+    def test_weak_bits_flagged(self):
+        cert = _make_cert()
+        result = _parse_cert(
+            cert, "example.com",
+            tls_version="TLSv1.2", cipher="DES-CBC-SHA", cipher_bits=56,
+        )
+        assert result.cipher_strength == "weak"
+        assert any("56 bits" in i for i in result.issues)
+
+
+class TestPFS:
+    def test_ecdhe_cipher_has_pfs(self):
+        cert = _make_cert()
+        result = _parse_cert(
+            cert, "example.com",
+            tls_version="TLSv1.2", cipher="ECDHE-RSA-AES256-GCM-SHA384", cipher_bits=256,
+        )
+        assert result.pfs is True
+
+    def test_dhe_cipher_has_pfs(self):
+        cert = _make_cert()
+        result = _parse_cert(
+            cert, "example.com",
+            tls_version="TLSv1.2", cipher="DHE-RSA-AES256-GCM-SHA384", cipher_bits=256,
+        )
+        assert result.pfs is True
+
+    def test_non_ephemeral_cipher_no_pfs(self):
+        cert = _make_cert()
+        result = _parse_cert(
+            cert, "example.com",
+            tls_version="TLSv1.2", cipher="AES256-GCM-SHA384", cipher_bits=256,
+        )
+        assert result.pfs is False
+
+    def test_no_cipher_no_pfs(self):
+        cert = _make_cert()
+        result = _parse_cert(cert, "example.com")
+        assert result.pfs is False
+
+
 class TestGradeWithTLS:
     def test_deprecated_tls_gets_grade_c(self):
         cert = _make_cert()

@@ -45,7 +45,7 @@ async def check_ssl(target_url: str, timeout: int = SSL_TIMEOUT) -> SSLCertResul
         return SSLCertResult(cert_valid=False, issues=["Could not parse hostname from URL."])
 
     try:
-        cert_dict, cert_der, tls_version, cipher_name, resolved_ip = await asyncio.to_thread(
+        cert_dict, cert_der, tls_version, cipher_name, cipher_bits, resolved_ip = await asyncio.to_thread(
             _fetch_cert, hostname, port, timeout,
         )
     except Exception as exc:
@@ -59,14 +59,15 @@ async def check_ssl(target_url: str, timeout: int = SSL_TIMEOUT) -> SSLCertResul
         cert_der=cert_der,
         tls_version=tls_version,
         cipher=cipher_name,
+        cipher_bits=cipher_bits,
         resolved_ip=resolved_ip,
     )
 
 
 def _fetch_cert(
     hostname: str, port: int, timeout: int,
-) -> tuple[dict, bytes, str, str, str]:
-    """Blocking call to fetch the peer certificate, TLS version, cipher, and resolved IP."""
+) -> tuple[dict, bytes, str, str, int, str]:
+    """Blocking call to fetch the peer certificate, TLS version, cipher, bits, and resolved IP."""
     ctx = ssl.create_default_context()
     resolved_ip = ""
     try:
@@ -83,12 +84,13 @@ def _fetch_cert(
             tls_version = ssock.version() or ""
             cipher_info = ssock.cipher()
             cipher_name = cipher_info[0] if cipher_info else ""
+            cipher_bits = cipher_info[2] if cipher_info and len(cipher_info) >= 3 else 0
             if not resolved_ip:
                 try:
                     resolved_ip = ssock.getpeername()[0]
                 except (OSError, IndexError):
                     pass
-            return cert, cert_der, tls_version, cipher_name, resolved_ip
+            return cert, cert_der, tls_version, cipher_name, cipher_bits, resolved_ip
 
 
 _WEAK_CIPHERS = {"RC4", "DES", "3DES", "RC2", "NULL", "EXPORT", "anon"}
@@ -112,6 +114,7 @@ def _parse_cert(
     cert_der: bytes = b"",
     tls_version: str = "",
     cipher: str = "",
+    cipher_bits: int = 0,
     resolved_ip: str = "",
 ) -> SSLCertResult:
     """Parse a certificate dict returned by ``ssl.SSLSocket.getpeercert()``."""
@@ -189,13 +192,68 @@ def _parse_cert(
         cert_sha1 = hashlib.sha1(cert_der).hexdigest().upper()
         cert_sha1 = ":".join(cert_sha1[i:i+2] for i in range(0, len(cert_sha1), 2))
 
-    # Signature algorithm (from DER via cryptography lib, optional)
+    # Deep analysis from DER via cryptography lib
     cert_alg = ""
+    key_type = ""
+    key_size = 0
+    ocsp_must_staple = False
+    ocsp_responder = ""
+    ca_issuers_url = ""
+    has_sct = False
+
     if cert_der:
         try:
             from cryptography import x509
+            from cryptography.hazmat.primitives.asymmetric import rsa, ec, dsa, ed25519, ed448
+
             parsed_cert = x509.load_der_x509_certificate(cert_der)
             cert_alg = parsed_cert.signature_algorithm_oid._name
+
+            pub_key = parsed_cert.public_key()
+            if isinstance(pub_key, rsa.RSAPublicKey):
+                key_type = "RSA"
+                key_size = pub_key.key_size
+            elif isinstance(pub_key, ec.EllipticCurvePublicKey):
+                key_type = "EC"
+                key_size = pub_key.key_size
+            elif isinstance(pub_key, dsa.DSAPublicKey):
+                key_type = "DSA"
+                key_size = pub_key.key_size
+            elif isinstance(pub_key, ed25519.Ed25519PublicKey):
+                key_type = "Ed25519"
+                key_size = 256
+            elif isinstance(pub_key, ed448.Ed448PublicKey):
+                key_type = "Ed448"
+                key_size = 448
+
+            try:
+                aia = parsed_cert.extensions.get_extension_for_class(
+                    x509.AuthorityInformationAccess
+                ).value
+                for desc in aia:
+                    if desc.access_method == x509.oid.AuthorityInformationAccessOID.OCSP:
+                        ocsp_responder = desc.access_location.value
+                    elif desc.access_method == x509.oid.AuthorityInformationAccessOID.CA_ISSUERS:
+                        ca_issuers_url = desc.access_location.value
+            except x509.ExtensionNotFound:
+                pass
+
+            try:
+                tls_feature = parsed_cert.extensions.get_extension_for_class(
+                    x509.TLSFeature
+                ).value
+                ocsp_must_staple = x509.TLSFeatureType.status_request in tls_feature
+            except (x509.ExtensionNotFound, AttributeError):
+                pass
+
+            try:
+                parsed_cert.extensions.get_extension_for_class(
+                    x509.PrecertificateSignedCertificateTimestamps
+                )
+                has_sct = True
+            except x509.ExtensionNotFound:
+                pass
+
         except BaseException:
             pass
 
@@ -203,13 +261,34 @@ def _parse_cert(
     if tls_version and tls_version in _DEPRECATED_TLS:
         issues.append(f"Deprecated TLS version: {tls_version}.")
 
-    # Cipher strength check
+    # Cipher name-based weakness check
     if cipher:
         cipher_upper = cipher.upper()
         for weak in _WEAK_CIPHERS:
             if weak.upper() in cipher_upper:
                 issues.append(f"Weak cipher detected: {cipher}.")
                 break
+
+    # Cipher strength classification
+    cipher_strength = ""
+    if cipher_bits:
+        if cipher_bits >= 256:
+            cipher_strength = "strong"
+        elif cipher_bits >= 128:
+            cipher_strength = "acceptable"
+        else:
+            cipher_strength = "weak"
+            issues.append(f"Weak cipher key length: {cipher_bits} bits.")
+
+    # Perfect Forward Secrecy detection
+    cipher_name_upper = cipher.upper() if cipher else ""
+    pfs = "ECDHE" in cipher_name_upper or "DHE" in cipher_name_upper
+
+    # Key size weakness check
+    if key_type == "RSA" and 0 < key_size < 2048:
+        issues.append(f"Weak RSA key: {key_size} bits (minimum 2048 recommended).")
+    elif key_type == "EC" and 0 < key_size < 256:
+        issues.append(f"Weak EC key: {key_size} bits (minimum 256 recommended).")
 
     cert_valid = len(issues) == 0 or all("expiring soon" in i.lower() for i in issues)
 
@@ -227,6 +306,15 @@ def _parse_cert(
         grade=_grade_cert(issues),
         tls_version=tls_version,
         cipher=cipher,
+        cipher_bits=cipher_bits,
+        cipher_strength=cipher_strength,
+        pfs=pfs,
+        key_type=key_type,
+        key_size=key_size,
+        ocsp_must_staple=ocsp_must_staple,
+        ocsp_responder=ocsp_responder,
+        ca_issuers_url=ca_issuers_url,
+        has_sct=has_sct,
         host=hostname,
         resolved_ip=resolved_ip,
         issued_to=issued_to,

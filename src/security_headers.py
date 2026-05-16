@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from .models import HeaderFinding, SecurityHeadersResult
+from .models import CORSAnalysis, HeaderFinding, SecurityHeadersResult
 
 
 # Each entry: (header_name, severity_if_missing, recommendation)
@@ -72,6 +72,10 @@ _CSP_WILDCARD_SRC = re.compile(
     r"(?:default-src|script-src|style-src|img-src|connect-src|object-src)\s+[^;]*(?<!')\*(?!')",
     re.IGNORECASE,
 )
+
+_CORS_SENSITIVE_METHODS = {"DELETE", "PUT", "PATCH"}
+_CORS_SENSITIVE_HEADERS = {"AUTHORIZATION", "X-API-KEY", "X-CSRF-TOKEN", "SET-COOKIE"}
+_CORS_MAX_AGE_THRESHOLD = 86400
 
 
 def _check_hsts(value: str) -> tuple[str, str]:
@@ -174,9 +178,27 @@ def analyze_headers(headers: dict[str, str]) -> SecurityHeadersResult:
             )
             score -= 3  # small penalty for information leakage
 
-    # CORS misconfiguration detection
+    # CORS comprehensive analysis
     cors_origin = lower.get("access-control-allow-origin", "")
     cors_credentials = lower.get("access-control-allow-credentials", "").lower()
+    cors_methods_raw = lower.get("access-control-allow-methods", "")
+    cors_headers_raw = lower.get("access-control-allow-headers", "")
+    cors_expose_raw = lower.get("access-control-expose-headers", "")
+    cors_max_age_raw = lower.get("access-control-max-age", "")
+
+    cors_issues: list[str] = []
+    cors_allowed_methods = [m.strip().upper() for m in cors_methods_raw.split(",") if m.strip()] if cors_methods_raw else []
+    cors_allowed_headers = [h.strip() for h in cors_headers_raw.split(",") if h.strip()] if cors_headers_raw else []
+    cors_exposed_headers = [h.strip() for h in cors_expose_raw.split(",") if h.strip()] if cors_expose_raw else []
+    cors_max_age: int | None = None
+    cors_null_origin = cors_origin.lower().strip() == "null"
+
+    if cors_max_age_raw:
+        try:
+            cors_max_age = int(cors_max_age_raw.strip())
+        except ValueError:
+            pass
+
     if cors_origin == "*":
         findings.append(
             HeaderFinding(
@@ -188,6 +210,19 @@ def analyze_headers(headers: dict[str, str]) -> SecurityHeadersResult:
             )
         )
         score -= 15
+        cors_issues.append("Wildcard origin allows any site to read responses.")
+    elif cors_null_origin:
+        findings.append(
+            HeaderFinding(
+                header="Access-Control-Allow-Origin",
+                status="misconfigured",
+                value="null",
+                recommendation="Null origin can be exploited via sandboxed iframes and file:// URIs. Use specific origins.",
+                severity="high",
+            )
+        )
+        score -= 15
+        cors_issues.append("Null origin is exploitable via sandboxed iframes and file:// URIs.")
     elif cors_origin and cors_credentials == "true":
         findings.append(
             HeaderFinding(
@@ -199,6 +234,62 @@ def analyze_headers(headers: dict[str, str]) -> SecurityHeadersResult:
             )
         )
         score -= 10
+        cors_issues.append(f"Credentials allowed for origin: {cors_origin}.")
+
+    sensitive_methods = _CORS_SENSITIVE_METHODS.intersection(cors_allowed_methods)
+    if sensitive_methods:
+        methods_str = ", ".join(sorted(sensitive_methods))
+        findings.append(
+            HeaderFinding(
+                header="Access-Control-Allow-Methods",
+                status="misconfigured",
+                value=cors_methods_raw,
+                recommendation=f"CORS exposes state-changing methods ({methods_str}). Restrict to GET/POST where possible.",
+                severity="medium",
+            )
+        )
+        score -= 5
+        cors_issues.append(f"Sensitive methods exposed: {methods_str}.")
+
+    exposed_upper = {h.upper() for h in cors_exposed_headers}
+    sensitive_exposed = _CORS_SENSITIVE_HEADERS.intersection(exposed_upper)
+    if sensitive_exposed:
+        headers_str = ", ".join(sorted(sensitive_exposed))
+        findings.append(
+            HeaderFinding(
+                header="Access-Control-Expose-Headers",
+                status="misconfigured",
+                value=cors_expose_raw,
+                recommendation=f"Sensitive headers exposed to cross-origin scripts: {headers_str}. Remove from Expose-Headers.",
+                severity="medium",
+            )
+        )
+        score -= 5
+        cors_issues.append(f"Sensitive headers exposed: {headers_str}.")
+
+    if cors_max_age is not None and cors_max_age > _CORS_MAX_AGE_THRESHOLD:
+        findings.append(
+            HeaderFinding(
+                header="Access-Control-Max-Age",
+                status="weak",
+                value=cors_max_age_raw,
+                recommendation=f"Preflight cache duration is {cors_max_age}s ({cors_max_age // 3600}h). Keep under 24 hours.",
+                severity="low",
+            )
+        )
+        score -= 3
+        cors_issues.append(f"Excessive preflight max-age: {cors_max_age}s.")
+
+    cors_analysis = CORSAnalysis(
+        origin_policy=cors_origin,
+        allows_credentials=cors_credentials == "true",
+        allowed_methods=cors_allowed_methods,
+        allowed_headers=cors_allowed_headers,
+        exposed_headers=cors_exposed_headers,
+        max_age=cors_max_age,
+        null_origin=cors_null_origin,
+        issues=cors_issues,
+    )
 
     # Cache-Control on sensitive pages
     cache_control = lower.get("cache-control", "")
@@ -222,4 +313,5 @@ def analyze_headers(headers: dict[str, str]) -> SecurityHeadersResult:
         findings=findings,
         server=server_value,
         powered_by=powered_by,
+        cors=cors_analysis,
     )

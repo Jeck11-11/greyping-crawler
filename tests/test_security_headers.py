@@ -135,3 +135,80 @@ class TestAnalyzeHeaders:
         result = analyze_headers(headers)
         cache = [f for f in result.findings if f.header == "Cache-Control"]
         assert len(cache) == 0
+
+
+class TestCORSAnalysis:
+    def test_null_origin_flagged(self):
+        headers = {"Access-Control-Allow-Origin": "null"}
+        result = analyze_headers(headers)
+        assert result.cors.null_origin is True
+        cors = [f for f in result.findings if f.header == "Access-Control-Allow-Origin"]
+        assert len(cors) == 1
+        assert cors[0].status == "misconfigured"
+        assert cors[0].severity == "high"
+        assert "null" in result.cors.issues[0].lower()
+
+    def test_sensitive_methods_flagged(self):
+        headers = {
+            "Access-Control-Allow-Origin": "https://example.com",
+            "Access-Control-Allow-Methods": "GET, POST, DELETE, PUT",
+        }
+        result = analyze_headers(headers)
+        assert "DELETE" in result.cors.allowed_methods
+        assert "PUT" in result.cors.allowed_methods
+        methods_finding = [f for f in result.findings if f.header == "Access-Control-Allow-Methods"]
+        assert len(methods_finding) == 1
+        assert methods_finding[0].status == "misconfigured"
+        assert methods_finding[0].severity == "medium"
+
+    def test_sensitive_exposed_headers_flagged(self):
+        headers = {
+            "Access-Control-Allow-Origin": "https://example.com",
+            "Access-Control-Expose-Headers": "Authorization, X-Request-Id",
+        }
+        result = analyze_headers(headers)
+        assert "Authorization" in result.cors.exposed_headers
+        expose_finding = [f for f in result.findings if f.header == "Access-Control-Expose-Headers"]
+        assert len(expose_finding) == 1
+        assert expose_finding[0].status == "misconfigured"
+
+    def test_excessive_max_age_flagged(self):
+        headers = {
+            "Access-Control-Allow-Origin": "https://example.com",
+            "Access-Control-Max-Age": "172800",
+        }
+        result = analyze_headers(headers)
+        assert result.cors.max_age == 172800
+        age_finding = [f for f in result.findings if f.header == "Access-Control-Max-Age"]
+        assert len(age_finding) == 1
+        assert age_finding[0].status == "weak"
+
+    def test_safe_methods_not_flagged(self):
+        headers = {
+            "Access-Control-Allow-Origin": "https://example.com",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        }
+        result = analyze_headers(headers)
+        assert result.cors.allowed_methods == ["GET", "POST", "OPTIONS"]
+        methods_finding = [f for f in result.findings if f.header == "Access-Control-Allow-Methods"]
+        assert len(methods_finding) == 0
+
+    def test_full_cors_object_populated(self):
+        headers = {
+            "Access-Control-Allow-Origin": "https://app.example.com",
+            "Access-Control-Allow-Credentials": "true",
+            "Access-Control-Allow-Methods": "GET, POST",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization",
+            "Access-Control-Expose-Headers": "X-Request-Id",
+            "Access-Control-Max-Age": "3600",
+        }
+        result = analyze_headers(headers)
+        cors = result.cors
+        assert cors.origin_policy == "https://app.example.com"
+        assert cors.allows_credentials is True
+        assert cors.allowed_methods == ["GET", "POST"]
+        assert "Content-Type" in cors.allowed_headers
+        assert "Authorization" in cors.allowed_headers
+        assert cors.exposed_headers == ["X-Request-Id"]
+        assert cors.max_age == 3600
+        assert cors.null_origin is False

@@ -323,11 +323,19 @@ def _build_vulnerability(result: DomainResult) -> FAIRFactor:
         inv = 100 - _grade_score(ssl.grade)
         if not ssl.cert_valid:
             inv = max(inv, 80)
+        evidence = ssl.issues[:3] if ssl.issues else ["TLS cert invalid"]
+        if ssl.cipher and not ssl.pfs:
+            inv = max(inv, 40)
+            evidence.append(f"No PFS: {ssl.cipher}")
+        if ssl.key_type and ssl.key_size:
+            if (ssl.key_type == "RSA" and ssl.key_size < 2048) or (ssl.key_type == "EC" and ssl.key_size < 256):
+                inv = max(inv, 60)
+                evidence.append(f"Weak key: {ssl.key_type} {ssl.key_size}-bit")
         signals.append(FAIRSignal(
             name="tls_weaknesses",
             score=inv,
             weight=0.9,
-            evidence=ssl.issues[:3] if ssl.issues else ["TLS cert invalid"],
+            evidence=evidence,
         ))
 
     # Missing or weak security headers (invert the grade).
@@ -542,12 +550,19 @@ def _build_vulnerability(result: DomainResult) -> FAIRFactor:
             tls_score = 70
         elif cipher_upper and any(w in cipher_upper for w in _WEAK_CIPHERS):
             tls_score = 40
+        if ssl.cipher_bits and ssl.cipher_bits < 128:
+            tls_score = max(tls_score, 50)
         if tls_score:
+            evidence = [f"TLS version: {ssl.tls_version}", f"Cipher: {ssl.cipher}"]
+            if ssl.cipher_bits:
+                evidence.append(f"Cipher bits: {ssl.cipher_bits}")
+            if not ssl.pfs:
+                evidence.append("No PFS (forward secrecy)")
             signals.append(FAIRSignal(
                 name="weak_tls_protocol",
                 score=tls_score,
                 weight=0.8,
-                evidence=[f"TLS version: {ssl.tls_version}", f"Cipher: {ssl.cipher}"],
+                evidence=evidence,
             ))
 
     # Certificate nearing expiry (days_left=0 means not checked).
@@ -568,14 +583,20 @@ def _build_vulnerability(result: DomainResult) -> FAIRFactor:
             evidence=[exp_msg],
         ))
 
-    # CORS misconfiguration
-    cors_findings = [h for h in headers.findings if h.header == "Access-Control-Allow-Origin" and h.status == "misconfigured"]
+    # CORS misconfiguration (expanded)
+    cors_findings = [
+        h for h in headers.findings
+        if h.header.startswith("Access-Control-") and h.status in ("misconfigured", "weak")
+    ]
     if cors_findings:
+        cors_score = 80
+        if any(h.value == "null" for h in cors_findings):
+            cors_score = 90
         signals.append(FAIRSignal(
             name="cors_misconfiguration",
-            score=80,
+            score=cors_score,
             weight=1.2,
-            evidence=[f"{h.header}: {h.value}" for h in cors_findings[:3]],
+            evidence=[f"{h.header}: {h.value}" for h in cors_findings[:5]],
         ))
 
     # Open ports (non-risky but numerous = larger attack surface)

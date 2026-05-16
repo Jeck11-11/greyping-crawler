@@ -76,6 +76,21 @@ _COMPLIANCE_MAP: dict[str, list[str]] = {
         "PCI-DSS 4.1",
         "ISO 27001 A.10.1.1",
     ],
+    "ssl_weak_cipher": [
+        "PCI-DSS 4.1",
+        "ISO 27001 A.10.1.1",
+    ],
+    "ssl_no_pfs": [
+        "PCI-DSS 4.1",
+        "ISO 27001 A.10.1.1",
+    ],
+    "ssl_weak_key": [
+        "PCI-DSS 4.1",
+        "ISO 27001 A.10.1.1",
+    ],
+    "ssl_no_sct": [
+        "ISO 27001 A.10.1.1",
+    ],
     # -- Email security ----------------------------------------------------
     "email_no_spf": [
         "ISO 27001 A.13.2.1",
@@ -119,6 +134,18 @@ _COMPLIANCE_MAP: dict[str, list[str]] = {
         "ISO 27001 A.14.1.2",
     ],
     "cors_credentials": [
+        "PCI-DSS 6.5.8",
+        "ISO 27001 A.14.1.2",
+    ],
+    "cors_null_origin": [
+        "PCI-DSS 6.5.8",
+        "ISO 27001 A.14.1.2",
+    ],
+    "cors_sensitive_methods": [
+        "PCI-DSS 6.5.8",
+        "ISO 27001 A.14.1.2",
+    ],
+    "cors_sensitive_headers_exposed": [
         "PCI-DSS 6.5.8",
         "ISO 27001 A.14.1.2",
     ],
@@ -393,19 +420,66 @@ def _classify_header_findings(
             ))
         elif h.status == "misconfigured" and h.header == "Access-Control-Allow-Origin":
             is_wildcard = h.value == "*"
+            is_null = h.value == "null"
+            if is_null:
+                findings.append(PrioritizedFinding(
+                    id="cors_null_origin",
+                    title="CORS allows null origin (file:// bypass risk)",
+                    category="security_headers",
+                    severity="high",
+                    classification=FindingClassification.confirmed_issue,
+                    confidence="high",
+                    owner=FindingOwner.customer,
+                    why_it_matters=h.recommendation,
+                    business_impact="Cross-origin data theft via sandboxed iframe or local file exploit",
+                    evidence=[f"Access-Control-Allow-Origin: {h.value}"],
+                    recommended_action=h.recommendation,
+                    source_field="security_headers",
+                ))
+            else:
+                findings.append(PrioritizedFinding(
+                    id="cors_wildcard" if is_wildcard else "cors_credentials",
+                    title="CORS wildcard allows any origin" if is_wildcard
+                        else "CORS with credentials — verify trusted origin",
+                    category="security_headers",
+                    severity=h.severity,
+                    classification=FindingClassification.confirmed_issue,
+                    confidence="high",
+                    owner=FindingOwner.customer,
+                    why_it_matters=h.recommendation,
+                    business_impact="Cross-origin data theft risk" if is_wildcard
+                        else "Authenticated cross-origin request risk",
+                    evidence=[f"Access-Control-Allow-Origin: {h.value}"],
+                    recommended_action=h.recommendation,
+                    source_field="security_headers",
+                ))
+        elif h.status == "misconfigured" and h.header == "Access-Control-Allow-Methods":
             findings.append(PrioritizedFinding(
-                id="cors_wildcard" if is_wildcard else "cors_credentials",
-                title="CORS wildcard allows any origin" if is_wildcard
-                    else "CORS with credentials — verify trusted origin",
+                id="cors_sensitive_methods",
+                title="CORS exposes sensitive HTTP methods",
                 category="security_headers",
                 severity=h.severity,
                 classification=FindingClassification.confirmed_issue,
                 confidence="high",
                 owner=FindingOwner.customer,
                 why_it_matters=h.recommendation,
-                business_impact="Cross-origin data theft risk" if is_wildcard
-                    else "Authenticated cross-origin request risk",
-                evidence=[f"Access-Control-Allow-Origin: {h.value}"],
+                business_impact="Cross-origin state-changing requests risk",
+                evidence=[f"Access-Control-Allow-Methods: {h.value}"],
+                recommended_action=h.recommendation,
+                source_field="security_headers",
+            ))
+        elif h.status == "misconfigured" and h.header == "Access-Control-Expose-Headers":
+            findings.append(PrioritizedFinding(
+                id="cors_sensitive_headers_exposed",
+                title="CORS exposes sensitive response headers",
+                category="security_headers",
+                severity=h.severity,
+                classification=FindingClassification.confirmed_issue,
+                confidence="high",
+                owner=FindingOwner.customer,
+                why_it_matters=h.recommendation,
+                business_impact="Credential or token leakage via cross-origin reads",
+                evidence=[f"Access-Control-Expose-Headers: {h.value}"],
                 recommended_action=h.recommendation,
                 source_field="security_headers",
             ))
@@ -495,6 +569,86 @@ def _classify_ssl_findings(result: DomainResult) -> list[PrioritizedFinding]:
             recommended_action="Renew the certificate before expiry. Enable auto-renewal if possible.",
             source_field="ssl_certificate",
         ))
+
+    if ssl.cipher_bits and ssl.cipher_bits < 128:
+        findings.append(PrioritizedFinding(
+            id="ssl_weak_cipher",
+            title=f"Weak cipher key length ({ssl.cipher_bits} bits)",
+            category="ssl",
+            severity="medium",
+            classification=FindingClassification.confirmed_issue,
+            confidence="high",
+            owner=FindingOwner.customer,
+            why_it_matters="Cipher suites with less than 128-bit keys are vulnerable to brute-force attacks.",
+            business_impact="Encrypted traffic may be decryptable",
+            evidence=[f"Cipher: {ssl.cipher}, Key bits: {ssl.cipher_bits}"],
+            recommended_action="Configure the server to use cipher suites with at least 128-bit keys (256-bit preferred).",
+            source_field="ssl_certificate",
+        ))
+
+    if ssl.cipher and not ssl.pfs:
+        findings.append(PrioritizedFinding(
+            id="ssl_no_pfs",
+            title="No Perfect Forward Secrecy (PFS)",
+            category="ssl",
+            severity="medium",
+            classification=FindingClassification.confirmed_issue,
+            confidence="high",
+            owner=FindingOwner.customer,
+            why_it_matters="Without PFS, compromise of the server's private key allows decryption of all past traffic.",
+            business_impact="Historical traffic decryption risk if key is compromised",
+            evidence=[f"Cipher: {ssl.cipher} (no ECDHE/DHE key exchange)"],
+            recommended_action="Configure the server to prefer ECDHE or DHE cipher suites for forward secrecy.",
+            source_field="ssl_certificate",
+        ))
+
+    if ssl.key_type == "RSA" and 0 < ssl.key_size < 2048:
+        findings.append(PrioritizedFinding(
+            id="ssl_weak_key",
+            title=f"Weak RSA key ({ssl.key_size} bits)",
+            category="ssl",
+            severity="high",
+            classification=FindingClassification.confirmed_issue,
+            confidence="high",
+            owner=FindingOwner.customer,
+            why_it_matters="RSA keys under 2048 bits are considered factorizable with modern computing resources.",
+            business_impact="Certificate key may be compromised",
+            evidence=[f"Key: {ssl.key_type} {ssl.key_size}-bit"],
+            recommended_action="Reissue the certificate with at least a 2048-bit RSA key (3072+ recommended).",
+            source_field="ssl_certificate",
+        ))
+    elif ssl.key_type == "EC" and 0 < ssl.key_size < 256:
+        findings.append(PrioritizedFinding(
+            id="ssl_weak_key",
+            title=f"Weak EC key ({ssl.key_size} bits)",
+            category="ssl",
+            severity="high",
+            classification=FindingClassification.confirmed_issue,
+            confidence="high",
+            owner=FindingOwner.customer,
+            why_it_matters="EC keys under 256 bits do not provide adequate security for modern threats.",
+            business_impact="Certificate key may be compromised",
+            evidence=[f"Key: {ssl.key_type} {ssl.key_size}-bit"],
+            recommended_action="Reissue the certificate with at least a P-256 (256-bit) EC key.",
+            source_field="ssl_certificate",
+        ))
+
+    if ssl.grade and ssl.key_type and not ssl.has_sct:
+        findings.append(PrioritizedFinding(
+            id="ssl_no_sct",
+            title="No embedded Certificate Transparency timestamps",
+            category="ssl",
+            severity="low",
+            classification=FindingClassification.informational,
+            confidence="medium",
+            owner=FindingOwner.customer,
+            why_it_matters="Certificates without SCTs may not comply with Certificate Transparency requirements.",
+            business_impact="Limited — most CAs now include SCTs by default",
+            evidence=["Certificate does not contain embedded SCT extension"],
+            recommended_action="Ensure the CA includes SCTs when issuing/renewing the certificate.",
+            source_field="ssl_certificate",
+        ))
+
     return findings
 
 

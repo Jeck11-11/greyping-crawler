@@ -248,6 +248,19 @@ class HeaderFinding(BaseModel):
         return self
 
 
+class CORSAnalysis(BaseModel):
+    """Detailed CORS policy analysis extracted from Access-Control-* headers."""
+
+    origin_policy: str = Field(default="", description="Access-Control-Allow-Origin value.")
+    allows_credentials: bool = False
+    allowed_methods: list[str] = Field(default_factory=list)
+    allowed_headers: list[str] = Field(default_factory=list)
+    exposed_headers: list[str] = Field(default_factory=list)
+    max_age: int | None = None
+    null_origin: bool = False
+    issues: list[str] = Field(default_factory=list)
+
+
 class SecurityHeadersResult(BaseModel):
     """Aggregated security-headers audit for a target."""
 
@@ -256,6 +269,7 @@ class SecurityHeadersResult(BaseModel):
     findings: list[HeaderFinding] = Field(default_factory=list)
     server: str = Field(default="", description="Server header value (information leakage).")
     powered_by: str = Field(default="", description="X-Powered-By value (information leakage).")
+    cors: CORSAnalysis = Field(default_factory=CORSAnalysis, description="Detailed CORS policy analysis.")
 
 
 class CookieFinding(BaseModel):
@@ -307,6 +321,15 @@ class SSLCertResult(BaseModel):
     grade: str = Field(default="")
     tls_version: str = Field(default="")
     cipher: str = Field(default="")
+    cipher_bits: int = Field(default=0, description="Negotiated cipher key exchange bit length.")
+    cipher_strength: str = Field(default="", description="strong (256+), acceptable (128), weak (<128).")
+    pfs: bool = Field(default=False, description="True if cipher uses ephemeral key exchange (ECDHE/DHE).")
+    key_type: str = Field(default="", description="Public key type: RSA, EC, DSA, Ed25519, Ed448.")
+    key_size: int = Field(default=0, description="Public key size in bits (e.g. 2048, 256).")
+    ocsp_must_staple: bool = Field(default=False, description="True if cert has OCSP Must-Staple extension.")
+    ocsp_responder: str = Field(default="", description="OCSP responder URL from AIA extension.")
+    ca_issuers_url: str = Field(default="", description="CA Issuers URL from AIA extension.")
+    has_sct: bool = Field(default=False, description="True if cert has embedded Signed Certificate Timestamps.")
     issues: list[str] = Field(default_factory=list)
 
 
