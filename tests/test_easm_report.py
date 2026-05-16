@@ -114,6 +114,25 @@ class TestHeaderClassification:
         assert hsts[0].owner == FindingOwner.customer
 
 
+    @patch("src.easm_report._classify_ssl_findings", side_effect=RuntimeError("boom"))
+    def test_classifier_failure_does_not_empty_entire_report(self, _mock_ssl):
+        result = DomainResult(
+            target="https://example.com",
+            security=SecurityGroup(headers=SecurityHeadersResult(
+                grade="D", score=30,
+                findings=[
+                    HeaderFinding(header="Strict-Transport-Security", status="missing", severity="high"),
+                ],
+            )),
+        )
+
+        report = build_easm_report(result, scan_mode="full")
+
+        assert report.total_findings >= 1
+        assert any(f.id == "missing_strict_transport_security" for f in report.prioritized_findings)
+
+
+
 # ---------------------------------------------------------------------------
 # Cookie classification
 # ---------------------------------------------------------------------------
