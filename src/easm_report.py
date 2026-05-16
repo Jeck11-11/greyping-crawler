@@ -1272,19 +1272,32 @@ def build_easm_report(
         platform, profile = _detect_primary_platform(result)
 
         all_findings: list[PrioritizedFinding] = []
-        all_findings.extend(_classify_header_findings(result, platform, profile))
-        all_findings.extend(_classify_cookie_findings(result, platform, profile))
-        all_findings.extend(_classify_ssl_findings(result))
-        all_findings.extend(_classify_secret_findings(result))
-        all_findings.extend(_classify_path_findings(result))
-        all_findings.extend(_classify_ioc_findings(result))
-        all_findings.extend(_classify_email_security(result))
-        all_findings.extend(_classify_dns_findings(result))
-        all_findings.extend(_classify_breach_findings(result))
-        all_findings.extend(_classify_robots_sitemap(result))
-        all_findings.extend(_classify_js_intel(result))
-        all_findings.extend(_classify_typosquatting_findings(result))
-        all_findings.extend(_classify_privacy_findings(result))
+
+        classifiers = (
+            ("headers", lambda: _classify_header_findings(result, platform, profile)),
+            ("cookies", lambda: _classify_cookie_findings(result, platform, profile)),
+            ("ssl", lambda: _classify_ssl_findings(result)),
+            ("secrets", lambda: _classify_secret_findings(result)),
+            ("paths", lambda: _classify_path_findings(result)),
+            ("ioc", lambda: _classify_ioc_findings(result)),
+            ("email_security", lambda: _classify_email_security(result)),
+            ("dns", lambda: _classify_dns_findings(result)),
+            ("breaches", lambda: _classify_breach_findings(result)),
+            ("robots_sitemap", lambda: _classify_robots_sitemap(result)),
+            ("js_intel", lambda: _classify_js_intel(result)),
+            ("typosquatting", lambda: _classify_typosquatting_findings(result)),
+            ("privacy", lambda: _classify_privacy_findings(result)),
+        )
+
+        for stage, classifier in classifiers:
+            try:
+                all_findings.extend(classifier())
+            except Exception:
+                logger.exception(
+                    "EASM classifier '%s' failed for %s",
+                    stage,
+                    result.target,
+                )
 
         sorted_findings = _sort_findings(all_findings)
 
@@ -1324,7 +1337,7 @@ def build_easm_report(
             platform_detected=platform,
         )
     except Exception as exc:
-        logger.warning("EASM report generation failed for %s: %s", result.target, exc)
+        logger.exception("EASM report generation failed for %s: %s", result.target, exc)
         return EASMReport(
             generated_at=datetime.now(timezone.utc).isoformat(),
             scan_mode=scan_mode,
