@@ -750,10 +750,9 @@ async def _scan_single_target(
         },
     )
     result.attack_paths = analyze_attack_paths(result)
-    result.risk_assessment = RiskAssessmentGroup(
-        fair_signals=compute_fair_signals(result, scan_mode="full"),
-        easm_report=build_easm_report(result, scan_mode="full"),
-    )
+    fair = compute_fair_signals(result, scan_mode="full")
+    result.risk_assessment = RiskAssessmentGroup(fair_signals=fair)
+    result.risk_assessment.easm_report = build_easm_report(result, scan_mode="full")
     if result.risk_assessment.easm_report:
         result.summary.overall_grade = result.risk_assessment.easm_report.overall_grade
         result.summary.ransomware_susceptibility = result.risk_assessment.easm_report.ransomware_susceptibility.score
@@ -1053,10 +1052,9 @@ async def _lighttouch_single_target(target: str, timeout: int) -> DomainResult:
         error=None if html else "landing page fetch failed",
     )
     result.attack_paths = analyze_attack_paths(result)
-    result.risk_assessment = RiskAssessmentGroup(
-        fair_signals=compute_fair_signals(result, scan_mode="lighttouch"),
-        easm_report=build_easm_report(result, scan_mode="lighttouch"),
-    )
+    fair = compute_fair_signals(result, scan_mode="lighttouch")
+    result.risk_assessment = RiskAssessmentGroup(fair_signals=fair)
+    result.risk_assessment.easm_report = build_easm_report(result, scan_mode="lighttouch")
     if result.risk_assessment.easm_report:
         result.summary.overall_grade = result.risk_assessment.easm_report.overall_grade
         result.summary.ransomware_susceptibility = result.risk_assessment.easm_report.ransomware_susceptibility.score
@@ -1235,10 +1233,9 @@ async def _passive_single_target(
         error=passive_error,
     )
     result.attack_paths = analyze_attack_paths(result)
-    result.risk_assessment = RiskAssessmentGroup(
-        fair_signals=compute_fair_signals(result, scan_mode="passive"),
-        easm_report=build_easm_report(result, scan_mode="passive"),
-    )
+    fair = compute_fair_signals(result, scan_mode="passive")
+    result.risk_assessment = RiskAssessmentGroup(fair_signals=fair)
+    result.risk_assessment.easm_report = build_easm_report(result, scan_mode="passive")
     if result.risk_assessment.easm_report:
         result.summary.overall_grade = result.risk_assessment.easm_report.overall_grade
         result.summary.ransomware_susceptibility = result.risk_assessment.easm_report.ransomware_susceptibility.score

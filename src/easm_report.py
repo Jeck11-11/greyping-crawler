@@ -1780,6 +1780,65 @@ def _classify_supply_chain_findings(result: DomainResult) -> list[PrioritizedFin
 
 
 # ---------------------------------------------------------------------------
+# Open port / exposed service findings
+# ---------------------------------------------------------------------------
+
+_RISKY_PORTS: dict[int, tuple[str, str]] = {
+    3306: ("MySQL", "critical"),
+    5432: ("PostgreSQL", "critical"),
+    6379: ("Redis", "critical"),
+    27017: ("MongoDB", "critical"),
+    11211: ("Memcached", "critical"),
+    9200: ("Elasticsearch", "high"),
+    9300: ("Elasticsearch", "high"),
+    5984: ("CouchDB", "high"),
+    1433: ("MSSQL", "critical"),
+    3389: ("RDP", "high"),
+    23: ("Telnet", "high"),
+    21: ("FTP", "medium"),
+    445: ("SMB", "high"),
+    139: ("NetBIOS", "high"),
+    8080: ("HTTP-Alt", "info"),
+    8443: ("HTTPS-Alt", "info"),
+}
+
+
+def _classify_port_findings(result: DomainResult) -> list[PrioritizedFinding]:
+    """Flag exposed databases and risky services from port scan results."""
+    findings: list[PrioritizedFinding] = []
+    if not result.port_scan or not result.port_scan.open_ports:
+        return findings
+
+    for port in result.port_scan.open_ports:
+        if port.port in _RISKY_PORTS:
+            service_name, severity = _RISKY_PORTS[port.port]
+            findings.append(PrioritizedFinding(
+                id=f"port-exposed-{port.port}",
+                title=f"Exposed {service_name} service on port {port.port}",
+                severity=severity,
+                classification=FindingClassification.confirmed_issue,
+                description=(
+                    f"{service_name} (port {port.port}) is publicly reachable. "
+                    "Database and administrative services should not be exposed to the internet."
+                ),
+                remediation=f"Restrict port {port.port} via firewall rules or security groups. Use VPN/SSH tunnels for remote access.",
+                source_field="port_scan",
+            ))
+        elif port.is_risky:
+            findings.append(PrioritizedFinding(
+                id=f"port-exposed-{port.port}",
+                title=f"Risky service on port {port.port} ({port.service or 'unknown'})",
+                severity="medium",
+                classification=FindingClassification.confirmed_issue,
+                description=f"Port {port.port} ({port.service or 'unknown service'}) is publicly reachable and flagged as risky.",
+                remediation=f"Review whether port {port.port} needs public exposure. Restrict access if not required.",
+                source_field="port_scan",
+            ))
+
+    return findings
+
+
+# ---------------------------------------------------------------------------
 # Overall domain risk grade (A+ to F)
 # ---------------------------------------------------------------------------
 
@@ -2169,6 +2228,7 @@ def build_easm_report(
         all_findings.extend(_classify_privacy_findings(result))
         all_findings.extend(_classify_cloud_findings(result))
         all_findings.extend(_classify_supply_chain_findings(result))
+        all_findings.extend(_classify_port_findings(result))
 
         sorted_findings = _sort_findings(all_findings)
 
