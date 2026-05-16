@@ -647,11 +647,8 @@ _MX_PROVIDERS: list[tuple[str, str]] = [
 
 def _parse_spf(txt_records: list[str]) -> SPFResult:
     """Extract SPF from the domain's TXT records and parse key fields."""
-    raw = None
-    for txt in txt_records:
-        if txt.lower().startswith("v=spf1"):
-            raw = txt
-            break
+    spf_records = [txt for txt in txt_records if txt.lower().startswith("v=spf1")]
+    raw = spf_records[0] if spf_records else None
     if not raw:
         return SPFResult(
             exists=False,
@@ -666,6 +663,11 @@ def _parse_spf(txt_records: list[str]) -> SPFResult:
         all_qual = m.group(0)
 
     issues: list[str] = []
+    if len(spf_records) > 1:
+        issues.append(
+            f"Multiple SPF records found ({len(spf_records)}) — RFC 7208 requires exactly one; "
+            "receiving servers may return permerror"
+        )
     if all_qual == "+all":
         issues.append("SPF uses +all (pass) — allows any sender, effectively no protection")
     elif all_qual == "?all":

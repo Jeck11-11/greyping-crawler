@@ -837,6 +837,25 @@ def _classify_email_security(result: DomainResult) -> list[PrioritizedFinding]:
             source_field="passive_intel.email_security",
         ))
 
+    # Duplicate SPF records (RFC 7208 violation)
+    if es.spf.exists and any(
+        "Multiple SPF records" in issue for issue in es.spf.issues
+    ):
+        findings.append(PrioritizedFinding(
+            id="email_duplicate_spf",
+            title="Multiple SPF records (RFC 7208 violation)",
+            category="email_security",
+            severity="medium",
+            classification=FindingClassification.confirmed_issue,
+            confidence="high",
+            owner=FindingOwner.customer,
+            why_it_matters="RFC 7208 requires exactly one SPF record per domain. Multiple records cause receiving servers to return permerror, effectively disabling SPF.",
+            business_impact="Email authentication completely broken — SPF provides no protection",
+            evidence=[i for i in es.spf.issues if "Multiple SPF" in i],
+            recommended_action="Merge all SPF records into a single TXT record combining all include: and ip4: mechanisms.",
+            source_field="passive_intel.email_security",
+        ))
+
     # SPF deep intel findings.
     spf_intel = es.spf.intel
     if spf_intel:
@@ -1663,7 +1682,7 @@ def _classify_cloud_findings(result: DomainResult) -> list[PrioritizedFinding]:
                 id="exposed_cloud_database",
                 title=f"Cloud database endpoint in DNS: {svc.service}",
                 category="cloud_infrastructure",
-                severity=FindingSeverity.high,
+                severity="high",
                 classification=FindingClassification.confirmed_issue,
                 confidence="high",
                 owner=FindingOwner.customer,
@@ -1684,7 +1703,7 @@ def _classify_cloud_findings(result: DomainResult) -> list[PrioritizedFinding]:
                 id="public_cloud_bucket",
                 title=f"Public {bucket.provider} bucket: {bucket.bucket_name}",
                 category="cloud_infrastructure",
-                severity=FindingSeverity.critical,
+                severity="critical",
                 classification=FindingClassification.confirmed_issue,
                 confidence="high",
                 owner=FindingOwner.customer,
@@ -2206,7 +2225,7 @@ def build_easm_report(
             platform_detected=platform,
         )
     except Exception as exc:
-        logger.warning("EASM report generation failed for %s: %s", result.target, exc)
+        logger.warning("EASM report generation failed for %s: %s", result.target, exc, exc_info=True)
         return EASMReport(
             generated_at=datetime.now(timezone.utc).isoformat(),
             scan_mode=scan_mode,

@@ -254,7 +254,7 @@ class TestDiscoverCloudAssetsS3:
         assert len(private_findings) >= 1
         s3_private = [f for f in private_findings if f.provider == "aws_s3"]
         assert len(s3_private) >= 1
-        assert s3_private[0].severity == "high"
+        assert s3_private[0].severity == "info"
         assert "AccessDenied" in s3_private[0].evidence
 
     @pytest.mark.asyncio
@@ -333,7 +333,7 @@ class TestDiscoverCloudAssetsAzure:
 
         azure_private = [f for f in result.findings if f.provider == "azure_blob" and f.status == "exists_private"]
         assert len(azure_private) >= 1
-        assert azure_private[0].severity == "high"
+        assert azure_private[0].severity == "info"
 
     @pytest.mark.asyncio
     async def test_azure_blob_not_found(self):
@@ -410,7 +410,7 @@ class TestDiscoverCloudAssetsGCS:
 
         gcs_private = [f for f in result.findings if f.provider == "gcs" and f.status == "exists_private"]
         assert len(gcs_private) >= 1
-        assert gcs_private[0].severity == "high"
+        assert gcs_private[0].severity == "info"
 
     @pytest.mark.asyncio
     async def test_gcs_bucket_not_found(self):

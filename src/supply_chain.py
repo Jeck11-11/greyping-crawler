@@ -43,6 +43,12 @@ _CDN_PROVIDERS: list[tuple[str, str]] = [
     ("cdn.skypack.dev", "Skypack"),
     ("polyfill.io", "Polyfill.io (COMPROMISED)"),
     ("cdn.polyfill.io", "Polyfill.io (COMPROMISED)"),
+    ("static.parastorage.com", "Wix"),
+    ("parastorage.com", "Wix"),
+    ("static.wixstatic.com", "Wix"),
+    ("browser.sentry-cdn.com", "Sentry"),
+    ("sentry-cdn.com", "Sentry"),
+    ("secure.leadforensics.com", "LeadForensics"),
 ]
 
 _CDN_PATTERNS: list[tuple[re.Pattern[str], str]] = [

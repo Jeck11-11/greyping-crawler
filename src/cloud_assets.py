@@ -293,7 +293,7 @@ async def discover_cloud_assets(
                     url=url,
                     status=status,
                     evidence=evidence,
-                    severity="critical" if status == "public" else "high",
+                    severity="critical" if status == "public" else "info",
                 ))
 
     try:
