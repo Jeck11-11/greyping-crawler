@@ -374,3 +374,11 @@ class TestEASMIntegration:
         assert r["risk_assessment"]["easm_report"]["scan_mode"] == "passive"
 
 
+
+
+def test_finding_owner_informational_alias_back_compat():
+    """Older code paths may reference FindingOwner.informational."""
+    from src.models import FindingOwner
+
+    assert FindingOwner.informational == FindingOwner.not_actionable
+
