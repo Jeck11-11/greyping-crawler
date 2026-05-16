@@ -427,6 +427,28 @@ class JSIntelResult(BaseModel):
     error: str | None = None
 
 
+class ThirdPartyResource(BaseModel):
+    url: str = ""
+    resource_type: str = Field(default="", description="script or stylesheet.")
+    provider: str = Field(default="unknown", description="CDN provider name or 'unknown'.")
+    library: str = Field(default="", description="Detected library name or empty.")
+    version: str = Field(default="", description="Extracted version or empty.")
+    has_sri: bool = Field(default=False, description="True if integrity= attribute present.")
+    risk: str = Field(default="info", description="high, medium, low, or info.")
+    issues: list[str] = Field(default_factory=list)
+
+
+class SupplyChainResult(BaseModel):
+    total_external_resources: int = 0
+    scripts_without_sri: int = 0
+    stylesheets_without_sri: int = 0
+    vulnerable_libraries: int = 0
+    providers: list[str] = Field(default_factory=list, description="Unique CDN/hosting providers.")
+    resources: list[ThirdPartyResource] = Field(default_factory=list)
+    risk_summary: str = Field(default="none", description="Overall risk: high, medium, low, none.")
+    issues: list[str] = Field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # Passive intel models (DNS, CT logs, RDAP, Wayback)
 # ---------------------------------------------------------------------------
@@ -1404,6 +1426,8 @@ class DomainSummary(BaseModel):
     exposed_databases_found: int = 0
     spf_senders_found: int = Field(default=0, description="Unique IPs/CIDRs in SPF chain.")
     spf_services_found: int = Field(default=0, description="Third-party services identified in SPF includes.")
+    vulnerable_libraries: int = Field(default=0, description="Known vulnerable third-party libraries detected.")
+    scripts_without_sri: int = Field(default=0, description="External scripts missing Subresource Integrity.")
     screenshots_taken: int = 0
     typosquat_candidates: int = Field(default=0, description="Registered lookalike domains found.")
     waf_detected: str = Field(default="", description="WAF/firewall product detected by C99 (empty if none).")
@@ -1524,6 +1548,7 @@ class DomainResult(BaseModel):
     technologies: list[TechFinding] = Field(default_factory=list)
     breaches: list[BreachRecord] = Field(default_factory=list)
     js_intel: JSIntelResult | None = None
+    supply_chain: SupplyChainResult | None = None
     port_scan: PortScanResult | None = None
     cloud_assets: CloudAssetResult | None = None
     passive_intel: PassiveIntelSlim | None = None

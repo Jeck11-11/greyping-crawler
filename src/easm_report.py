@@ -91,6 +91,19 @@ _COMPLIANCE_MAP: dict[str, list[str]] = {
     "ssl_no_sct": [
         "ISO 27001 A.10.1.1",
     ],
+    # -- Supply chain ------------------------------------------------------
+    "supply_chain_vulnerable_lib": [
+        "PCI-DSS 6.2",
+        "ISO 27001 A.12.6.1",
+    ],
+    "supply_chain_no_sri": [
+        "PCI-DSS 6.5.7",
+        "ISO 27001 A.14.1.2",
+    ],
+    "supply_chain_compromised_provider": [
+        "PCI-DSS 6.2",
+        "ISO 27001 A.15.1.1",
+    ],
     # -- Email security ----------------------------------------------------
     "email_no_spf": [
         "ISO 27001 A.13.2.1",
@@ -1649,6 +1662,68 @@ def _classify_cloud_findings(result: DomainResult) -> list[PrioritizedFinding]:
     return findings
 
 
+def _classify_supply_chain_findings(result: DomainResult) -> list[PrioritizedFinding]:
+    """Emit findings for third-party supply chain risks."""
+    findings: list[PrioritizedFinding] = []
+    if not result.supply_chain:
+        return findings
+
+    sc = result.supply_chain
+
+    vuln_resources = [r for r in sc.resources if r.risk == "high" and r.library]
+    for r in vuln_resources:
+        findings.append(PrioritizedFinding(
+            id="supply_chain_vulnerable_lib",
+            title=f"Vulnerable library: {r.library} {r.version}",
+            category="supply_chain",
+            severity="high",
+            classification=FindingClassification.confirmed_issue,
+            confidence="high",
+            owner=FindingOwner.customer,
+            why_it_matters="Known vulnerabilities in client-side libraries can be exploited for XSS or data theft.",
+            business_impact="Client-side code execution risk",
+            evidence=r.issues[:3],
+            recommended_action=f"Upgrade {r.library} to the latest stable version.",
+            source_field="supply_chain",
+        ))
+
+    compromised = [r for r in sc.resources if "COMPROMISED" in r.provider]
+    for r in compromised:
+        findings.append(PrioritizedFinding(
+            id="supply_chain_compromised_provider",
+            title=f"Resource from compromised provider: {r.provider}",
+            category="supply_chain",
+            severity="critical",
+            classification=FindingClassification.confirmed_issue,
+            confidence="high",
+            owner=FindingOwner.customer,
+            why_it_matters="This CDN provider has been compromised and used to serve malicious code.",
+            business_impact="Active supply chain attack vector — arbitrary JS execution on visitors",
+            evidence=[r.url],
+            recommended_action="Remove immediately. Self-host the resource or migrate to a trusted CDN.",
+            source_field="supply_chain",
+        ))
+
+    if sc.scripts_without_sri > 0:
+        no_sri = [r for r in sc.resources if r.resource_type == "script" and not r.has_sri]
+        findings.append(PrioritizedFinding(
+            id="supply_chain_no_sri",
+            title=f"{sc.scripts_without_sri} external script(s) without Subresource Integrity",
+            category="supply_chain",
+            severity="medium",
+            classification=FindingClassification.confirmed_issue,
+            confidence="high",
+            owner=FindingOwner.customer,
+            why_it_matters="Without SRI, a compromised CDN can inject malicious code into your site.",
+            business_impact="Supply chain attack vector — CDN compromise leads to site compromise",
+            evidence=[r.url for r in no_sri[:5]],
+            recommended_action="Add integrity= and crossorigin= attributes to all external script tags.",
+            source_field="supply_chain",
+        ))
+
+    return findings
+
+
 def build_easm_report(
     result: DomainResult, *, scan_mode: str = "full",
 ) -> EASMReport:
@@ -1671,6 +1746,7 @@ def build_easm_report(
         all_findings.extend(_classify_typosquatting_findings(result))
         all_findings.extend(_classify_privacy_findings(result))
         all_findings.extend(_classify_cloud_findings(result))
+        all_findings.extend(_classify_supply_chain_findings(result))
 
         sorted_findings = _sort_findings(all_findings)
 

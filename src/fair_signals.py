@@ -599,6 +599,29 @@ def _build_vulnerability(result: DomainResult) -> FAIRFactor:
             evidence=[f"{h.header}: {h.value}" for h in cors_findings[:5]],
         ))
 
+    # Supply chain risk — vulnerable libraries and missing SRI.
+    if result.supply_chain:
+        sc = result.supply_chain
+        sc_score = 0
+        sc_evidence: list[str] = []
+        if sc.vulnerable_libraries:
+            sc_score += min(80, 40 + sc.vulnerable_libraries * 20)
+            sc_evidence.append(f"{sc.vulnerable_libraries} vulnerable library version(s)")
+        compromised = [r for r in sc.resources if "COMPROMISED" in r.provider]
+        if compromised:
+            sc_score = 100
+            sc_evidence.append(f"Compromised provider: {compromised[0].provider}")
+        if sc.scripts_without_sri:
+            sc_score += min(30, sc.scripts_without_sri * 5)
+            sc_evidence.append(f"{sc.scripts_without_sri} external scripts without SRI")
+        if sc_score:
+            signals.append(FAIRSignal(
+                name="supply_chain_risk",
+                score=min(100, sc_score),
+                weight=1.2,
+                evidence=sc_evidence,
+            ))
+
     # Open ports (non-risky but numerous = larger attack surface)
     if result.port_scan and result.port_scan.open_ports:
         total_open = len(result.port_scan.open_ports)

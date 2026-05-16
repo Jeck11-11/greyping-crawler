@@ -120,6 +120,9 @@ _SKIP_NAMES = frozenset({
     # Links group — empty means none found
     "internal",
     "external",
+    # Supply chain — empty means no external resources found
+    "resources",
+    "providers",
     # Port scan — empty means no open ports / no banner
     "open_ports",
     "banner",

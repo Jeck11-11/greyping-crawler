@@ -285,6 +285,14 @@ async def _scan_single_target(
     except Exception as exc:
         logger.warning("Tech fingerprint failed for %s: %s", target, exc)
 
+    # Supply chain risk analysis (same landing HTML, zero requests).
+    from .supply_chain import analyze_supply_chain
+    supply_chain_result = None
+    try:
+        supply_chain_result = analyze_supply_chain(landing_html, target)
+    except Exception as exc:
+        logger.warning("Supply chain analysis failed for %s: %s", target, exc)
+
     # Merge httpx probe results (ran in Phase 1 gather).
     if isinstance(httpx_probe_result, Exception):
         logger.debug("httpx tech supplement failed for %s: %s", target, httpx_probe_result)
@@ -673,6 +681,8 @@ async def _scan_single_target(
         consent_tool=privacy_result.consent_tool if privacy_result else "",
         spf_senders_found=len(email_sec.spf.intel.senders) if email_sec.spf.intel else 0,
         spf_services_found=len(email_sec.spf.intel.services_detected) if email_sec.spf.intel else 0,
+        vulnerable_libraries=supply_chain_result.vulnerable_libraries if supply_chain_result else 0,
+        scripts_without_sri=supply_chain_result.scripts_without_sri if supply_chain_result else 0,
     )
 
     # Build page summary from the raw pages list
@@ -715,6 +725,7 @@ async def _scan_single_target(
         technologies=tech_findings,
         breaches=breaches,
         js_intel=js_intel_result,
+        supply_chain=supply_chain_result,
         port_scan=port_scan_result,
         cloud_assets=cloud_assets_result,
         passive_intel=passive_slim,
@@ -930,6 +941,12 @@ async def _lighttouch_single_target(target: str, timeout: int) -> DomainResult:
         meta=meta,
     )
 
+    lt_supply_chain = None
+    try:
+        lt_supply_chain = analyze_supply_chain(html, target)
+    except Exception as exc:
+        logger.warning("Supply chain analysis failed for %s: %s", target, exc)
+
     headers_result = analyze_headers(resp_headers)
     cookie_findings = analyze_cookies(resp_cookies)
 
@@ -993,6 +1010,8 @@ async def _lighttouch_single_target(target: str, timeout: int) -> DomainResult:
         ioc_findings=len(iocs),
         technologies_found=len(tech_findings),
         js_endpoints_found=0,
+        vulnerable_libraries=lt_supply_chain.vulnerable_libraries if lt_supply_chain else 0,
+        scripts_without_sri=lt_supply_chain.scripts_without_sri if lt_supply_chain else 0,
     )
 
     from urllib.parse import urlparse as _urlparse
@@ -1025,6 +1044,7 @@ async def _lighttouch_single_target(target: str, timeout: int) -> DomainResult:
             routes=_lt_routes,
         ),
         technologies=tech_findings,
+        supply_chain=lt_supply_chain,
         passive_intel=lt_passive_slim,
         metadata={"domain": domain, "mode": "lighttouch"},
         error=None if html else "landing page fetch failed",
