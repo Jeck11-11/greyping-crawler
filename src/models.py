@@ -1034,6 +1034,50 @@ class ExecutiveSummary(BaseModel):
     key_positives: list[str] = Field(default_factory=list, description="Up to 3 strengths observed.")
     key_concerns: list[str] = Field(default_factory=list, description="Up to 3 areas of concern.")
     scan_coverage: str = Field(default="", description="full / lighttouch / passive.")
+    overall_grade: str = Field(default="", description="Overall domain risk grade A+ to F.")
+    grades: dict[str, str] = Field(
+        default_factory=dict,
+        description="Per-domain grades: ssl, headers, email, overall.",
+    )
+    top_risks: list[str] = Field(default_factory=list, description="Top 3 findings by severity.")
+    recommendations: list[str] = Field(default_factory=list, description="Top 3 remediation priorities.")
+
+
+class RansomwareIndex(BaseModel):
+    """Ransomware Susceptibility Index — 0-100 score predicting attack likelihood."""
+    score: int = Field(default=0, ge=0, le=100)
+    tier: str = Field(default="low", description="low / medium / high / critical.")
+    factors: list[str] = Field(default_factory=list, description="Contributing risk factors.")
+    mitigations: list[str] = Field(default_factory=list, description="Observed defences reducing risk.")
+
+
+class FinancialImpact(BaseModel):
+    """Estimated financial exposure based on FAIR risk quantification."""
+    estimated_annual_loss_low: int = Field(default=0, description="Conservative annual loss estimate ($).")
+    estimated_annual_loss_high: int = Field(default=0, description="Upper annual loss estimate ($).")
+    single_incident_cost_low: int = Field(default=0, description="Per-incident cost low ($).")
+    single_incident_cost_high: int = Field(default=0, description="Per-incident cost high ($).")
+    methodology: str = Field(default="FAIR-based with IBM CODB 2024 benchmarks")
+    factors: list[str] = Field(default_factory=list)
+
+
+class ComplianceControl(BaseModel):
+    """A single compliance control and its observed status."""
+    control_id: str = ""
+    control_name: str = ""
+    status: str = Field(default="not_tested", description="pass / fail / not_tested.")
+    findings: list[str] = Field(default_factory=list, description="Finding IDs affecting this control.")
+
+
+class CompliancePosture(BaseModel):
+    """Compliance readiness for a single framework."""
+    framework: str = ""
+    controls_tested: int = 0
+    controls_passing: int = 0
+    controls_failing: int = 0
+    controls_not_tested: int = 0
+    readiness_score: int = Field(default=0, ge=0, le=100)
+    controls: list[ComplianceControl] = Field(default_factory=list)
 
 
 class EASMReport(BaseModel):
@@ -1041,7 +1085,11 @@ class EASMReport(BaseModel):
 
     generated_at: str = ""
     scan_mode: str = ""
+    overall_grade: str = Field(default="", description="Aggregate A+ to F domain risk grade.")
     executive_summary: ExecutiveSummary = Field(default_factory=ExecutiveSummary)
+    ransomware_susceptibility: RansomwareIndex = Field(default_factory=RansomwareIndex)
+    financial_impact: FinancialImpact = Field(default_factory=FinancialImpact)
+    compliance_posture: list[CompliancePosture] = Field(default_factory=list)
     asset_context: AssetContext | None = None
     cloud_assets: list[CloudAsset] = Field(default_factory=list)
     recon_artifacts: list[ReconArtifact] = Field(default_factory=list)
@@ -1433,6 +1481,8 @@ class DomainSummary(BaseModel):
     waf_detected: str = Field(default="", description="WAF/firewall product detected by C99 (empty if none).")
     privacy_score: int = Field(default=0, description="Privacy compliance score (0-100).")
     consent_tool: str = Field(default="", description="Detected cookie consent management tool.")
+    overall_grade: str = Field(default="", description="Aggregate domain risk grade A+ to F.")
+    ransomware_susceptibility: int = Field(default=0, description="Ransomware Susceptibility Index 0-100.")
 
 
 # ---------------------------------------------------------------------------

@@ -754,6 +754,9 @@ async def _scan_single_target(
         fair_signals=compute_fair_signals(result, scan_mode="full"),
         easm_report=build_easm_report(result, scan_mode="full"),
     )
+    if result.risk_assessment.easm_report:
+        result.summary.overall_grade = result.risk_assessment.easm_report.overall_grade
+        result.summary.ransomware_susceptibility = result.risk_assessment.easm_report.ransomware_susceptibility.score
     fill_not_found(result)
     return result
 
@@ -1054,6 +1057,9 @@ async def _lighttouch_single_target(target: str, timeout: int) -> DomainResult:
         fair_signals=compute_fair_signals(result, scan_mode="lighttouch"),
         easm_report=build_easm_report(result, scan_mode="lighttouch"),
     )
+    if result.risk_assessment.easm_report:
+        result.summary.overall_grade = result.risk_assessment.easm_report.overall_grade
+        result.summary.ransomware_susceptibility = result.risk_assessment.easm_report.ransomware_susceptibility.score
     fill_not_found(result)
     return result
 
@@ -1233,6 +1239,9 @@ async def _passive_single_target(
         fair_signals=compute_fair_signals(result, scan_mode="passive"),
         easm_report=build_easm_report(result, scan_mode="passive"),
     )
+    if result.risk_assessment.easm_report:
+        result.summary.overall_grade = result.risk_assessment.easm_report.overall_grade
+        result.summary.ransomware_susceptibility = result.risk_assessment.easm_report.ransomware_susceptibility.score
     fill_not_found(result)
     return result
 

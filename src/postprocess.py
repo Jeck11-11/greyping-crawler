@@ -123,6 +123,14 @@ _SKIP_NAMES = frozenset({
     # Supply chain — empty means no external resources found
     "resources",
     "providers",
+    # Risk assessment — empty means no data available
+    "factors",
+    "mitigations",
+    "compliance_posture",
+    "controls",
+    "top_risks",
+    "recommendations",
+    "grades",
     # Port scan — empty means no open ports / no banner
     "open_ports",
     "banner",

@@ -15,12 +15,16 @@ from datetime import datetime, timezone
 from .models import (
     AssetContext,
     CloudAsset,
+    ComplianceControl,
+    CompliancePosture,
     DomainResult,
     EASMReport,
     ExecutiveSummary,
+    FinancialImpact,
     FindingClassification,
     FindingOwner,
     PrioritizedFinding,
+    RansomwareIndex,
     ReconArtifact,
 )
 
@@ -1423,6 +1427,11 @@ def _build_executive_summary(
     result: DomainResult,
     platform: str,
     scan_mode: str,
+    *,
+    overall_grade: str = "",
+    ransomware: RansomwareIndex | None = None,
+    financial: FinancialImpact | None = None,
+    compliance: list[CompliancePosture] | None = None,
 ) -> ExecutiveSummary:
     confirmed = [f for f in findings if f.classification == FindingClassification.confirmed_issue]
     critical_high = [f for f in confirmed if f.severity in ("critical", "high")]
@@ -1445,6 +1454,8 @@ def _build_executive_summary(
         risk_posture = "High"
 
     parts: list[str] = []
+    if overall_grade:
+        parts.append(f"Overall grade: {overall_grade}.")
     parts.append(f"{risk_posture} overall external risk posture.")
 
     if any(f.category == "secrets" for f in confirmed):
@@ -1461,6 +1472,17 @@ def _build_executive_summary(
         parts.append("Main exposure consists of standard web hygiene gaps.")
     else:
         parts.append("No evidence of leaked secrets, active compromise, or breach exposure.")
+
+    if ransomware and ransomware.score >= 50:
+        parts.append(f"Ransomware susceptibility is {ransomware.tier} ({ransomware.score}/100).")
+
+    if financial and financial.estimated_annual_loss_high > 0:
+        low_k = financial.estimated_annual_loss_low // 1000
+        high_k = financial.estimated_annual_loss_high // 1000
+        if high_k >= 1000:
+            parts.append(f"Estimated annual loss exposure: ${low_k:,}K–${high_k:,}K.")
+        elif high_k > 0:
+            parts.append(f"Estimated annual loss exposure: ${low_k:,}K–${high_k:,}K.")
 
     if platform:
         managed = _PLATFORM_PROFILES.get(platform, _NO_PLATFORM).managed_headers
@@ -1490,8 +1512,18 @@ def _build_executive_summary(
     )]
     if waf_names:
         positives.append(f"WAF/CDN detected: {waf_names[0]}")
+    if ransomware and ransomware.tier == "low":
+        positives.append(f"Low ransomware susceptibility ({ransomware.score}/100)")
 
     concerns = [f.title for f in critical_high[:3]]
+
+    # Top risks + recommendations from findings
+    top_risks = [f.title for f in critical_high[:3]]
+    recommendations = [f.recommended_action for f in critical_high[:3]]
+
+    grades = _collect_grades(result)
+    if overall_grade:
+        grades["overall"] = overall_grade
 
     return ExecutiveSummary(
         risk_posture=risk_posture,
@@ -1499,6 +1531,10 @@ def _build_executive_summary(
         key_positives=positives[:3],
         key_concerns=concerns,
         scan_coverage=scan_mode,
+        overall_grade=overall_grade,
+        grades=grades,
+        top_risks=top_risks,
+        recommendations=recommendations,
     )
 
 
@@ -1724,6 +1760,373 @@ def _classify_supply_chain_findings(result: DomainResult) -> list[PrioritizedFin
     return findings
 
 
+# ---------------------------------------------------------------------------
+# Overall domain risk grade (A+ to F)
+# ---------------------------------------------------------------------------
+
+_RISK_TO_GRADE: list[tuple[int, str]] = [
+    (5, "A+"), (10, "A"), (15, "A-"),
+    (25, "B+"), (35, "B"), (40, "B-"),
+    (50, "C+"), (60, "C"), (65, "C-"),
+    (75, "D+"), (80, "D"), (85, "D-"),
+    (100, "F"),
+]
+
+
+def _compute_overall_grade(result: DomainResult, findings: list[PrioritizedFinding]) -> str:
+    """Compute an aggregate A+ to F grade from FAIR risk + individual grades."""
+    fair = result.fair_signals
+    overall_risk = fair.overall_risk if fair else 50
+
+    ssl_grade_score = _grade_to_score(result.ssl.grade if result.ssl else "")
+    headers_grade_score = _grade_to_score(
+        result.security.headers.grade if result.security and result.security.headers else ""
+    )
+
+    confirmed = [f for f in findings if f.classification == FindingClassification.confirmed_issue]
+    crit_count = sum(1 for f in confirmed if f.severity == "critical")
+    high_count = sum(1 for f in confirmed if f.severity == "high")
+    finding_penalty = min(30, crit_count * 15 + high_count * 5)
+
+    component_avg = (ssl_grade_score + headers_grade_score) / 2.0
+    component_risk = max(0, 100 - component_avg)
+
+    composite = int(round(overall_risk * 0.50 + component_risk * 0.25 + finding_penalty * 0.25))
+    composite = max(0, min(100, composite))
+
+    for threshold, grade in _RISK_TO_GRADE:
+        if composite <= threshold:
+            return grade
+    return "F"
+
+
+def _grade_to_score(grade: str) -> float:
+    mapping = {
+        "A+": 100, "A": 95, "A-": 90,
+        "B+": 85, "B": 75, "B-": 70,
+        "C+": 65, "C": 55, "C-": 50,
+        "D+": 40, "D": 30, "D-": 25,
+        "F": 0,
+    }
+    return mapping.get((grade or "").strip().upper(), 50)
+
+
+def _collect_grades(result: DomainResult) -> dict[str, str]:
+    grades: dict[str, str] = {}
+    if result.ssl and result.ssl.grade:
+        grades["ssl"] = result.ssl.grade
+    if result.security and result.security.headers and result.security.headers.grade:
+        grades["headers"] = result.security.headers.grade
+    es = result.dns.email_security if result.dns else None
+    if es and not es.error and hasattr(es, "grade") and es.grade:
+        grades["email"] = es.grade
+    if result.privacy and hasattr(result.privacy, "grade") and result.privacy.grade:
+        grades["privacy"] = result.privacy.grade
+    return grades
+
+
+# ---------------------------------------------------------------------------
+# Ransomware Susceptibility Index (RSI)
+# ---------------------------------------------------------------------------
+
+def _compute_ransomware_index(result: DomainResult) -> RansomwareIndex:
+    """0-100 score predicting ransomware attack likelihood from existing signals."""
+    score = 0
+    factors: list[str] = []
+    mitigations: list[str] = []
+
+    # Exposed remote access ports (RDP 3389, SSH 22, VNC 5900, SMB 445)
+    if result.port_scan and result.port_scan.open_ports:
+        risky_ports = {3389, 445, 5900, 5901, 23}
+        exposed = [p for p in result.port_scan.open_ports if p.port in risky_ports]
+        if exposed:
+            score += 25
+            factors.append(f"Exposed remote access ports: {', '.join(str(p.port) for p in exposed)}")
+        ssh_ports = [p for p in result.port_scan.open_ports if p.port == 22]
+        if ssh_ports:
+            score += 5
+            factors.append("SSH port 22 exposed")
+
+    # Weak email authentication (phishing entry vector)
+    es = result.dns.email_security if result.dns else None
+    if es and not es.error:
+        if not es.dmarc.exists:
+            score += 15
+            factors.append("No DMARC record — phishing emails cannot be blocked")
+        elif es.dmarc.policy == "none":
+            score += 10
+            factors.append("DMARC policy is 'none' — no email enforcement")
+        else:
+            mitigations.append(f"DMARC enforcement active (p={es.dmarc.policy})")
+
+        if not es.spf.exists:
+            score += 5
+            factors.append("No SPF record")
+        else:
+            mitigations.append("SPF record configured")
+
+    # Exposed credentials / secrets
+    secrets_count = len(result.security.secrets) if result.security else 0
+    if secrets_count:
+        score += min(20, secrets_count * 10)
+        factors.append(f"{secrets_count} exposed credential(s) / secret(s)")
+
+    # Missing security headers (CSP, HSTS)
+    hdr_grade = result.security.headers.grade if result.security and result.security.headers else ""
+    if hdr_grade in ("F", "D-", "D", "D+"):
+        score += 10
+        factors.append(f"Weak security headers (grade {hdr_grade})")
+    elif hdr_grade in ("A+", "A", "A-", "B+", "B"):
+        mitigations.append(f"Strong security headers (grade {hdr_grade})")
+
+    # Deprecated TLS / weak cipher
+    ssl = result.ssl
+    if ssl:
+        if ssl.tls_version and ssl.tls_version < "TLSv1.2":
+            score += 10
+            factors.append(f"Deprecated TLS version: {ssl.tls_version}")
+        elif ssl.grade in ("A+", "A", "A-"):
+            mitigations.append(f"Strong TLS posture (grade {ssl.grade})")
+        if not ssl.cert_valid:
+            score += 5
+            factors.append("Invalid SSL certificate")
+
+    # Known CVEs with high EPSS
+    vuln = result.vulnerabilities
+    if vuln and vuln.cve_findings:
+        high_epss = [c for c in vuln.cve_findings if (c.epss_score or 0) > 0.5]
+        if high_epss:
+            score += min(25, len(high_epss) * 10)
+            factors.append(f"{len(high_epss)} CVE(s) with EPSS > 0.5 (likely exploited)")
+        kev = [c for c in vuln.cve_findings if c.kev_listed]
+        if kev:
+            score += 15
+            factors.append(f"{len(kev)} CVE(s) in CISA Known Exploited Vulnerabilities list")
+
+    # No WAF detected
+    waf_techs = [t for t in result.technologies if any(
+        c in ("waf", "cdn") for c in (t.categories or [])
+    )]
+    if not waf_techs and not (result.waf and result.waf.detected):
+        score += 5
+        factors.append("No WAF or CDN protection detected")
+    else:
+        name = waf_techs[0].name if waf_techs else (result.waf.firewall if result.waf else "")
+        if name:
+            mitigations.append(f"WAF/CDN protection: {name}")
+
+    # Breach history
+    if result.breaches:
+        score += min(10, len(result.breaches) * 3)
+        factors.append(f"{len(result.breaches)} previous breach(es) on record")
+
+    # Exposed admin panels / sensitive paths
+    if result.security and result.security.sensitive_paths:
+        admin_paths = [p for p in result.security.sensitive_paths
+                       if p.status_code == 200 and any(
+                           kw in (p.path or "").lower()
+                           for kw in ("admin", "login", "wp-admin", "phpmyadmin", "cpanel")
+                       )]
+        if admin_paths:
+            score += 10
+            factors.append(f"{len(admin_paths)} exposed admin panel(s)")
+
+    # Nuclei findings
+    if vuln and vuln.nuclei and vuln.nuclei.findings:
+        crit_high = [f for f in vuln.nuclei.findings if f.severity in ("critical", "high")]
+        if crit_high:
+            score += min(15, len(crit_high) * 5)
+            factors.append(f"{len(crit_high)} critical/high Nuclei finding(s)")
+
+    score = max(0, min(100, score))
+
+    if score >= 75:
+        tier = "critical"
+    elif score >= 50:
+        tier = "high"
+    elif score >= 25:
+        tier = "medium"
+    else:
+        tier = "low"
+
+    return RansomwareIndex(score=score, tier=tier, factors=factors, mitigations=mitigations)
+
+
+# ---------------------------------------------------------------------------
+# Financial risk quantification
+# ---------------------------------------------------------------------------
+
+_INCIDENT_COST_BASE = {
+    "critical": (2_500_000, 8_000_000),
+    "high":     (500_000,   3_000_000),
+    "medium":   (100_000,   800_000),
+    "low":      (10_000,    150_000),
+}
+
+
+def _compute_financial_impact(result: DomainResult) -> FinancialImpact:
+    """Estimate financial exposure using FAIR risk + IBM CODB 2024 benchmarks."""
+    fair = result.fair_signals
+    overall_risk = fair.overall_risk if fair else 0
+    lef = fair.loss_event_frequency if fair else 0
+
+    if overall_risk >= 75:
+        bracket = "critical"
+    elif overall_risk >= 50:
+        bracket = "high"
+    elif overall_risk >= 25:
+        bracket = "medium"
+    else:
+        bracket = "low"
+
+    base_low, base_high = _INCIDENT_COST_BASE[bracket]
+
+    factors: list[str] = []
+
+    # Adjust based on breach history data types
+    multiplier = 1.0
+    if result.breaches:
+        has_financial = any(
+            any(t in b.data_types for t in ("Credit cards", "Bank account numbers", "Payment histories"))
+            for b in result.breaches if b.data_types
+        )
+        if has_financial:
+            multiplier += 0.5
+            factors.append("Financial data in breach history (+50% cost)")
+        has_health = any(
+            "Health records" in (b.data_types or [])
+            for b in result.breaches
+        )
+        if has_health:
+            multiplier += 0.3
+            factors.append("Health data in breach history (+30% cost)")
+
+    # Credential exposure amplifies cost
+    if result.security and result.security.secrets:
+        crit_secrets = [s for s in result.security.secrets if s.severity == "critical"]
+        if crit_secrets:
+            multiplier += 0.25
+            factors.append(f"{len(crit_secrets)} critical credential(s) exposed (+25% cost)")
+
+    # Cloud database exposure
+    if result.cloud_assets:
+        dbs = [s for s in result.cloud_assets.cloud_services if s.is_database]
+        if dbs:
+            multiplier += 0.4
+            factors.append(f"{len(dbs)} cloud database(s) exposed (+40% cost)")
+
+    incident_low = int(base_low * multiplier)
+    incident_high = int(base_high * multiplier)
+
+    # Annualised: probability from FAIR LEF (0-100 → 0%-100% annual probability)
+    annual_prob = lef / 100.0
+    annual_low = int(incident_low * annual_prob)
+    annual_high = int(incident_high * annual_prob)
+
+    factors.append(f"FAIR risk score: {overall_risk}/100 ({bracket})")
+    factors.append(f"Annualised probability: {annual_prob:.0%}")
+    factors.append("Benchmarks: IBM Cost of a Data Breach 2024 ($4.88M avg)")
+
+    return FinancialImpact(
+        estimated_annual_loss_low=annual_low,
+        estimated_annual_loss_high=annual_high,
+        single_incident_cost_low=incident_low,
+        single_incident_cost_high=incident_high,
+        factors=factors,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Compliance readiness reports
+# ---------------------------------------------------------------------------
+
+_PCI_DSS_CONTROLS: list[tuple[str, str]] = [
+    ("PCI-DSS 3.4", "Render PAN unreadable wherever stored"),
+    ("PCI-DSS 4.1", "Use strong cryptography and security protocols"),
+    ("PCI-DSS 6.2", "Protect systems from known vulnerabilities"),
+    ("PCI-DSS 6.5.5", "Prevent information leakage"),
+    ("PCI-DSS 6.5.6", "Address high-risk vulnerabilities"),
+    ("PCI-DSS 6.5.7", "Prevent cross-site scripting"),
+    ("PCI-DSS 6.5.8", "Prevent improper access control"),
+    ("PCI-DSS 6.5.10", "Prevent broken authentication and session management"),
+    ("PCI-DSS 6.5.x", "Secure development practices"),
+    ("PCI-DSS 12.10", "Maintain an incident response plan"),
+]
+
+_ISO27001_CONTROLS: list[tuple[str, str]] = [
+    ("ISO 27001 A.7.2.2", "Information security awareness and training"),
+    ("ISO 27001 A.9.4.1", "Information access restriction"),
+    ("ISO 27001 A.10.1.1", "Policy on the use of cryptographic controls"),
+    ("ISO 27001 A.12.2.1", "Controls against malware"),
+    ("ISO 27001 A.12.6.1", "Management of technical vulnerabilities"),
+    ("ISO 27001 A.13.2.1", "Information transfer policies and procedures"),
+    ("ISO 27001 A.14.1.2", "Securing application services on public networks"),
+    ("ISO 27001 A.15.1.1", "Information security policy for supplier relationships"),
+]
+
+_GDPR_CONTROLS: list[tuple[str, str]] = [
+    ("GDPR Art.32", "Security of processing"),
+    ("GDPR Art.33", "Notification of breach to supervisory authority"),
+    ("GDPR Art.34", "Communication of breach to data subject"),
+]
+
+
+def _compute_compliance_posture(
+    findings: list[PrioritizedFinding],
+) -> list[CompliancePosture]:
+    """Build per-framework compliance readiness from tagged findings."""
+    failing_tags: set[str] = set()
+    tag_to_findings: dict[str, list[str]] = {}
+    for f in findings:
+        if f.classification != FindingClassification.confirmed_issue:
+            continue
+        for tag in f.compliance:
+            failing_tags.add(tag)
+            tag_to_findings.setdefault(tag, []).append(f.id)
+
+    postures: list[CompliancePosture] = []
+
+    for framework_name, controls_list in [
+        ("PCI-DSS 4.0", _PCI_DSS_CONTROLS),
+        ("ISO 27001", _ISO27001_CONTROLS),
+        ("GDPR", _GDPR_CONTROLS),
+    ]:
+        controls: list[ComplianceControl] = []
+        passing = 0
+        failing = 0
+        for control_id, control_name in controls_list:
+            if control_id in failing_tags:
+                controls.append(ComplianceControl(
+                    control_id=control_id,
+                    control_name=control_name,
+                    status="fail",
+                    findings=tag_to_findings.get(control_id, []),
+                ))
+                failing += 1
+            else:
+                controls.append(ComplianceControl(
+                    control_id=control_id,
+                    control_name=control_name,
+                    status="pass",
+                ))
+                passing += 1
+
+        total = len(controls_list)
+        readiness = int(round(passing / total * 100)) if total else 0
+
+        postures.append(CompliancePosture(
+            framework=framework_name,
+            controls_tested=total,
+            controls_passing=passing,
+            controls_failing=failing,
+            controls_not_tested=0,
+            readiness_score=readiness,
+            controls=controls,
+        ))
+
+    return postures
+
+
 def build_easm_report(
     result: DomainResult, *, scan_mode: str = "full",
 ) -> EASMReport:
@@ -1764,7 +2167,20 @@ def build_easm_report(
         asset_context = _infer_asset_context(result, platform, profile)
         cloud_assets = _detect_cloud_assets(result)
         recon_artifacts = _extract_recon_artifacts(result)
-        executive = _build_executive_summary(sorted_findings, result, platform, scan_mode)
+
+        # Compute new enterprise features
+        overall_grade = _compute_overall_grade(result, sorted_findings)
+        ransomware = _compute_ransomware_index(result)
+        financial = _compute_financial_impact(result)
+        compliance = _compute_compliance_posture(sorted_findings)
+
+        executive = _build_executive_summary(
+            sorted_findings, result, platform, scan_mode,
+            overall_grade=overall_grade,
+            ransomware=ransomware,
+            financial=financial,
+            compliance=compliance,
+        )
 
         confirmed = sum(1 for f in sorted_findings if f.classification == FindingClassification.confirmed_issue)
         plat_beh = sum(1 for f in sorted_findings if f.classification == FindingClassification.platform_behavior)
@@ -1773,7 +2189,11 @@ def build_easm_report(
         return EASMReport(
             generated_at=datetime.now(timezone.utc).isoformat(),
             scan_mode=scan_mode,
+            overall_grade=overall_grade,
             executive_summary=executive,
+            ransomware_susceptibility=ransomware,
+            financial_impact=financial,
+            compliance_posture=compliance,
             asset_context=asset_context,
             cloud_assets=cloud_assets,
             recon_artifacts=recon_artifacts,
