@@ -239,21 +239,23 @@ class TestFinancialImpact:
         fi = _compute_financial_impact(result)
         assert fi.single_incident_cost_low > 0
         assert fi.estimated_annual_loss_low < fi.estimated_annual_loss_high
-        assert "FAIR risk score" in fi.factors[0]
+        assert any("FAIR risk score" in f for f in fi.factors)
+        assert any("Company size" in f for f in fi.factors)
 
     def test_critical_risk_high_cost(self):
-        result = DomainResult(target="https://example.com")
+        result = DomainResult(target="https://example.com", metadata={"company_size": "enterprise"})
         _set_fair(result,overall_risk=80, loss_event_frequency=60)
         fi = _compute_financial_impact(result)
         assert fi.single_incident_cost_low >= 2_500_000
         assert fi.estimated_annual_loss_high > 0
 
     def test_breach_data_amplifies_cost(self):
-        result_base = DomainResult(target="https://example.com")
+        result_base = DomainResult(target="https://example.com", metadata={"company_size": "medium"})
         _set_fair(result_base, overall_risk=50, loss_event_frequency=30)
 
         result_breach = DomainResult(
             target="https://example.com",
+            metadata={"company_size": "medium"},
             breaches=[BreachRecord(
                 source="HIBP",
                 breach_name="Breach",
@@ -272,6 +274,31 @@ class TestFinancialImpact:
         _set_fair(result,overall_risk=30, loss_event_frequency=15)
         fi = _compute_financial_impact(result)
         assert "IBM" in fi.methodology
+
+    def test_company_size_scales_costs(self):
+        results = {}
+        for size in ("micro", "small", "medium", "large", "enterprise"):
+            r = DomainResult(target="https://example.com", metadata={"company_size": size})
+            _set_fair(r, overall_risk=50, loss_event_frequency=30)
+            results[size] = _compute_financial_impact(r)
+
+        assert results["micro"].single_incident_cost_high < results["small"].single_incident_cost_high
+        assert results["small"].single_incident_cost_high < results["medium"].single_incident_cost_high
+        assert results["medium"].single_incident_cost_high < results["large"].single_incident_cost_high
+        assert results["large"].single_incident_cost_high < results["enterprise"].single_incident_cost_high
+
+    def test_explicit_size_not_overridden(self):
+        r = DomainResult(target="https://example.com", metadata={"company_size": "enterprise"})
+        _set_fair(r, overall_risk=50, loss_event_frequency=30)
+        fi = _compute_financial_impact(r)
+        assert "Enterprise" in fi.factors[0]
+        assert "auto-inferred" not in fi.factors[0]
+
+    def test_auto_inferred_size_labelled(self):
+        r = DomainResult(target="https://example.com")
+        _set_fair(r, overall_risk=50, loss_event_frequency=30)
+        fi = _compute_financial_impact(r)
+        assert "auto-inferred" in fi.factors[0]
 
 
 # ---------------------------------------------------------------------------

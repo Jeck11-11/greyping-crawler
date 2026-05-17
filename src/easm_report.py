@@ -2046,6 +2046,61 @@ _INCIDENT_COST_BASE = {
     "low":      (10_000,    150_000),
 }
 
+_SIZE_MULTIPLIER: dict[str, tuple[float, str]] = {
+    "micro":      (0.02, "Micro (1-10 employees)"),
+    "small":      (0.08, "Small (11-50 employees)"),
+    "medium":     (0.25, "Medium (51-250 employees)"),
+    "large":      (0.60, "Large (251-1000 employees)"),
+    "enterprise": (1.00, "Enterprise (1000+ employees)"),
+}
+
+
+def _infer_company_size(result: DomainResult) -> str:
+    """Estimate organisation size from scan signals when not provided."""
+    score = 0
+
+    sub_count = 0
+    if result.passive_intel and result.passive_intel.ct and result.passive_intel.ct.subdomains:
+        sub_count = len(result.passive_intel.ct.subdomains)
+    if sub_count > 50:
+        score += 3
+    elif sub_count > 15:
+        score += 2
+    elif sub_count > 5:
+        score += 1
+
+    tech_count = len(result.technologies) if result.technologies else 0
+    if tech_count > 20:
+        score += 2
+    elif tech_count > 8:
+        score += 1
+
+    email_count = len(result.contacts.emails) if result.contacts else 0
+    if email_count > 20:
+        score += 2
+    elif email_count > 5:
+        score += 1
+
+    if result.port_scan and result.port_scan.open_ports:
+        if len(result.port_scan.open_ports) > 10:
+            score += 2
+        elif len(result.port_scan.open_ports) > 3:
+            score += 1
+
+    if result.supply_chain and result.supply_chain.third_party_resources:
+        if len(result.supply_chain.third_party_resources) > 30:
+            score += 1
+
+    if score >= 8:
+        return "enterprise"
+    if score >= 5:
+        return "large"
+    if score >= 3:
+        return "medium"
+    if score >= 1:
+        return "small"
+    return "micro"
+
 
 def _compute_financial_impact(result: DomainResult) -> FinancialImpact:
     """Estimate financial exposure using FAIR risk + IBM CODB 2024 benchmarks."""
@@ -2066,7 +2121,22 @@ def _compute_financial_impact(result: DomainResult) -> FinancialImpact:
 
     factors: list[str] = []
 
-    # Adjust based on breach history data types
+    explicit_size = result.metadata.get("company_size")
+    if explicit_size and explicit_size in _SIZE_MULTIPLIER:
+        size_key = explicit_size
+        inferred = False
+    else:
+        size_key = _infer_company_size(result)
+        inferred = True
+
+    size_mult, size_label = _SIZE_MULTIPLIER[size_key]
+    base_low = int(base_low * size_mult)
+    base_high = int(base_high * size_mult)
+    factors.append(
+        f"Company size: {size_label}{' (auto-inferred)' if inferred else ''} — "
+        f"{size_mult:.0%} of enterprise benchmark"
+    )
+
     multiplier = 1.0
     if result.breaches:
         has_financial = any(
@@ -2084,14 +2154,12 @@ def _compute_financial_impact(result: DomainResult) -> FinancialImpact:
             multiplier += 0.3
             factors.append("Health data in breach history (+30% cost)")
 
-    # Credential exposure amplifies cost
     if result.security and result.security.secrets:
         crit_secrets = [s for s in result.security.secrets if s.severity == "critical"]
         if crit_secrets:
             multiplier += 0.25
             factors.append(f"{len(crit_secrets)} critical credential(s) exposed (+25% cost)")
 
-    # Cloud database exposure
     if result.cloud_assets:
         dbs = [s for s in result.cloud_assets.cloud_services if s.is_database]
         if dbs:
@@ -2101,14 +2169,13 @@ def _compute_financial_impact(result: DomainResult) -> FinancialImpact:
     incident_low = int(base_low * multiplier)
     incident_high = int(base_high * multiplier)
 
-    # Annualised: probability from FAIR LEF (0-100 → 0%-100% annual probability)
     annual_prob = lef / 100.0
     annual_low = int(incident_low * annual_prob)
     annual_high = int(incident_high * annual_prob)
 
     factors.append(f"FAIR risk score: {overall_risk}/100 ({bracket})")
     factors.append(f"Annualised probability: {annual_prob:.0%}")
-    factors.append("Benchmarks: IBM Cost of a Data Breach 2024 ($4.88M avg)")
+    factors.append("Benchmarks: IBM Cost of a Data Breach 2024, scaled to organisation size")
 
     return FinancialImpact(
         estimated_annual_loss_low=annual_low,

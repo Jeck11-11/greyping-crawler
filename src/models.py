@@ -20,6 +20,15 @@ def _fingerprint(*parts: str) -> str:
 # Request models
 # ---------------------------------------------------------------------------
 
+class CompanySize(str, Enum):
+    """Organisation size tier for financial impact calibration."""
+    micro = "micro"          # 1-10 employees
+    small = "small"          # 11-50 employees
+    medium = "medium"        # 51-250 employees
+    large = "large"          # 251-1000 employees
+    enterprise = "enterprise"  # 1000+ employees
+
+
 class ScanRequest(BaseModel):
     """Payload accepted by POST /scan."""
 
@@ -52,6 +61,11 @@ class ScanRequest(BaseModel):
         le=120,
         description="Per-page request timeout in seconds.",
     )
+    company_size: CompanySize | None = Field(
+        default=None,
+        description="Organisation size tier (micro/small/medium/large/enterprise). "
+                    "Calibrates financial impact estimates. Auto-inferred if omitted.",
+    )
 
 
 class ReconRequest(BaseModel):
@@ -68,6 +82,10 @@ class ReconRequest(BaseModel):
         ge=5,
         le=120,
         description="Per-request timeout in seconds.",
+    )
+    company_size: CompanySize | None = Field(
+        default=None,
+        description="Organisation size tier. Calibrates financial impact estimates.",
     )
 
 

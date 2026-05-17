@@ -747,6 +747,7 @@ async def _scan_single_target(
             "domain": domain,
             "render_js": request.render_js,
             "max_depth": request.max_depth,
+            **({"company_size": request.company_size.value} if request.company_size else {}),
         },
     )
     result.attack_paths = analyze_attack_paths(result)
@@ -845,7 +846,7 @@ async def quick_scan(request: ScanRequest) -> ScanResponse:
 # Light-touch scan — exactly one GET per target (WAF-friendly)
 # ---------------------------------------------------------------------------
 
-async def _lighttouch_single_target(target: str, timeout: int) -> DomainResult:
+async def _lighttouch_single_target(target: str, timeout: int, *, company_size: str | None = None) -> DomainResult:
     """Single-GET scan with a browser UA. No path probe, crawl, JS mine, or breach."""
     domain = _extract_domain(target)
     started = datetime.now(timezone.utc).isoformat()
@@ -1048,7 +1049,11 @@ async def _lighttouch_single_target(target: str, timeout: int) -> DomainResult:
         technologies=tech_findings,
         supply_chain=lt_supply_chain,
         passive_intel=lt_passive_slim,
-        metadata={"domain": domain, "mode": "lighttouch"},
+        metadata={
+            "domain": domain,
+            "mode": "lighttouch",
+            **({"company_size": company_size} if company_size else {}),
+        },
         error=None if html else "landing page fetch failed",
     )
     result.attack_paths = analyze_attack_paths(result)
@@ -1082,7 +1087,10 @@ async def lighttouch_scan(request: LightTouchRequest) -> ScanResponse:
 
     async def _bounded_lt(t: str) -> DomainResult:
         async with sem:
-            return await _lighttouch_single_target(t, request.timeout)
+            return await _lighttouch_single_target(
+                t, request.timeout,
+                company_size=request.company_size.value if request.company_size else None,
+            )
 
     domain_results = await asyncio.gather(
         *(_bounded_lt(t) for t in targets)
@@ -1135,7 +1143,7 @@ class PassiveRequest(ReconRequest):
 
 
 async def _passive_single_target(
-    target: str, emails: list[str], timeout: int,
+    target: str, emails: list[str], timeout: int, *, company_size: str | None = None,
 ) -> DomainResult:
     domain = _extract_domain(target)
     started = datetime.now(timezone.utc).isoformat()
@@ -1229,7 +1237,11 @@ async def _passive_single_target(
         dns=p_dns_group,
         breaches=breaches,
         passive_intel=p_passive_slim,
-        metadata={"domain": domain, "mode": "passive"},
+        metadata={
+            "domain": domain,
+            "mode": "passive",
+            **({"company_size": company_size} if company_size else {}),
+        },
         error=passive_error,
     )
     result.attack_paths = analyze_attack_paths(result)
@@ -1259,7 +1271,10 @@ async def passive_scan(request: PassiveRequest) -> ScanResponse:
 
     async def _bounded_passive(t: str) -> DomainResult:
         async with sem:
-            return await _passive_single_target(t, list(request.emails or []), request.timeout)
+            return await _passive_single_target(
+                t, list(request.emails or []), request.timeout,
+                company_size=request.company_size.value if request.company_size else None,
+            )
 
     domain_results = await asyncio.gather(*(
         _bounded_passive(t) for t in targets
