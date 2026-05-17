@@ -883,7 +883,7 @@ def _classify_email_security(result: DomainResult) -> list[PrioritizedFinding]:
                 severity="info",
                 classification=FindingClassification.informational,
                 confidence="high",
-                owner=FindingOwner.informational,
+                owner=FindingOwner.not_actionable,
                 why_it_matters="SPF includes reveal third-party email services used by the organisation.",
                 business_impact="Attack surface awareness — each service is a potential phishing vector",
                 evidence=[f"Services: {', '.join(spf_intel.services_detected)}"],
@@ -901,7 +901,7 @@ def _classify_email_security(result: DomainResult) -> list[PrioritizedFinding]:
                 severity="info",
                 classification=FindingClassification.informational,
                 confidence="high",
-                owner=FindingOwner.informational,
+                owner=FindingOwner.not_actionable,
                 why_it_matters="SPF-authorized IP addresses reveal email sending infrastructure and hosting providers.",
                 business_impact="Infrastructure intelligence for security assessment",
                 evidence=[
