@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from functools import partial
 from datetime import datetime, timezone
 
 from .models import (
@@ -1274,19 +1275,19 @@ def build_easm_report(
         all_findings: list[PrioritizedFinding] = []
 
         classifiers = (
-            ("headers", lambda: _classify_header_findings(result, platform, profile)),
-            ("cookies", lambda: _classify_cookie_findings(result, platform, profile)),
-            ("ssl", lambda: _classify_ssl_findings(result)),
-            ("secrets", lambda: _classify_secret_findings(result)),
-            ("paths", lambda: _classify_path_findings(result)),
-            ("ioc", lambda: _classify_ioc_findings(result)),
-            ("email_security", lambda: _classify_email_security(result)),
-            ("dns", lambda: _classify_dns_findings(result)),
-            ("breaches", lambda: _classify_breach_findings(result)),
-            ("robots_sitemap", lambda: _classify_robots_sitemap(result)),
-            ("js_intel", lambda: _classify_js_intel(result)),
-            ("typosquatting", lambda: _classify_typosquatting_findings(result)),
-            ("privacy", lambda: _classify_privacy_findings(result)),
+            ("security_headers", partial(_classify_header_findings, result, platform, profile)),
+            ("cookies", partial(_classify_cookie_findings, result, platform, profile)),
+            ("ssl", partial(_classify_ssl_findings, result)),
+            ("secrets", partial(_classify_secret_findings, result)),
+            ("sensitive_paths", partial(_classify_path_findings, result)),
+            ("ioc_findings", partial(_classify_ioc_findings, result)),
+            ("email_security", partial(_classify_email_security, result)),
+            ("dns", partial(_classify_dns_findings, result)),
+            ("breaches", partial(_classify_breach_findings, result)),
+            ("robots_sitemap", partial(_classify_robots_sitemap, result)),
+            ("js_intel", partial(_classify_js_intel, result)),
+            ("typosquatting", partial(_classify_typosquatting_findings, result)),
+            ("privacy", partial(_classify_privacy_findings, result)),
         )
 
         for stage, classifier in classifiers:
