@@ -1981,7 +1981,7 @@ def _compute_ransomware_index(result: DomainResult) -> RansomwareIndex:
         if high_epss:
             score += min(25, len(high_epss) * 10)
             factors.append(f"{len(high_epss)} CVE(s) with EPSS > 0.5 (likely exploited)")
-        kev = [c for c in vuln.cve_findings if c.kev_listed]
+        kev = [c for c in vuln.cve_findings if c.in_kev]
         if kev:
             score += 15
             factors.append(f"{len(kev)} CVE(s) in CISA Known Exploited Vulnerabilities list")
@@ -2087,8 +2087,8 @@ def _infer_company_size(result: DomainResult) -> str:
         elif len(result.port_scan.open_ports) > 3:
             score += 1
 
-    if result.supply_chain and result.supply_chain.third_party_resources:
-        if len(result.supply_chain.third_party_resources) > 30:
+    if result.supply_chain and result.supply_chain.resources:
+        if len(result.supply_chain.resources) > 30:
             score += 1
 
     if score >= 8:
