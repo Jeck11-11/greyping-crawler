@@ -1813,25 +1813,30 @@ def _classify_port_findings(result: DomainResult) -> list[PrioritizedFinding]:
         if port.port in _RISKY_PORTS:
             service_name, severity = _RISKY_PORTS[port.port]
             findings.append(PrioritizedFinding(
-                id=f"port-exposed-{port.port}",
+                id=f"port_exposed_{port.port}",
                 title=f"Exposed {service_name} service on port {port.port}",
+                category="network",
                 severity=severity,
                 classification=FindingClassification.confirmed_issue,
-                description=(
-                    f"{service_name} (port {port.port}) is publicly reachable. "
-                    "Database and administrative services should not be exposed to the internet."
-                ),
-                remediation=f"Restrict port {port.port} via firewall rules or security groups. Use VPN/SSH tunnels for remote access.",
+                confidence="high",
+                owner=FindingOwner.customer,
+                why_it_matters=f"{service_name} (port {port.port}) is publicly reachable — database and admin services must not be internet-exposed.",
+                business_impact="Direct data breach risk — attackers can attempt authentication bypass or exploit known vulnerabilities.",
+                recommended_action=f"Restrict port {port.port} via firewall rules or security groups. Use VPN/SSH tunnels for remote access.",
                 source_field="port_scan",
             ))
         elif port.is_risky:
             findings.append(PrioritizedFinding(
-                id=f"port-exposed-{port.port}",
+                id=f"port_exposed_{port.port}",
                 title=f"Risky service on port {port.port} ({port.service or 'unknown'})",
+                category="network",
                 severity="medium",
                 classification=FindingClassification.confirmed_issue,
-                description=f"Port {port.port} ({port.service or 'unknown service'}) is publicly reachable and flagged as risky.",
-                remediation=f"Review whether port {port.port} needs public exposure. Restrict access if not required.",
+                confidence="high",
+                owner=FindingOwner.customer,
+                why_it_matters=f"Port {port.port} ({port.service or 'unknown service'}) is publicly reachable and flagged as risky.",
+                business_impact="Expanded attack surface — unnecessary exposed services increase compromise risk.",
+                recommended_action=f"Review whether port {port.port} needs public exposure. Restrict access if not required.",
                 source_field="port_scan",
             ))
 
