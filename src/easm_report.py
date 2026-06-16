@@ -1496,12 +1496,14 @@ def _build_executive_summary(
         parts.append(f"Ransomware susceptibility is {ransomware.tier} ({ransomware.score}/100).")
 
     if financial and financial.estimated_annual_loss_high > 0:
-        low_k = financial.estimated_annual_loss_low // 1000
-        high_k = financial.estimated_annual_loss_high // 1000
-        if high_k >= 1000:
-            parts.append(f"Estimated annual loss exposure: ${low_k:,}K–${high_k:,}K.")
-        elif high_k > 0:
-            parts.append(f"Estimated annual loss exposure: ${low_k:,}K–${high_k:,}K.")
+        lo = financial.estimated_annual_loss_low
+        hi = financial.estimated_annual_loss_high
+        if hi >= 1_000_000:
+            parts.append(f"Estimated annual loss exposure: ${lo / 1_000_000:.1f}M–${hi / 1_000_000:.1f}M.")
+        elif hi >= 10_000:
+            parts.append(f"Estimated annual loss exposure: ${round(lo / 1000)}K–${round(hi / 1000)}K.")
+        else:
+            parts.append(f"Estimated annual loss exposure: ${lo:,}–${hi:,}.")
 
     if platform:
         managed = _PLATFORM_PROFILES.get(platform, _NO_PLATFORM).managed_headers

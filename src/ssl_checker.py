@@ -281,8 +281,13 @@ def _parse_cert(
             issues.append(f"Weak cipher key length: {cipher_bits} bits.")
 
     # Perfect Forward Secrecy detection
+    # TLS 1.3 mandates ephemeral key exchange — PFS is always true.
     cipher_name_upper = cipher.upper() if cipher else ""
-    pfs = "ECDHE" in cipher_name_upper or "DHE" in cipher_name_upper
+    pfs = (
+        tls_version in ("TLSv1.3", "TLSv1.3 (draft)")
+        or "ECDHE" in cipher_name_upper
+        or "DHE" in cipher_name_upper
+    )
 
     # Key size weakness check
     if key_type == "RSA" and 0 < key_size < 2048:
