@@ -1826,3 +1826,82 @@ class GitHubSecretsReconResult(BaseModel):
     error: str | None = None
 
 
+# ---------------------------------------------------------------------------
+# Board report models (estate-wide aggregation)
+# ---------------------------------------------------------------------------
+
+class BoardScanRequest(BaseModel):
+    """Payload accepted by POST /scan/board."""
+
+    root_domain: str = Field(
+        ...,
+        description="Root domain to discover subdomains for and scan (e.g. example.com).",
+    )
+    render_js: bool = Field(default=True, description="Render JS-heavy pages via headless browser.")
+    follow_redirects: bool = Field(default=True, description="Follow HTTP redirects.")
+    max_depth: int = Field(default=2, ge=0, le=5, description="Maximum crawl depth per subdomain.")
+    check_breaches: bool = Field(default=True, description="Query breach databases.")
+    timeout: int = Field(default=30, ge=5, le=120, description="Per-page request timeout in seconds.")
+    company_size: CompanySize | None = Field(
+        default=None,
+        description="Organisation size tier. Calibrates financial impact estimates.",
+    )
+    max_subdomains: int = Field(
+        default=0,
+        ge=0,
+        description="Cap on subdomains to scan (0 = unlimited).",
+    )
+
+
+class SubdomainReportRow(BaseModel):
+    """Per-subdomain summary row in the board report."""
+
+    target: str
+    grade: str = ""
+    ransomware_score: int = 0
+    financial_low: int = 0
+    financial_high: int = 0
+    confirmed_issues: int = 0
+    total_findings: int = 0
+    top_concern: str = ""
+
+
+class BoardFinding(BaseModel):
+    """A deduplicated finding with the list of subdomains it affects."""
+
+    finding: PrioritizedFinding
+    affected_subdomains: list[str] = Field(default_factory=list)
+
+
+class BoardReport(BaseModel):
+    """Estate-wide board-level EASM report aggregating per-subdomain scans."""
+
+    root_domain: str = ""
+    generated_at: str = ""
+    subdomains_discovered: int = 0
+    subdomains_scanned: int = 0
+    estate_grade: str = ""
+    grade_distribution: dict[str, int] = Field(default_factory=dict)
+    executive_summary: ExecutiveSummary = Field(default_factory=ExecutiveSummary)
+    ransomware_susceptibility: RansomwareIndex = Field(default_factory=RansomwareIndex)
+    financial_impact: FinancialImpact = Field(default_factory=FinancialImpact)
+    financial_breakdown: list[SubdomainReportRow] = Field(default_factory=list)
+    compliance_posture: list[CompliancePosture] = Field(default_factory=list)
+    compliance_summary: dict[str, int] = Field(default_factory=dict)
+    top_findings: list[BoardFinding] = Field(default_factory=list)
+    subdomain_rows: list[SubdomainReportRow] = Field(default_factory=list)
+    total_confirmed_issues: int = 0
+
+
+class BoardReportResponse(BaseModel):
+    """Top-level JSON response returned by POST /scan/board."""
+
+    scan_id: str
+    status: str = Field(default="completed", description="completed / partial / failed.")
+    started_at: str = ""
+    finished_at: str = ""
+    board_report: BoardReport = Field(default_factory=BoardReport)
+    results: list[DomainResult] = Field(default_factory=list)
+    scanner_version: str = Field(default="1.4.0")
+
+

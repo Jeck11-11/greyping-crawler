@@ -49,6 +49,8 @@ from .ioc_scanner import scan_ioc
 from .privacy_scanner import analyze_privacy_compliance
 from .typosquatting import check_typosquatting
 from .models import (
+    BoardReportResponse,
+    BoardScanRequest,
     CloudAssetResult,
     ContactsGroup,
     CTResult,
@@ -829,6 +831,111 @@ async def scan(request: ScanRequest) -> ScanResponse:
         finished_at=finished,
         summary=top_summary,
         total_targets=len(targets),
+        results=domain_results,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Board scan — discover all subdomains, full-scan each, aggregate
+# ---------------------------------------------------------------------------
+
+@app.post("/scan/board")
+async def board_scan(request: BoardScanRequest) -> BoardReportResponse:
+    """Discover all subdomains, full-scan each, and return an estate-wide board report."""
+    from .board_report import build_board_report
+    from .subdomain_takeover import enumerate_subdomains
+
+    scan_id = uuid.uuid4().hex
+    started = datetime.now(timezone.utc).isoformat()
+
+    domain = request.root_domain.strip().lower().lstrip("www.")
+
+    logger.info("Board scan started for %s (scan_id=%s)", domain, scan_id)
+
+    ct_result = await query_ct_logs(domain, timeout=request.timeout)
+    ct_subs = ct_result.subdomains if ct_result and not ct_result.error else []
+
+    enum_result = await enumerate_subdomains(
+        domain, known_subdomains=ct_subs, timeout=request.timeout,
+    )
+    live_subs: list[str] = enum_result.get("live_subdomains", [])
+
+    all_targets = [f"https://{domain}"]
+    for sub in live_subs:
+        if sub != domain:
+            all_targets.append(f"https://{sub}")
+
+    if request.max_subdomains > 0:
+        all_targets = all_targets[:1 + request.max_subdomains]
+
+    subdomains_discovered = len(live_subs)
+    logger.info(
+        "Board scan %s: %d subdomains discovered, scanning %d targets",
+        scan_id, subdomains_discovered, len(all_targets),
+    )
+
+    scan_req = ScanRequest(
+        targets=["placeholder"],
+        render_js=request.render_js,
+        follow_redirects=request.follow_redirects,
+        max_depth=request.max_depth,
+        check_breaches=request.check_breaches,
+        timeout=request.timeout,
+        company_size=request.company_size,
+    )
+
+    sem = asyncio.Semaphore(SCAN_CONCURRENCY)
+    completed = 0
+
+    async def _bounded_board_scan(target: str) -> DomainResult | None:
+        nonlocal completed
+        async with sem:
+            try:
+                result = await _scan_single_target(target, scan_req)
+                completed += 1
+                logger.info(
+                    "Board scan %s: %d/%d completed (%s)",
+                    scan_id, completed, len(all_targets), target,
+                )
+                return result
+            except Exception as exc:
+                completed += 1
+                logger.warning(
+                    "Board scan %s: target %s failed: %s",
+                    scan_id, target, exc,
+                )
+                return None
+
+    raw_results = await asyncio.gather(
+        *(_bounded_board_scan(t) for t in all_targets),
+    )
+    domain_results: list[DomainResult] = [r for r in raw_results if r is not None]
+
+    board_report = build_board_report(
+        domain, domain_results, subdomains_discovered=subdomains_discovered,
+    )
+
+    finished = datetime.now(timezone.utc).isoformat()
+
+    errors = [r for r in domain_results if r.error]
+    if not domain_results:
+        status = "failed"
+    elif errors:
+        status = "partial"
+    else:
+        status = "completed"
+
+    logger.info(
+        "Board scan %s finished: %s, %d targets scanned, estate grade %s",
+        scan_id, status, len(domain_results), board_report.estate_grade,
+    )
+
+    return BoardReportResponse(
+        scan_id=scan_id,
+        status=status,
+        started_at=started,
+        finished_at=finished,
+        board_report=board_report,
         results=domain_results,
     )
 

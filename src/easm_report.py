@@ -2366,4 +2366,16 @@ def build_easm_report(
         )
 
 
-__all__ = ["build_easm_report"]
+__all__ = [
+    "build_easm_report",
+    "grade_to_score",
+    "sort_findings",
+    "compute_compliance_posture",
+    "RISK_TO_GRADE",
+]
+
+# Public aliases for cross-module reuse (board_report.py)
+grade_to_score = _grade_to_score
+sort_findings = _sort_findings
+compute_compliance_posture = _compute_compliance_posture
+RISK_TO_GRADE = _RISK_TO_GRADE
