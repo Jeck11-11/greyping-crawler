@@ -556,7 +556,31 @@ def _classify_ssl_findings(result: DomainResult) -> list[PrioritizedFinding]:
     if not ssl or (not ssl.grade and not ssl.issues and ssl.cert_valid):
         return findings
 
-    if not ssl.cert_valid:
+    first_issue = ssl.issues[0].lower() if ssl.issues else ""
+    # A failed TLS connection (host unreachable, refused, timed out) is NOT a
+    # certificate validity problem — the host may be internal-only or offline.
+    # Don't mislabel it as a critical "invalid certificate" finding.
+    unreachable = (
+        first_issue.startswith("tls connection failed")
+        or "could not parse hostname" in first_issue
+    )
+
+    if not ssl.cert_valid and unreachable:
+        findings.append(PrioritizedFinding(
+            id="ssl_unreachable",
+            title="HTTPS endpoint unreachable",
+            category="ssl",
+            severity="info",
+            classification=FindingClassification.informational,
+            confidence="medium",
+            owner=FindingOwner.customer,
+            why_it_matters="The scanner could not establish a TLS connection. The host may be internal-only, firewalled, or offline — this is not necessarily a certificate problem.",
+            business_impact="No external HTTPS exposure detected for this host",
+            evidence=ssl.issues[:3] or ["TLS connection could not be established"],
+            recommended_action="Confirm whether this host is meant to be publicly reachable. If it is internal-only, no action is needed.",
+            source_field="ssl_certificate",
+        ))
+    elif not ssl.cert_valid:
         findings.append(PrioritizedFinding(
             id="ssl_invalid",
             title="Invalid SSL/TLS certificate",
@@ -695,22 +719,7 @@ def _classify_path_findings(result: DomainResult) -> list[PrioritizedFinding]:
     for p in result.sensitive_paths:
         if p.severity == "info":
             continue
-        if p.status_code == 403:
-            findings.append(PrioritizedFinding(
-                id=f"path_{p.path.strip('/').replace('/', '_').replace('.', '_')}",
-                title=f"Path {p.path} exists (403 Forbidden)",
-                category="sensitive_paths",
-                severity="info",
-                classification=FindingClassification.informational,
-                confidence="low",
-                owner=FindingOwner.customer,
-                why_it_matters="Path exists but is access-restricted. Confirms infrastructure detail.",
-                business_impact="Minimal — access denied",
-                evidence=[f"{p.url} → {p.status_code}"],
-                recommended_action="Verify access controls are intentional. Consider returning 404 instead.",
-                source_field="sensitive_paths",
-            ))
-        elif p.status_code == 200:
+        if p.status_code == 200:
             findings.append(PrioritizedFinding(
                 id=f"path_{p.path.strip('/').replace('/', '_').replace('.', '_')}",
                 title=f"Exposed sensitive path: {p.path}",

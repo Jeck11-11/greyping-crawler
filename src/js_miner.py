@@ -38,7 +38,7 @@ _ENDPOINT_PATTERNS = [
 
 _INTERNAL_HOST_PATTERNS = [
     re.compile(r"""['"](https?://[a-z0-9-]+\.internal(?::\d+)?(?:/[^\s'"<>]{0,200})?)['"]"""),
-    re.compile(r"""['"](https?://[a-z0-9-]+\.(?:local|corp|lan|dev|test|staging|qa|uat)(?::\d+)?(?:/[^\s'"<>]{0,200})?)['"]"""),
+    re.compile(r"""['"](https?://[a-z0-9-]+\.(?:local|corp|lan|test|staging|qa|uat)(?::\d+)?(?:/[^\s'"<>]{0,200})?)['"]"""),
     re.compile(r"""['"](https?://10\.\d{1,3}\.\d{1,3}\.\d{1,3}(?::\d+)?(?:/[^\s'"<>]{0,200})?)['"]"""),
     re.compile(r"""['"](https?://192\.168\.\d{1,3}\.\d{1,3}(?::\d+)?(?:/[^\s'"<>]{0,200})?)['"]"""),
     re.compile(r"""['"](https?://172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}(?::\d+)?(?:/[^\s'"<>]{0,200})?)['"]"""),

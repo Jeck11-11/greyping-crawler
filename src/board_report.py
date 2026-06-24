@@ -30,11 +30,11 @@ def _worst_grade(grades: list[str]) -> str:
 
 
 def _grade_distribution(grades: list[str]) -> dict[str, int]:
-    """Build a histogram of grade counts."""
+    """Build a histogram of grade counts, preserving +/- modifiers."""
     dist: dict[str, int] = {}
     for g in grades:
-        base = g.rstrip("+-") if g else "?"
-        dist[base] = dist.get(base, 0) + 1
+        key = g if g else "?"
+        dist[key] = dist.get(key, 0) + 1
     return dist
 
 
@@ -261,10 +261,12 @@ def build_board_report(
         ransomware = _aggregate_ransomware(results)
         financial = _aggregate_financial(results)
 
+        # Count DISTINCT confirmed issues across the estate (deduped), so the
+        # headline matches the top_findings list. The per-subdomain instance
+        # counts remain available in subdomain_rows[].confirmed_issues.
         total_confirmed = sum(
-            r.easm_report.confirmed_issues
-            for r in results
-            if r.easm_report
+            1 for bf in board_findings
+            if bf.finding.classification == FindingClassification.confirmed_issue
         )
 
         all_plain_findings = [bf.finding for bf in board_findings]
