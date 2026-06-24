@@ -49,7 +49,9 @@ from .ioc_scanner import scan_ioc
 from .privacy_scanner import analyze_privacy_compliance
 from .typosquatting import check_typosquatting
 from .models import (
+    BoardJobStatus,
     BoardReportResponse,
+    BoardScanAck,
     BoardScanRequest,
     CloudAssetResult,
     ContactsGroup,
@@ -836,108 +838,150 @@ async def scan(request: ScanRequest) -> ScanResponse:
 
 
 # ---------------------------------------------------------------------------
-# Board scan — discover all subdomains, full-scan each, aggregate
+# Board scan — async job: discover subdomains, full-scan each, aggregate
 # ---------------------------------------------------------------------------
 
-@app.post("/scan/board")
-async def board_scan(request: BoardScanRequest) -> BoardReportResponse:
-    """Discover all subdomains, full-scan each, and return an estate-wide board report."""
-    from .board_report import build_board_report
-    from .subdomain_takeover import enumerate_subdomains
+_BOARD_JOBS: dict[str, BoardJobStatus] = {}
 
+
+def _evict_board_jobs() -> None:
+    from .config import BOARD_JOBS_MAX
+    while len(_BOARD_JOBS) > BOARD_JOBS_MAX:
+        oldest = next(iter(_BOARD_JOBS))
+        del _BOARD_JOBS[oldest]
+
+
+@app.post("/scan/board", status_code=202, response_model=BoardScanAck)
+async def board_scan(request: BoardScanRequest) -> BoardScanAck:
+    """Start an async board scan. Returns immediately with a scan_id to poll."""
     scan_id = uuid.uuid4().hex
     started = datetime.now(timezone.utc).isoformat()
-
     domain = request.root_domain.strip().lower().lstrip("www.")
 
-    logger.info("Board scan started for %s (scan_id=%s)", domain, scan_id)
+    job = BoardJobStatus(scan_id=scan_id, status="pending", root_domain=domain, started_at=started)
+    _BOARD_JOBS[scan_id] = job
+    _evict_board_jobs()
 
-    ct_result = await query_ct_logs(domain, timeout=request.timeout)
-    ct_subs = ct_result.subdomains if ct_result and not ct_result.error else []
+    asyncio.create_task(_run_board_job(scan_id, request))
 
-    enum_result = await enumerate_subdomains(
-        domain, known_subdomains=ct_subs, timeout=request.timeout,
-    )
-    live_subs: list[str] = enum_result.get("live_subdomains", [])
+    logger.info("Board scan queued for %s (scan_id=%s)", domain, scan_id)
 
-    all_targets = [f"https://{domain}"]
-    for sub in live_subs:
-        if sub != domain:
-            all_targets.append(f"https://{sub}")
-
-    if request.max_subdomains > 0:
-        all_targets = all_targets[:1 + request.max_subdomains]
-
-    subdomains_discovered = len(live_subs)
-    logger.info(
-        "Board scan %s: %d subdomains discovered, scanning %d targets",
-        scan_id, subdomains_discovered, len(all_targets),
-    )
-
-    scan_req = ScanRequest(
-        targets=["placeholder"],
-        render_js=request.render_js,
-        follow_redirects=request.follow_redirects,
-        max_depth=request.max_depth,
-        check_breaches=request.check_breaches,
-        timeout=request.timeout,
-        company_size=request.company_size,
-    )
-
-    sem = asyncio.Semaphore(SCAN_CONCURRENCY)
-    completed = 0
-
-    async def _bounded_board_scan(target: str) -> DomainResult | None:
-        nonlocal completed
-        async with sem:
-            try:
-                result = await _scan_single_target(target, scan_req)
-                completed += 1
-                logger.info(
-                    "Board scan %s: %d/%d completed (%s)",
-                    scan_id, completed, len(all_targets), target,
-                )
-                return result
-            except Exception as exc:
-                completed += 1
-                logger.warning(
-                    "Board scan %s: target %s failed: %s",
-                    scan_id, target, exc,
-                )
-                return None
-
-    raw_results = await asyncio.gather(
-        *(_bounded_board_scan(t) for t in all_targets),
-    )
-    domain_results: list[DomainResult] = [r for r in raw_results if r is not None]
-
-    board_report = build_board_report(
-        domain, domain_results, subdomains_discovered=subdomains_discovered,
-    )
-
-    finished = datetime.now(timezone.utc).isoformat()
-
-    errors = [r for r in domain_results if r.error]
-    if not domain_results:
-        status = "failed"
-    elif errors:
-        status = "partial"
-    else:
-        status = "completed"
-
-    logger.info(
-        "Board scan %s finished: %s, %d targets scanned, estate grade %s",
-        scan_id, status, len(domain_results), board_report.estate_grade,
-    )
-
-    return BoardReportResponse(
+    return BoardScanAck(
         scan_id=scan_id,
-        status=status,
+        status="pending",
+        root_domain=domain,
         started_at=started,
-        finished_at=finished,
-        board_report=board_report,
-        results=domain_results,
+        poll_url=f"/scan/board/{scan_id}",
+        message=f"Board scan started for {domain}. Poll GET /scan/board/{scan_id} for progress.",
     )
+
+
+@app.get("/scan/board/{scan_id}", response_model=BoardJobStatus)
+async def board_scan_status(scan_id: str) -> BoardJobStatus:
+    """Poll a running or completed board scan by scan_id."""
+    job = _BOARD_JOBS.get(scan_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Board scan {scan_id} not found.")
+    return job
+
+
+async def _run_board_job(scan_id: str, request: BoardScanRequest) -> None:
+    """Background worker: discover subdomains, scan each, aggregate, webhook."""
+    from .board_report import build_board_report
+    from .nuclei_webhook import post_board_webhook
+    from .subdomain_takeover import enumerate_subdomains
+
+    job = _BOARD_JOBS[scan_id]
+    domain = job.root_domain
+
+    try:
+        job.status = "running"
+
+        ct_result = await query_ct_logs(domain, timeout=request.timeout)
+        ct_subs = ct_result.subdomains if ct_result and not ct_result.error else []
+
+        enum_result = await enumerate_subdomains(
+            domain, known_subdomains=ct_subs, timeout=request.timeout,
+        )
+        live_subs: list[str] = enum_result.get("live_subdomains", [])
+
+        all_targets = [f"https://{domain}"]
+        for sub in live_subs:
+            if sub != domain:
+                all_targets.append(f"https://{sub}")
+
+        if request.max_subdomains > 0:
+            all_targets = all_targets[:1 + request.max_subdomains]
+
+        job.subdomains_discovered = len(live_subs)
+        job.targets_total = len(all_targets)
+
+        logger.info(
+            "Board scan %s: %d subdomains discovered, scanning %d targets",
+            scan_id, job.subdomains_discovered, len(all_targets),
+        )
+
+        scan_req = ScanRequest(
+            targets=["placeholder"],
+            render_js=request.render_js,
+            follow_redirects=request.follow_redirects,
+            max_depth=request.max_depth,
+            check_breaches=request.check_breaches,
+            timeout=request.timeout,
+            company_size=request.company_size,
+        )
+
+        sem = asyncio.Semaphore(SCAN_CONCURRENCY)
+
+        async def _bounded(target: str) -> DomainResult | None:
+            async with sem:
+                try:
+                    result = await _scan_single_target(target, scan_req)
+                    job.targets_completed += 1
+                    logger.info(
+                        "Board scan %s: %d/%d completed (%s)",
+                        scan_id, job.targets_completed, job.targets_total, target,
+                    )
+                    return result
+                except Exception as exc:
+                    job.targets_completed += 1
+                    logger.warning("Board scan %s: target %s failed: %s", scan_id, target, exc)
+                    return None
+
+        raw_results = await asyncio.gather(*(_bounded(t) for t in all_targets))
+        domain_results: list[DomainResult] = [r for r in raw_results if r is not None]
+
+        board_report = build_board_report(
+            domain, domain_results, subdomains_discovered=job.subdomains_discovered,
+        )
+
+        finished = datetime.now(timezone.utc).isoformat()
+
+        errors = [r for r in domain_results if r.error]
+        if not domain_results:
+            status = "failed"
+        elif errors:
+            status = "partial"
+        else:
+            status = "completed"
+
+        job.status = status
+        job.finished_at = finished
+        job.board_report = board_report
+        job.results = domain_results
+
+        logger.info(
+            "Board scan %s finished: %s, %d targets scanned, estate grade %s",
+            scan_id, status, len(domain_results), board_report.estate_grade,
+        )
+
+        await post_board_webhook(scan_id, domain, status, board_report, domain_results)
+
+    except Exception as exc:
+        logger.exception("Board scan %s crashed: %s", scan_id, exc)
+        job.status = "failed"
+        job.finished_at = datetime.now(timezone.utc).isoformat()
+        job.error = str(exc)
 
 
 @app.post("/scan/quick")

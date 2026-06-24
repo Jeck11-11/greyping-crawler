@@ -51,6 +51,8 @@ SCREENSHOT_HEIGHT = int(os.getenv("SCREENSHOT_HEIGHT", "720"))
 # Xano webhook (nuclei results callback)
 XANO_WEBHOOK_URL = os.getenv("XANO_WEBHOOK_URL", "")
 NUCLEI_WEBHOOK_TIMEOUT = int(os.getenv("NUCLEI_WEBHOOK_TIMEOUT", "30"))
+XANO_BOARD_WEBHOOK_URL = os.getenv("XANO_BOARD_WEBHOOK_URL", "") or XANO_WEBHOOK_URL
+BOARD_JOBS_MAX = int(os.getenv("BOARD_JOBS_MAX", "50"))
 
 # ProjectDiscovery tools sidecar
 PD_TOOLS_API_URL = os.getenv("PD_TOOLS_API_URL", "")

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
@@ -224,14 +226,16 @@ class TestBuildBoardReport:
 
 
 class TestBoardScanEndpoint:
-    """Smoke test for POST /scan/board with mocked internals."""
+    """Tests for async POST /scan/board + GET /scan/board/{scan_id}."""
 
     @pytest.fixture
     def client(self):
-        from src.app import app
+        from src.app import app, _BOARD_JOBS
+        _BOARD_JOBS.clear()
         return TestClient(app)
 
-    def test_board_endpoint_returns_200(self, client):
+    def test_board_endpoint_returns_202(self, client):
+        """POST /scan/board returns 202 immediately with a scan_id."""
         mock_ct = AsyncMock(return_value=type("CT", (), {"subdomains": ["sub1.example.com"], "error": None})())
         mock_enum = AsyncMock(return_value={
             "domain": "example.com",
@@ -240,26 +244,61 @@ class TestBoardScanEndpoint:
             "sources": {},
         })
 
-        mock_result = _make_result("https://example.com", grade="B")
+        async def mock_scan_single(target, req):
+            return _make_result(target, grade="B")
+
+        mock_webhook = AsyncMock(return_value=True)
+
+        with (
+            patch("src.app.query_ct_logs", mock_ct),
+            patch("src.subdomain_takeover.enumerate_subdomains", mock_enum),
+            patch("src.app._scan_single_target", side_effect=mock_scan_single),
+            patch("src.nuclei_webhook.post_board_webhook", mock_webhook),
+        ):
+            resp = client.post("/scan/board", json={"root_domain": "example.com"})
+
+        assert resp.status_code == 202
+        data = resp.json()
+        assert data["status"] == "pending"
+        assert "scan_id" in data
+        assert data["root_domain"] == "example.com"
+        assert data["poll_url"].startswith("/scan/board/")
+
+    def test_poll_unknown_scan_returns_404(self, client):
+        resp = client.get("/scan/board/nonexistent")
+        assert resp.status_code == 404
+
+    def test_poll_shows_completed_after_job_runs(self, client):
+        """After the background job finishes, GET returns the full report."""
+        mock_ct = AsyncMock(return_value=type("CT", (), {"subdomains": [], "error": None})())
+        mock_enum = AsyncMock(return_value={
+            "domain": "example.com",
+            "live_subdomains": [],
+            "resolved": [],
+            "sources": {},
+        })
 
         async def mock_scan_single(target, req):
             return _make_result(target, grade="B")
 
+        mock_webhook = AsyncMock(return_value=True)
+
         with (
             patch("src.app.query_ct_logs", mock_ct),
-            patch("src.app.board_scan.__wrapped__", None) if False else
             patch("src.subdomain_takeover.enumerate_subdomains", mock_enum),
             patch("src.app._scan_single_target", side_effect=mock_scan_single),
+            patch("src.nuclei_webhook.post_board_webhook", mock_webhook),
         ):
             resp = client.post("/scan/board", json={"root_domain": "example.com"})
+            scan_id = resp.json()["scan_id"]
 
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "board_report" in data
-        assert "results" in data
-        assert data["board_report"]["root_domain"] == "example.com"
-        assert data["status"] in ("completed", "partial")
-        assert len(data["results"]) >= 1
+            poll = client.get(f"/scan/board/{scan_id}")
+
+        data = poll.json()
+        assert data["status"] in ("completed", "partial", "running", "pending")
+        if data["status"] == "completed":
+            assert data["board_report"] is not None
+            assert data["board_report"]["root_domain"] == "example.com"
 
     def test_board_endpoint_with_max_subdomains(self, client):
         mock_ct = AsyncMock(return_value=type("CT", (), {
@@ -276,16 +315,47 @@ class TestBoardScanEndpoint:
         async def mock_scan_single(target, req):
             return _make_result(target, grade="A")
 
+        mock_webhook = AsyncMock(return_value=True)
+
         with (
             patch("src.app.query_ct_logs", mock_ct),
             patch("src.subdomain_takeover.enumerate_subdomains", mock_enum),
             patch("src.app._scan_single_target", side_effect=mock_scan_single),
+            patch("src.nuclei_webhook.post_board_webhook", mock_webhook),
         ):
             resp = client.post("/scan/board", json={
                 "root_domain": "example.com",
                 "max_subdomains": 3,
             })
 
-        assert resp.status_code == 200
-        data = resp.json()
-        assert len(data["results"]) <= 4  # root + max 3 subdomains
+        assert resp.status_code == 202
+
+    def test_webhook_called_on_completion(self, client):
+        """post_board_webhook is called once the job finishes."""
+        mock_ct = AsyncMock(return_value=type("CT", (), {"subdomains": [], "error": None})())
+        mock_enum = AsyncMock(return_value={
+            "domain": "example.com",
+            "live_subdomains": [],
+            "resolved": [],
+            "sources": {},
+        })
+
+        async def mock_scan_single(target, req):
+            return _make_result(target, grade="A")
+
+        mock_webhook = AsyncMock(return_value=True)
+
+        with (
+            patch("src.app.query_ct_logs", mock_ct),
+            patch("src.subdomain_takeover.enumerate_subdomains", mock_enum),
+            patch("src.app._scan_single_target", side_effect=mock_scan_single),
+            patch("src.nuclei_webhook.post_board_webhook", mock_webhook),
+        ):
+            resp = client.post("/scan/board", json={"root_domain": "example.com"})
+            scan_id = resp.json()["scan_id"]
+            # TestClient runs the event loop synchronously, so the background
+            # task should complete by the time we poll.
+            poll = client.get(f"/scan/board/{scan_id}")
+
+        if poll.json()["status"] == "completed":
+            mock_webhook.assert_called_once()

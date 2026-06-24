@@ -1905,3 +1905,31 @@ class BoardReportResponse(BaseModel):
     scanner_version: str = Field(default="1.4.0")
 
 
+class BoardScanAck(BaseModel):
+    """Immediate 202 response from POST /scan/board (async job started)."""
+
+    scan_id: str
+    status: str = Field(default="pending", description="pending / running / completed / partial / failed.")
+    root_domain: str = ""
+    started_at: str = ""
+    poll_url: str = ""
+    message: str = ""
+
+
+class BoardJobStatus(BaseModel):
+    """Polling response from GET /scan/board/{scan_id}."""
+
+    scan_id: str
+    status: str = Field(default="pending", description="pending / running / completed / partial / failed.")
+    root_domain: str = ""
+    started_at: str = ""
+    finished_at: str = ""
+    subdomains_discovered: int = 0
+    targets_total: int = 0
+    targets_completed: int = 0
+    board_report: BoardReport | None = None
+    results: list[DomainResult] = Field(default_factory=list)
+    error: str | None = None
+    scanner_version: str = Field(default="1.4.0")
+
+

@@ -7,10 +7,10 @@ import logging
 
 import httpx
 
-from .config import NUCLEI_WEBHOOK_TIMEOUT, XANO_WEBHOOK_URL
+from .config import NUCLEI_WEBHOOK_TIMEOUT, XANO_BOARD_WEBHOOK_URL, XANO_WEBHOOK_URL
 from .easm_report import build_easm_report
 from .fair_signals import compute_fair_signals
-from .models import DomainResult, RiskAssessmentGroup
+from .models import BoardReport, DomainResult, RiskAssessmentGroup
 from .nuclei_client import run_nuclei_scan
 
 logger = logging.getLogger(__name__)
@@ -19,9 +19,9 @@ _MAX_RETRIES = 3
 _BACKOFF_BASE = 2  # seconds
 
 
-async def _post_webhook(payload: dict) -> bool:
-    """POST payload to XANO_WEBHOOK_URL with retry + exponential backoff."""
-    url = XANO_WEBHOOK_URL
+async def _post_webhook(payload: dict, *, url: str = "") -> bool:
+    """POST payload to a webhook URL with retry + exponential backoff."""
+    url = url or XANO_WEBHOOK_URL
     if not url:
         return False
 
@@ -50,7 +50,7 @@ async def _post_webhook(payload: dict) -> bool:
             )
             await asyncio.sleep(wait)
 
-    logger.error("Webhook POST exhausted %d retries for %s", _MAX_RETRIES, payload.get("target", "?"))
+    logger.error("Webhook POST exhausted %d retries for %s", _MAX_RETRIES, url)
     return False
 
 
@@ -82,3 +82,22 @@ async def nuclei_background_scan(
 
         if idx < len(domain_results) - 1:
             await asyncio.sleep(1)
+
+
+async def post_board_webhook(
+    scan_id: str,
+    root_domain: str,
+    status: str,
+    board_report: BoardReport,
+    results: list[DomainResult],
+) -> bool:
+    """POST completed board report to Xano."""
+    payload = {
+        "event": "board_report",
+        "scan_id": scan_id,
+        "root_domain": root_domain,
+        "status": status,
+        "board_report": board_report.model_dump(mode="json"),
+        "results": [r.model_dump(mode="json") for r in results],
+    }
+    return await _post_webhook(payload, url=XANO_BOARD_WEBHOOK_URL)
