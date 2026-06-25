@@ -1933,3 +1933,34 @@ class BoardJobStatus(BaseModel):
     scanner_version: str = Field(default="1.4.0")
 
 
+# ---------------------------------------------------------------------------
+# Aggregation endpoint — accepts stored EASM data, returns board report
+# ---------------------------------------------------------------------------
+
+class SubdomainEASMInput(BaseModel):
+    """One subdomain's stored EASM data, as sent from Xano."""
+
+    target: str = Field(..., description="Hostname, e.g. 'www.bwg.ie' or 'mail.bwg.ie'.")
+    overall_grade: str = Field(default="", description="A+ to F grade for this subdomain.")
+    prioritized_findings: list[PrioritizedFinding] = Field(default_factory=list)
+    financial_impact: FinancialImpact = Field(default_factory=FinancialImpact)
+    ransomware_susceptibility: RansomwareIndex = Field(default_factory=RansomwareIndex)
+    executive_summary: ExecutiveSummary = Field(default_factory=ExecutiveSummary)
+    confirmed_issues: int = 0
+    total_findings: int = 0
+    compliance_summary: dict[str, int] = Field(default_factory=dict)
+
+
+class AggregateRequest(BaseModel):
+    """Payload for POST /report/aggregate — accepts stored EASM data from Xano."""
+
+    root_domain: str = Field(..., description="Root domain, e.g. 'bwg.ie'.")
+    subdomains: list[SubdomainEASMInput] = Field(
+        ...,
+        min_length=1,
+        description="EASM report data for each subdomain.",
+    )
+    company_size: CompanySize | None = Field(
+        default=None,
+        description="Organisation size tier (optional, for context).",
+    )

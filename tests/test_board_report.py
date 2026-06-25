@@ -359,3 +359,116 @@ class TestBoardScanEndpoint:
 
         if poll.json()["status"] == "completed":
             mock_webhook.assert_called_once()
+
+
+class TestAggregateEndpoint:
+    """Tests for POST /report/aggregate."""
+
+    @pytest.fixture
+    def client(self):
+        from src.app import app
+        return TestClient(app)
+
+    def test_aggregate_returns_board_report(self, client):
+        """Sending stored EASM data returns a valid board report."""
+        payload = {
+            "root_domain": "example.com",
+            "subdomains": [
+                {
+                    "target": "www.example.com",
+                    "overall_grade": "B",
+                    "confirmed_issues": 3,
+                    "total_findings": 5,
+                    "prioritized_findings": [
+                        {
+                            "id": "missing_hsts",
+                            "title": "Missing HSTS",
+                            "category": "security_headers",
+                            "severity": "high",
+                            "classification": "confirmed_issue",
+                            "owner": "customer",
+                        },
+                    ],
+                    "financial_impact": {
+                        "estimated_annual_loss_low": 1000,
+                        "estimated_annual_loss_high": 5000,
+                    },
+                    "ransomware_susceptibility": {"score": 30, "tier": "medium"},
+                },
+                {
+                    "target": "mail.example.com",
+                    "overall_grade": "D",
+                    "confirmed_issues": 1,
+                    "total_findings": 2,
+                    "prioritized_findings": [
+                        {
+                            "id": "missing_hsts",
+                            "title": "Missing HSTS",
+                            "category": "security_headers",
+                            "severity": "high",
+                            "classification": "confirmed_issue",
+                            "owner": "customer",
+                        },
+                        {
+                            "id": "email_no_dmarc",
+                            "title": "No DMARC record",
+                            "category": "email_security",
+                            "severity": "medium",
+                            "classification": "confirmed_issue",
+                            "owner": "customer",
+                        },
+                    ],
+                    "financial_impact": {
+                        "estimated_annual_loss_low": 2000,
+                        "estimated_annual_loss_high": 15000,
+                    },
+                    "ransomware_susceptibility": {"score": 55, "tier": "high"},
+                },
+            ],
+        }
+        resp = client.post("/report/aggregate", json=payload)
+        assert resp.status_code == 200
+        data = resp.json()
+
+        assert data["root_domain"] == "example.com"
+        assert data["estate_grade"] == "D"
+        assert data["subdomains_scanned"] == 2
+        assert data["subdomains_discovered"] == 2
+
+        assert data["ransomware_susceptibility"]["score"] == 55
+
+        assert data["financial_impact"]["estimated_annual_loss_high"] == 15000
+
+        finding_ids = [bf["finding"]["id"] for bf in data["top_findings"]]
+        assert "missing_hsts" in finding_ids
+        assert "email_no_dmarc" in finding_ids
+
+        hsts = next(bf for bf in data["top_findings"] if bf["finding"]["id"] == "missing_hsts")
+        assert len(hsts["affected_subdomains"]) == 2
+
+    def test_aggregate_single_subdomain(self, client):
+        """Works with a single subdomain — no aggregation needed."""
+        payload = {
+            "root_domain": "single.com",
+            "subdomains": [
+                {
+                    "target": "single.com",
+                    "overall_grade": "A",
+                    "confirmed_issues": 0,
+                    "total_findings": 1,
+                    "prioritized_findings": [],
+                },
+            ],
+        }
+        resp = client.post("/report/aggregate", json=payload)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["estate_grade"] == "A"
+        assert data["subdomains_scanned"] == 1
+        assert data["total_confirmed_issues"] == 0
+
+    def test_aggregate_empty_subdomains_rejected(self, client):
+        """At least one subdomain is required."""
+        payload = {"root_domain": "empty.com", "subdomains": []}
+        resp = client.post("/report/aggregate", json=payload)
+        assert resp.status_code == 422

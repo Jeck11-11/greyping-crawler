@@ -49,7 +49,9 @@ from .ioc_scanner import scan_ioc
 from .privacy_scanner import analyze_privacy_compliance
 from .typosquatting import check_typosquatting
 from .models import (
+    AggregateRequest,
     BoardJobStatus,
+    BoardReport,
     BoardReportResponse,
     BoardScanAck,
     BoardScanRequest,
@@ -982,6 +984,47 @@ async def _run_board_job(scan_id: str, request: BoardScanRequest) -> None:
         job.status = "failed"
         job.finished_at = datetime.now(timezone.utc).isoformat()
         job.error = str(exc)
+
+
+# ---------------------------------------------------------------------------
+# Aggregate endpoint — accepts stored EASM data, returns board report
+# ---------------------------------------------------------------------------
+
+@app.post("/report/aggregate", response_model=BoardReport)
+async def aggregate_report(request: AggregateRequest) -> BoardReport:
+    """Aggregate pre-scanned EASM data into a board report.
+
+    Accepts stored EASM report data from Xano (no re-scanning) and runs the
+    board report aggregation: deduplication, grading, financial/ransomware
+    aggregation, compliance posture.  Returns instantly.
+    """
+    from .board_report import build_board_report
+    from .models import DomainResult, EASMReport, RiskAssessmentGroup
+
+    domain_results: list[DomainResult] = []
+    for sub in request.subdomains:
+        easm = EASMReport(
+            overall_grade=sub.overall_grade,
+            prioritized_findings=sub.prioritized_findings,
+            financial_impact=sub.financial_impact,
+            ransomware_susceptibility=sub.ransomware_susceptibility,
+            executive_summary=sub.executive_summary,
+            confirmed_issues=sub.confirmed_issues,
+            total_findings=sub.total_findings,
+            compliance_summary=sub.compliance_summary,
+        )
+        dr = DomainResult(
+            target=sub.target,
+            risk_assessment=RiskAssessmentGroup(easm_report=easm),
+        )
+        domain_results.append(dr)
+
+    board = build_board_report(
+        request.root_domain,
+        domain_results,
+        subdomains_discovered=len(request.subdomains),
+    )
+    return board
 
 
 @app.post("/scan/quick")
