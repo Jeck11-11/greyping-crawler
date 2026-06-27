@@ -1964,3 +1964,44 @@ class AggregateRequest(BaseModel):
         default=None,
         description="Organisation size tier (optional, for context).",
     )
+
+
+# ---------------------------------------------------------------------------
+# Async batch scan — scan many targets in the background, webhook each result
+# ---------------------------------------------------------------------------
+
+class AsyncScanAck(BaseModel):
+    """Immediate 202 response from POST /scan/async (background job started)."""
+
+    scan_id: str
+    status: str = Field(default="pending", description="pending / running / completed / failed.")
+    targets_total: int = 0
+    poll_url: str = ""
+    message: str = ""
+
+
+class AsyncScanRow(BaseModel):
+    """Per-target progress row in an async scan job (lightweight, no full result)."""
+
+    target: str
+    status: str = Field(default="pending", description="pending / completed / failed.")
+    grade: str = ""
+
+
+class AsyncScanJobStatus(BaseModel):
+    """Polling response from GET /scan/async/{scan_id}.
+
+    Progress only — full per-target results are delivered via webhook, not held
+    here, so a 265-target job doesn't balloon memory.
+    """
+
+    scan_id: str
+    status: str = Field(default="pending", description="pending / running / completed / failed.")
+    started_at: str = ""
+    finished_at: str = ""
+    targets_total: int = 0
+    targets_completed: int = 0
+    targets_failed: int = 0
+    delivered: int = Field(default=0, description="Results successfully POSTed to the webhook.")
+    rows: list[AsyncScanRow] = Field(default_factory=list)
+    error: str | None = None

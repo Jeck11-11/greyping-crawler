@@ -472,3 +472,99 @@ class TestAggregateEndpoint:
         payload = {"root_domain": "empty.com", "subdomains": []}
         resp = client.post("/report/aggregate", json=payload)
         assert resp.status_code == 422
+
+
+class TestAsyncScanEndpoint:
+    """Tests for async batch scan: POST /scan/async + GET /scan/async/{scan_id}."""
+
+    @pytest.fixture
+    def client(self):
+        from src.app import app, _SCAN_JOBS
+        _SCAN_JOBS.clear()
+        return TestClient(app)
+
+    def test_async_scan_returns_202(self, client):
+        """POST /scan/async returns 202 immediately with a scan_id and target count."""
+        async def mock_scan_single(target, req):
+            return _make_result(target, grade="B")
+
+        mock_webhook = AsyncMock(return_value=True)
+        mock_complete = AsyncMock(return_value=True)
+
+        with (
+            patch("src.app._scan_single_target", side_effect=mock_scan_single),
+            patch("src.nuclei_webhook.post_scan_result_webhook", mock_webhook),
+            patch("src.nuclei_webhook.post_scan_complete_webhook", mock_complete),
+        ):
+            resp = client.post("/scan/async", json={
+                "targets": ["https://a.example.com", "https://b.example.com"],
+            })
+
+        assert resp.status_code == 202
+        data = resp.json()
+        assert data["status"] == "pending"
+        assert data["targets_total"] == 2
+        assert "scan_id" in data
+        assert data["poll_url"].startswith("/scan/async/")
+
+    def test_poll_unknown_scan_returns_404(self, client):
+        resp = client.get("/scan/async/nonexistent")
+        assert resp.status_code == 404
+
+    def test_each_result_webhooked_incrementally(self, client):
+        """Every completed target is POSTed to the webhook as it finishes."""
+        async def mock_scan_single(target, req):
+            return _make_result(target, grade="B")
+
+        mock_webhook = AsyncMock(return_value=True)
+        mock_complete = AsyncMock(return_value=True)
+
+        with (
+            patch("src.app._scan_single_target", side_effect=mock_scan_single),
+            patch("src.nuclei_webhook.post_scan_result_webhook", mock_webhook),
+            patch("src.nuclei_webhook.post_scan_complete_webhook", mock_complete),
+        ):
+            resp = client.post("/scan/async", json={
+                "targets": [
+                    "https://a.example.com",
+                    "https://b.example.com",
+                    "https://c.example.com",
+                ],
+            })
+            scan_id = resp.json()["scan_id"]
+            poll = client.get(f"/scan/async/{scan_id}")
+
+        data = poll.json()
+        if data["status"] == "completed":
+            assert data["targets_completed"] == 3
+            assert data["targets_failed"] == 0
+            assert mock_webhook.call_count == 3
+            mock_complete.assert_called_once()
+
+    def test_failed_target_counted_not_fatal(self, client):
+        """A target that raises is counted as failed; the batch still completes."""
+        async def mock_scan_single(target, req):
+            if "bad" in target:
+                raise RuntimeError("scan blew up")
+            return _make_result(target, grade="A")
+
+        mock_webhook = AsyncMock(return_value=True)
+        mock_complete = AsyncMock(return_value=True)
+
+        with (
+            patch("src.app._scan_single_target", side_effect=mock_scan_single),
+            patch("src.nuclei_webhook.post_scan_result_webhook", mock_webhook),
+            patch("src.nuclei_webhook.post_scan_complete_webhook", mock_complete),
+        ):
+            resp = client.post("/scan/async", json={
+                "targets": ["https://good.example.com", "https://bad.example.com"],
+            })
+            scan_id = resp.json()["scan_id"]
+            poll = client.get(f"/scan/async/{scan_id}")
+
+        data = poll.json()
+        if data["status"] == "completed":
+            assert data["targets_completed"] == 1
+            assert data["targets_failed"] == 1
+            # Only the successful target is webhooked.
+            assert mock_webhook.call_count == 1

@@ -50,6 +50,9 @@ from .privacy_scanner import analyze_privacy_compliance
 from .typosquatting import check_typosquatting
 from .models import (
     AggregateRequest,
+    AsyncScanAck,
+    AsyncScanJobStatus,
+    AsyncScanRow,
     BoardJobStatus,
     BoardReport,
     BoardReportResponse,
@@ -981,6 +984,141 @@ async def _run_board_job(scan_id: str, request: BoardScanRequest) -> None:
 
     except Exception as exc:
         logger.exception("Board scan %s crashed: %s", scan_id, exc)
+        job.status = "failed"
+        job.finished_at = datetime.now(timezone.utc).isoformat()
+        job.error = str(exc)
+
+
+# ---------------------------------------------------------------------------
+# Async batch scan — scan a known list of targets in the background,
+# webhook each result as it completes (no request timeout, nothing lost)
+# ---------------------------------------------------------------------------
+
+_SCAN_JOBS: dict[str, AsyncScanJobStatus] = {}
+
+
+def _evict_scan_jobs() -> None:
+    from .config import SCAN_JOBS_MAX
+    while len(_SCAN_JOBS) > SCAN_JOBS_MAX:
+        oldest = next(iter(_SCAN_JOBS))
+        del _SCAN_JOBS[oldest]
+
+
+@app.post("/scan/async", status_code=202, response_model=AsyncScanAck)
+async def scan_async(request: ScanRequest) -> AsyncScanAck:
+    """Start a background scan of many targets. Returns immediately with a scan_id.
+
+    Each target's full result is POSTed to XANO_SCAN_WEBHOOK_URL as it finishes,
+    so a 200+ host estate streams back over time instead of timing out a single
+    synchronous request. Poll GET /scan/async/{scan_id} for progress.
+    """
+    targets = [validate_target(t) for t in request.targets]
+    scan_id = uuid.uuid4().hex
+    started = datetime.now(timezone.utc).isoformat()
+
+    job = AsyncScanJobStatus(
+        scan_id=scan_id,
+        status="pending",
+        started_at=started,
+        targets_total=len(targets),
+        rows=[AsyncScanRow(target=t) for t in targets],
+    )
+    _SCAN_JOBS[scan_id] = job
+    _evict_scan_jobs()
+
+    asyncio.create_task(_run_async_scan_job(scan_id, targets, request))
+
+    logger.info("Async scan queued: %d targets (scan_id=%s)", len(targets), scan_id)
+
+    return AsyncScanAck(
+        scan_id=scan_id,
+        status="pending",
+        targets_total=len(targets),
+        poll_url=f"/scan/async/{scan_id}",
+        message=(
+            f"Scan started for {len(targets)} target(s). Results are POSTed to the "
+            f"scan webhook as they complete. Poll GET /scan/async/{scan_id} for progress."
+        ),
+    )
+
+
+@app.get("/scan/async/{scan_id}", response_model=AsyncScanJobStatus)
+async def scan_async_status(scan_id: str) -> AsyncScanJobStatus:
+    """Poll a running or completed async batch scan by scan_id."""
+    job = _SCAN_JOBS.get(scan_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Async scan {scan_id} not found.")
+    return job
+
+
+async def _run_async_scan_job(
+    scan_id: str,
+    targets: list[str],
+    request: ScanRequest,
+) -> None:
+    """Background worker: scan each target concurrently, webhook each result."""
+    from .nuclei_webhook import post_scan_complete_webhook, post_scan_result_webhook
+
+    job = _SCAN_JOBS[scan_id]
+    row_by_target = {row.target: row for row in job.rows}
+
+    try:
+        job.status = "running"
+        sem = asyncio.Semaphore(SCAN_CONCURRENCY)
+        total = len(targets)
+
+        async def _bounded(idx: int, target: str) -> None:
+            async with sem:
+                row = row_by_target.get(target)
+                try:
+                    result = await _scan_single_target(target, request)
+                    if result.error:
+                        job.targets_failed += 1
+                        if row:
+                            row.status = "failed"
+                    else:
+                        job.targets_completed += 1
+                        if row:
+                            row.status = "completed"
+                            easm = result.easm_report
+                            row.grade = easm.overall_grade if easm else ""
+                except Exception as exc:
+                    job.targets_failed += 1
+                    if row:
+                        row.status = "failed"
+                    logger.warning("Async scan %s: target %s failed: %s", scan_id, target, exc)
+                    return
+
+                try:
+                    delivered = await post_scan_result_webhook(
+                        scan_id, result, index=idx, total=total,
+                    )
+                    if delivered:
+                        job.delivered += 1
+                except Exception as exc:
+                    logger.warning(
+                        "Async scan %s: webhook for %s failed: %s", scan_id, target, exc,
+                    )
+
+        await asyncio.gather(*(_bounded(i, t) for i, t in enumerate(targets)))
+
+        job.status = "completed"
+        job.finished_at = datetime.now(timezone.utc).isoformat()
+
+        logger.info(
+            "Async scan %s finished: %d completed, %d failed, %d delivered",
+            scan_id, job.targets_completed, job.targets_failed, job.delivered,
+        )
+
+        await post_scan_complete_webhook(
+            scan_id,
+            targets_total=total,
+            targets_completed=job.targets_completed,
+            targets_failed=job.targets_failed,
+        )
+
+    except Exception as exc:
+        logger.exception("Async scan %s crashed: %s", scan_id, exc)
         job.status = "failed"
         job.finished_at = datetime.now(timezone.utc).isoformat()
         job.error = str(exc)

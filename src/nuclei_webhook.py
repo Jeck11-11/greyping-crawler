@@ -7,7 +7,12 @@ import logging
 
 import httpx
 
-from .config import NUCLEI_WEBHOOK_TIMEOUT, XANO_BOARD_WEBHOOK_URL, XANO_WEBHOOK_URL
+from .config import (
+    NUCLEI_WEBHOOK_TIMEOUT,
+    XANO_BOARD_WEBHOOK_URL,
+    XANO_SCAN_WEBHOOK_URL,
+    XANO_WEBHOOK_URL,
+)
 from .easm_report import build_easm_report
 from .fair_signals import compute_fair_signals
 from .models import BoardReport, DomainResult, RiskAssessmentGroup
@@ -82,6 +87,50 @@ async def nuclei_background_scan(
 
         if idx < len(domain_results) - 1:
             await asyncio.sleep(1)
+
+
+async def post_scan_result_webhook(
+    scan_id: str,
+    result: DomainResult,
+    *,
+    index: int = 0,
+    total: int = 0,
+) -> bool:
+    """POST a single completed subdomain scan result to Xano (incremental).
+
+    Called once per target as it finishes, so Xano stores results
+    progressively over a long-running batch rather than all at once.
+    """
+    status = "error" if result.error else "completed"
+    payload = {
+        "event": "scan_result",
+        "scan_id": scan_id,
+        "target": result.target,
+        "status": status,
+        "index": index,
+        "total": total,
+        "result": result.model_dump(mode="json"),
+    }
+    return await _post_webhook(payload, url=XANO_SCAN_WEBHOOK_URL)
+
+
+async def post_scan_complete_webhook(
+    scan_id: str,
+    *,
+    targets_total: int,
+    targets_completed: int,
+    targets_failed: int,
+) -> bool:
+    """POST a final 'batch finished' marker to Xano once all targets are done."""
+    payload = {
+        "event": "scan_complete",
+        "scan_id": scan_id,
+        "status": "completed",
+        "targets_total": targets_total,
+        "targets_completed": targets_completed,
+        "targets_failed": targets_failed,
+    }
+    return await _post_webhook(payload, url=XANO_SCAN_WEBHOOK_URL)
 
 
 async def post_board_webhook(
