@@ -542,6 +542,21 @@ async def _scan_single_target(
             waf_result.waf_detected = True
             waf_result.waf_provider = waf_result.firewall
             waf_result.waf_detection_status = "detected"
+
+        # Even when the WAF detector returns nothing, the resolved IP's ASN may
+        # prove a CDN/reverse-proxy is fronting the site. Record that as CDN —
+        # never as a WAF (which stays not_assessed without a ruleset signal).
+        if not waf_result.cdn_detected:
+            _cdn_hosts = {h.lower() for h in (ip_enrich.hosting_providers or [])}
+            _cdn_match = next(
+                (h for h in _cdn_hosts if any(v in h for v in _cdn_vendors)), ""
+            )
+            if _cdn_match:
+                waf_result.cdn_detected = True
+                waf_result.cdn_provider = _cdn_match.title()
+                waf_result.reverse_proxy_detected = True
+                if waf_result.waf_detection_status == "not_assessed":
+                    waf_result.waf_detected = None
         if waf_result.detected and waf_result.firewall:
             existing_names = {t.name.lower() for t in tech_findings}
             if waf_result.firewall.lower() not in existing_names:

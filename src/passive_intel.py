@@ -89,6 +89,27 @@ _TWO_LEVEL_TLDS = frozenset({
 })
 
 
+_MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
+_VALID_HOSTNAME_RE = re.compile(r"^[a-z0-9]([a-z0-9\-]{0,62}\.)+[a-z]{2,63}$")
+
+
+def _clean_hostname(raw: str) -> str:
+    """Strip markdown-link wrapping and validate a hostname; '' if not valid.
+
+    crt.sh / third-party feeds occasionally return a value like
+    ``[www.example.com](https://www.example.com)`` — unwrap it, drop wildcard/
+    scheme/whitespace noise, and reject anything that isn't a plain hostname.
+    """
+    if not raw:
+        return ""
+    host = _MARKDOWN_LINK_RE.sub(r"\1", raw).strip().lower()
+    host = host.removeprefix("https://").removeprefix("http://")
+    host = host.lstrip("*.").rstrip(".").split("/")[0]
+    if not _VALID_HOSTNAME_RE.match(host):
+        return ""
+    return host
+
+
 def _organizational_domain(hostname: str) -> str:
     """Best-effort registrable (organizational) domain from a hostname.
 
@@ -503,10 +524,10 @@ async def query_ct_logs(domain: str, *, timeout: int = PASSIVE_TIMEOUT) -> CTRes
         for entry in data or []:
             name_value = entry.get("name_value") or ""
             for host in name_value.splitlines():
-                host = host.strip().lower().lstrip("*.")
+                host = _clean_hostname(host)
                 if host and host.endswith(domain.lower()):
                     subdomains.add(host)
-            cn = (entry.get("common_name") or "").strip().lower().lstrip("*.")
+            cn = _clean_hostname(entry.get("common_name") or "")
             if cn and cn.endswith(domain.lower()):
                 subdomains.add(cn)
             issuer = (entry.get("issuer_name") or "").strip()

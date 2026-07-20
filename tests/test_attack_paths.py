@@ -208,7 +208,7 @@ class TestEmailSpoofing:
         ap = analyze_attack_paths(result)
         chain = next((p for p in ap.paths if "Spoofing" in p.title), None)
         assert chain is not None
-        assert chain.severity == "high"
+        assert chain.severity == "medium"  # p=none is unenforced, not missing
         assert chain.impact == "phishing"
 
     def test_no_match_dmarc_reject(self):

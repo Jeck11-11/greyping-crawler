@@ -41,13 +41,23 @@ _SOCIAL_DOMAINS = {
     "mastodon.social",
 }
 
-# Skip common false-positive emails
+# Skip common false-positive / placeholder emails
 _EMAIL_BLOCKLIST = {
     "example@example.com",
     "user@example.com",
     "name@domain.com",
     "email@example.com",
 }
+# Placeholder domains — any address on these is a template/example, not real.
+_EMAIL_PLACEHOLDER_DOMAINS = {
+    "example.com", "example.org", "example.net", "domain.com",
+    "yourdomain.com", "yoursite.com", "email.com", "test.com",
+}
+
+
+def _is_placeholder_email(addr: str) -> bool:
+    dom = addr.rsplit("@", 1)[-1] if "@" in addr else ""
+    return addr in _EMAIL_BLOCKLIST or dom in _EMAIL_PLACEHOLDER_DOMAINS
 
 
 def _digit_count(s: str) -> int:
@@ -198,14 +208,14 @@ def extract_contacts(soup: BeautifulSoup, raw_html: str) -> ContactInfo:
     emails: set[str] = set()
     for m in _EMAIL_RE.finditer(text):
         email = m.group(0).lower()
-        if email not in _EMAIL_BLOCKLIST:
+        if not _is_placeholder_email(email):
             emails.add(email)
     # Also check mailto: links
     for a_tag in soup.find_all("a", href=True):
         href: str = a_tag["href"]
         if href.startswith("mailto:"):
             addr = href.removeprefix("mailto:").split("?")[0].strip().lower()
-            if addr and addr not in _EMAIL_BLOCKLIST:
+            if addr and not _is_placeholder_email(addr):
                 emails.add(addr)
 
     # --- Phone numbers ---

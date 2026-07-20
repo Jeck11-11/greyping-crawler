@@ -194,11 +194,21 @@ def _check_email_spoofing(result: DomainResult) -> AttackPath | None:
     if not result.emails:
         return None
 
+    # Align severity/likelihood with the finding layer: a published p=none
+    # (monitoring, SPF still applies) is weaker exposure than no DMARC at all,
+    # and neither is a *confirmed* spoof — it's a possible/likely path.
+    dmarc_missing = not email_sec.dmarc.exists
+    severity = "high" if dmarc_missing else "medium"
+    likelihood = "likely" if dmarc_missing else "possible"
+
     return AttackPath(
-        title="Email Spoofing and Phishing via Missing DMARC Enforcement",
-        severity="high",
+        title=(
+            "Email Spoofing via Missing DMARC" if dmarc_missing
+            else "Email Spoofing via Unenforced DMARC (p=none)"
+        ),
+        severity=severity,
         impact="phishing",
-        likelihood="confirmed",
+        likelihood=likelihood,
         remediation="Configure DMARC with policy=reject and ensure SPF and DKIM are properly set up.",
         steps=[
             AttackStep(

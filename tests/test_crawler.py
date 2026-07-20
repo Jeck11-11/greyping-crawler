@@ -101,7 +101,7 @@ class TestPlaywrightFallback:
         mock_resp = MagicMock()
         mock_resp.text = (
             '<html><head><title>Fallback</title></head>'
-            '<body>Contact: info@example.com</body></html>'
+            '<body>Contact: info@acme.com</body></html>'
         )
         mock_resp.content = mock_resp.text.encode()
         mock_resp.status_code = 200
@@ -124,7 +124,7 @@ class TestPlaywrightFallback:
                     )
                     assert page.error is None
                     assert page.title == "Fallback"
-                    assert "info@example.com" in page.contacts.emails
+                    assert "info@acme.com" in page.contacts.emails
                     assert "static fallback" in page.notes
 
 

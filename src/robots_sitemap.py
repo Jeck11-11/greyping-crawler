@@ -70,9 +70,10 @@ def parse_sitemap_xml(content: str) -> SitemapResult:
     try:
         root = ET.fromstring(content)
     except ET.ParseError:
-        # We fetched something but couldn't parse it — that's a failed parse,
-        # not proof there are no URLs.
-        return SitemapResult(found=True, sitemap_parse_status="failed")
+        # A whitespace-only / near-empty body is an empty sitemap, not a parse
+        # failure. Only non-trivial unparseable content is a real failure.
+        status = "empty" if len(content.strip()) < 10 else "failed"
+        return SitemapResult(found=True, sitemap_parse_status=status)
 
     ns = ""
     tag = root.tag

@@ -1578,12 +1578,16 @@ def _build_executive_summary(
     es = result.dns.email_security if result.dns else None
     if es and not es.error and es.dmarc.exists and es.dmarc.policy in ("reject", "quarantine"):
         positives.append(f"DMARC enforcement active (p={es.dmarc.policy})")
-    waf_names = [t.name for t in result.technologies if t.name in (
+    cdn_names = [t.name for t in result.technologies if t.name in (
         "Cloudflare", "AWS CloudFront", "Fastly", "Akamai", "Imperva",
         "Sucuri", "F5 BIG-IP", "Azure Front Door",
     )]
-    if waf_names:
-        positives.append(f"WAF/CDN detected: {waf_names[0]}")
+    if result.waf and result.waf.waf_detected:
+        positives.append(f"WAF enabled: {result.waf.waf_provider or 'confirmed'}")
+    elif cdn_names or (result.waf and result.waf.cdn_detected):
+        name = (result.waf.cdn_provider if (result.waf and result.waf.cdn_provider)
+                else cdn_names[0])
+        positives.append(f"CDN / reverse proxy in front of origin: {name}")
     if ransomware and ransomware.tier == "low":
         positives.append(f"Low ransomware susceptibility ({ransomware.score}/100)")
 
@@ -2091,17 +2095,24 @@ def _compute_ransomware_index(result: DomainResult) -> RansomwareIndex:
             score += 15
             factors.append(f"{len(kev)} CVE(s) in CISA Known Exploited Vulnerabilities list")
 
-    # No WAF detected
-    waf_techs = [t for t in result.technologies if any(
-        c in ("waf", "cdn") for c in (t.categories or [])
-    )]
-    if not waf_techs and not (result.waf and result.waf.detected):
+    # Reverse-proxy / CDN presence (NOT a WAF unless a ruleset was confirmed).
+    cdn_techs = [t for t in result.technologies if "cdn" in (t.categories or [])]
+    waf_confirmed = bool(result.waf and result.waf.waf_detected)
+    cdn_present = bool(cdn_techs) or bool(result.waf and result.waf.cdn_detected)
+    if not cdn_present and not waf_confirmed:
         score += 5
-        factors.append("No WAF or CDN protection detected")
+        factors.append("No reverse-proxy/CDN or WAF protection detected")
     else:
-        name = waf_techs[0].name if waf_techs else (result.waf.firewall if result.waf else "")
-        if name:
-            mitigations.append(f"WAF/CDN protection: {name}")
+        if waf_confirmed:
+            mitigations.append(f"WAF enabled: {result.waf.waf_provider or 'confirmed'}")
+        if cdn_present:
+            cdn_name = (
+                result.waf.cdn_provider if (result.waf and result.waf.cdn_provider)
+                else (cdn_techs[0].name if cdn_techs else "CDN")
+            )
+            mitigations.append(
+                f"CDN / reverse proxy: {cdn_name} (WAF ruleset not confirmed)"
+            )
 
     # Breach history
     if result.breaches:
@@ -2476,6 +2487,18 @@ def build_easm_report(
             all_findings.extend(_classify_privacy_findings(result))
 
         sorted_findings = _sort_findings(all_findings)
+
+        # Normalise affects_risk_score: only a confirmed issue at low/medium/high/
+        # critical severity actually moves the grade. Informational severity and
+        # non-confirmed classifications never contribute, so the per-finding flag
+        # must agree with excluded_inputs (no "affects_risk_score: true" on an
+        # informational or candidate finding).
+        for f in sorted_findings:
+            scores = (
+                f.classification == FindingClassification.confirmed_issue
+                and f.severity in ("critical", "high", "medium", "low")
+            )
+            f.affects_risk_score = f.affects_risk_score and scores
 
         # Apply compliance framework tags
         for finding in sorted_findings:
