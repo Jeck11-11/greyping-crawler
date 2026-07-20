@@ -697,6 +697,11 @@ class DMARCResult(BaseModel):
     subdomain_policy: str | None = Field(default=None, description="sp= tag.")
     pct: int = Field(default=100, description="Percentage of messages subject to policy.")
     rua: list[str] = Field(default_factory=list, description="Aggregate report URIs.")
+    inherited_from_parent: bool = Field(
+        default=False,
+        description="True when policy is inherited from the organizational domain's DMARC (sp=/p=).",
+    )
+    parent_domain: str = Field(default="", description="Organizational domain the policy was inherited from.")
     issues: list[str] = Field(default_factory=list)
 
 
@@ -735,6 +740,13 @@ class EmailSecurityResult(BaseModel):
         description="Inferred mail providers from MX records (e.g. 'Google Workspace', 'Microsoft 365').",
     )
     grade: str = Field(default="", description="A-F email security grade.")
+    is_organizational_domain: bool = Field(default=True, description="True for the apex/registrable domain.")
+    receives_mail: bool = Field(default=False, description="Has MX records.")
+    applicable: bool = Field(default=True, description="Whether core email-security checks apply to this host.")
+    email_security_status: str = Field(
+        default="assessed",
+        description="assessed / not_applicable. Non-mail web subdomains are not_applicable.",
+    )
     error: str | None = None
 
 
@@ -926,6 +938,29 @@ class FindingOwner(str, Enum):
     platform = "platform"
     third_party = "third_party"
     not_actionable = "not_actionable"
+
+
+class AssetClassification(BaseModel):
+    """Classification of a single asset (hostname), driving which checks apply.
+
+    Website/privacy/cookie/email checks must not be applied to non-website
+    assets (autodiscover, mail, API, CDN edge, unresolved), so grading a
+    Microsoft 365 autodiscover CNAME as a customer website is avoided.
+    """
+
+    hostname: str = ""
+    asset_type: str = Field(
+        default="unknown",
+        description="website / web_application / api / mail_service / autodiscover_service / "
+        "remote_access / vpn / cdn_proxy / cloud_service / redirect / parked_domain / "
+        "inactive / unresolved / unknown.",
+    )
+    provider: str = ""
+    evidence: list[str] = Field(default_factory=list)
+    website_checks_applicable: bool = True
+    privacy_checks_applicable: bool = True
+    cookie_checks_applicable: bool = True
+    email_domain_checks_applicable: bool = True
 
 
 class ModuleStatus(BaseModel):
@@ -1166,6 +1201,7 @@ class EASMReport(BaseModel):
     financial_impact: FinancialImpact = Field(default_factory=FinancialImpact)
     compliance_posture: list[CompliancePosture] = Field(default_factory=list)
     asset_context: AssetContext | None = None
+    asset_classification: AssetClassification | None = None
     cloud_assets: list[CloudAsset] = Field(default_factory=list)
     recon_artifacts: list[ReconArtifact] = Field(default_factory=list)
     prioritized_findings: list[PrioritizedFinding] = Field(

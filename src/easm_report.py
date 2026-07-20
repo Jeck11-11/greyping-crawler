@@ -768,7 +768,12 @@ def _classify_email_security(result: DomainResult) -> list[PrioritizedFinding]:
     if es.error:
         return findings
 
-    if not es.spf.exists:
+    # Core email security is assessed at the organizational domain (or any host
+    # that sends/receives mail). Ordinary non-mail web subdomains don't get an
+    # independent SPF/DMARC/MTA-STS F — a parent DMARC policy covers them.
+    applicable = getattr(es, "applicable", True)
+
+    if applicable and not es.spf.exists:
         findings.append(PrioritizedFinding(
             id="email_no_spf",
             title="No SPF record configured",
@@ -799,7 +804,7 @@ def _classify_email_security(result: DomainResult) -> list[PrioritizedFinding]:
             source_field="passive_intel.email_security",
         ))
 
-    if not es.dmarc.exists:
+    if applicable and not es.dmarc.exists:
         findings.append(PrioritizedFinding(
             id="email_no_dmarc",
             title="No DMARC record configured",
@@ -810,7 +815,7 @@ def _classify_email_security(result: DomainResult) -> list[PrioritizedFinding]:
             owner=FindingOwner.customer,
             why_it_matters="Without DMARC, email spoofing of this domain is trivial and undetectable.",
             business_impact="Phishing, brand impersonation, BEC risk",
-            evidence=["No _dmarc TXT record found"],
+            evidence=["No _dmarc TXT record found (and no applicable parent policy)"],
             recommended_action="Add a DMARC record (e.g., v=DMARC1; p=quarantine; rua=mailto:dmarc@yourdomain.com).",
             source_field="passive_intel.email_security",
         ))
@@ -922,8 +927,8 @@ def _classify_email_security(result: DomainResult) -> list[PrioritizedFinding]:
                 source_field="passive_intel.email_security.spf.intel",
             ))
 
-    # MTA-STS
-    if not es.mta_sts.exists:
+    # MTA-STS — only meaningful for hosts that actually receive mail.
+    if applicable and getattr(es, "receives_mail", False) and not es.mta_sts.exists:
         findings.append(PrioritizedFinding(
             id="email_no_mta_sts",
             title="No MTA-STS policy configured",
@@ -2340,23 +2345,33 @@ def build_easm_report(
     try:
         platform, profile = _detect_primary_platform(result)
 
+        # Classify the asset first so website/privacy/cookie checks are only
+        # applied to actual websites — never to autodiscover/mail/API/CDN assets.
+        from .asset_classifier import classify_asset
+        asset = classify_asset(result)
+
         all_findings: list[PrioritizedFinding] = []
-        all_findings.extend(_classify_header_findings(result, platform, profile))
-        all_findings.extend(_classify_cookie_findings(result, platform, profile))
+        # Always-applicable evidence (transport, DNS, breach, network, brand).
         all_findings.extend(_classify_ssl_findings(result))
         all_findings.extend(_classify_secret_findings(result))
-        all_findings.extend(_classify_path_findings(result))
         all_findings.extend(_classify_ioc_findings(result))
         all_findings.extend(_classify_email_security(result))
         all_findings.extend(_classify_dns_findings(result))
         all_findings.extend(_classify_breach_findings(result))
-        all_findings.extend(_classify_robots_sitemap(result))
         all_findings.extend(_classify_js_intel(result))
         all_findings.extend(_classify_typosquatting_findings(result))
-        all_findings.extend(_classify_privacy_findings(result))
         all_findings.extend(_classify_cloud_findings(result))
         all_findings.extend(_classify_supply_chain_findings(result))
         all_findings.extend(_classify_port_findings(result))
+        # Website-only checks — gated by asset classification.
+        if asset.website_checks_applicable:
+            all_findings.extend(_classify_header_findings(result, platform, profile))
+            all_findings.extend(_classify_path_findings(result))
+            all_findings.extend(_classify_robots_sitemap(result))
+        if asset.cookie_checks_applicable:
+            all_findings.extend(_classify_cookie_findings(result, platform, profile))
+        if asset.privacy_checks_applicable:
+            all_findings.extend(_classify_privacy_findings(result))
 
         sorted_findings = _sort_findings(all_findings)
 
@@ -2411,6 +2426,7 @@ def build_easm_report(
             informational_count=info_ct,
             compliance_summary=framework_counts,
             platform_detected=platform,
+            asset_classification=asset,
         )
     except Exception as exc:
         logger.warning("EASM report generation failed for %s: %s", result.target, exc, exc_info=True)

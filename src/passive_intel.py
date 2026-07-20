@@ -82,6 +82,27 @@ async def _bounded_executor(fn, *args):
 # DNS
 # ---------------------------------------------------------------------------
 
+# Common two-level public suffixes so we don't treat "co.uk" as the org domain.
+_TWO_LEVEL_TLDS = frozenset({
+    "co.uk", "org.uk", "gov.uk", "ac.uk", "co.nz", "co.za", "com.au", "net.au",
+    "org.au", "co.jp", "com.br", "co.in", "co.kr", "com.mx", "com.sg",
+})
+
+
+def _organizational_domain(hostname: str) -> str:
+    """Best-effort registrable (organizational) domain from a hostname.
+
+    e.g. autodiscover.dnait.ie -> dnait.ie; foo.example.co.uk -> example.co.uk.
+    """
+    parts = (hostname or "").lower().strip(".").split(".")
+    if len(parts) <= 2:
+        return ".".join(parts)
+    last_two = ".".join(parts[-2:])
+    if last_two in _TWO_LEVEL_TLDS and len(parts) >= 3:
+        return ".".join(parts[-3:])
+    return last_two
+
+
 def _dns_resolve(domain: str, rdtype: str) -> list[Any]:
     """Blocking helper — resolves one record type via dnspython.
 
@@ -1225,6 +1246,44 @@ async def query_email_security(
 
         spf = _parse_spf(domain_txts)
         dmarc = _parse_dmarc(dmarc_txts)
+
+        # If this host has no own DMARC, DMARC is inherited from the
+        # organizational domain (sp= if present, else p=). A subdomain without
+        # its own _dmarc is NOT "vulnerable to spoofing" when a parent policy
+        # applies — that would grade every web subdomain F independently.
+        parent = _organizational_domain(domain)
+        is_org = parent == domain
+        if not dmarc.exists and parent and parent != domain:
+            try:
+                parent_dmarc_raw = await asyncio.wait_for(
+                    loop.run_in_executor(None, _dns_resolve, f"_dmarc.{parent}", "TXT"),
+                    timeout=timeout,
+                )
+                parent_txts = [
+                    b"".join(r.strings).decode("utf-8", errors="replace")
+                    for r in parent_dmarc_raw
+                ]
+                parent_dmarc = _parse_dmarc(parent_txts)
+                if parent_dmarc.exists:
+                    effective = parent_dmarc.subdomain_policy or parent_dmarc.policy
+                    dmarc = DMARCResult(
+                        raw=parent_dmarc.raw,
+                        exists=True,
+                        policy=effective,
+                        subdomain_policy=parent_dmarc.subdomain_policy,
+                        pct=parent_dmarc.pct,
+                        rua=parent_dmarc.rua,
+                        inherited_from_parent=True,
+                        parent_domain=parent,
+                        issues=[f"Inherited from organizational domain {parent} (sp/p={effective})."],
+                    )
+            except Exception:
+                pass
+
+        receives_mail = bool(mx_records)
+        # Core email-security applies to the org domain or any host that sends/
+        # receives mail; ordinary non-mail web subdomains are not_applicable.
+        applicable = is_org or receives_mail
         providers = _detect_mail_providers(mx_records or [])
         grade = _grade_email_security(spf, dmarc, dkim, mta_sts, bimi)
 
@@ -1237,6 +1296,10 @@ async def query_email_security(
             bimi=bimi,
             mail_providers=providers,
             grade=grade,
+            is_organizational_domain=is_org,
+            receives_mail=receives_mail,
+            applicable=applicable,
+            email_security_status="assessed" if applicable else "not_applicable",
         )
     except asyncio.TimeoutError:
         return EmailSecurityResult(
