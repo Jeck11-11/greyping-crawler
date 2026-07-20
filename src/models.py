@@ -2042,6 +2042,10 @@ class BoardReport(BaseModel):
     compliance_summary: dict[str, int] = Field(default_factory=dict)
     top_findings: list[BoardFinding] = Field(default_factory=list)
     subdomain_rows: list[SubdomainReportRow] = Field(default_factory=list)
+    asset_summary: dict[str, int] = Field(
+        default_factory=dict,
+        description="Asset counts by type/status (total_assets, websites, mail_services, unresolved, etc.).",
+    )
     total_confirmed_issues: int = 0
 
 

@@ -231,6 +231,23 @@ def _build_estate_summary(
     )
 
 
+def _build_asset_summary(results: list[DomainResult]) -> dict[str, int]:
+    """Count assets by classification type/status across the estate."""
+    summary: dict[str, int] = {"total_assets": len(results)}
+    active = 0
+    for r in results:
+        easm = r.easm_report
+        atype = "unknown"
+        if easm and easm.asset_classification:
+            atype = easm.asset_classification.asset_type or "unknown"
+        summary[atype] = summary.get(atype, 0) + 1
+        if atype not in ("unresolved", "inactive", "parked_domain"):
+            active += 1
+    summary["active"] = active
+    summary["unresolved"] = summary.get("unresolved", 0)
+    return summary
+
+
 def build_board_report(
     root_domain: str,
     results: list[DomainResult],
@@ -298,6 +315,7 @@ def build_board_report(
             compliance_summary=framework_counts,
             top_findings=board_findings,
             subdomain_rows=subdomain_rows,
+            asset_summary=_build_asset_summary(results),
             total_confirmed_issues=total_confirmed,
         )
     except Exception as exc:
