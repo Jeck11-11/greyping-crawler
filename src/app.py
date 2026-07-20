@@ -525,6 +525,23 @@ async def _scan_single_target(
             detected=waf_raw_result.get("detected", False),
             firewall=waf_raw_result.get("firewall"),
         )
+        # A vendor that is primarily a CDN (Cloudflare/Akamai/Fastly/etc.) being
+        # present proves proxying, not that a WAF ruleset is enabled. Record the
+        # CDN separately and leave WAF "not_assessed" unless the detector named a
+        # dedicated WAF product.
+        _fw = (waf_result.firewall or "").lower()
+        _cdn_vendors = {"cloudflare", "akamai", "fastly", "imperva", "incapsula",
+                        "cloudfront", "amazon", "azure front door", "google"}
+        if waf_result.detected and any(v in _fw for v in _cdn_vendors):
+            waf_result.cdn_detected = True
+            waf_result.cdn_provider = waf_result.firewall or ""
+            waf_result.reverse_proxy_detected = True
+            waf_result.waf_detected = None
+            waf_result.waf_detection_status = "not_assessed"
+        elif waf_result.detected and waf_result.firewall:
+            waf_result.waf_detected = True
+            waf_result.waf_provider = waf_result.firewall
+            waf_result.waf_detection_status = "detected"
         if waf_result.detected and waf_result.firewall:
             existing_names = {t.name.lower() for t in tech_findings}
             if waf_result.firewall.lower() not in existing_names:
@@ -739,7 +756,10 @@ async def _scan_single_target(
         emails_validated=len(email_validations),
         open_ports=len(port_scan_result.open_ports) if port_scan_result else 0,
         risky_ports=sum(1 for p in (port_scan_result.open_ports if port_scan_result else []) if p.is_risky),
-        cloud_buckets_found=len(cloud_assets_result.findings) if cloud_assets_result else 0,
+        cloud_buckets_found=(
+            cloud_assets_result.publicly_exposed_buckets
+            + cloud_assets_result.confirmed_owned_buckets
+        ) if cloud_assets_result else 0,
         cloud_services_found=len(cloud_assets_result.cloud_services) if cloud_assets_result else 0,
         exposed_databases_found=sum(
             1 for s in (cloud_assets_result.cloud_services if cloud_assets_result else []) if s.is_database

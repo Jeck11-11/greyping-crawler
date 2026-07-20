@@ -224,7 +224,7 @@ class TestDiscoverCloudAssetsS3:
         assert len(public_findings) >= 1
         s3_public = [f for f in public_findings if f.provider == "aws_s3"]
         assert len(s3_public) >= 1
-        assert s3_public[0].severity == "critical"
+        assert s3_public[0].severity == "high"
         assert "ListBucketResult" in s3_public[0].evidence
 
     @pytest.mark.asyncio
@@ -254,7 +254,7 @@ class TestDiscoverCloudAssetsS3:
         assert len(private_findings) >= 1
         s3_private = [f for f in private_findings if f.provider == "aws_s3"]
         assert len(s3_private) >= 1
-        assert s3_private[0].severity == "info"
+        assert s3_private[0].severity == "informational"
         assert "AccessDenied" in s3_private[0].evidence
 
     @pytest.mark.asyncio
@@ -305,7 +305,7 @@ class TestDiscoverCloudAssetsAzure:
 
         azure_public = [f for f in result.findings if f.provider == "azure_blob" and f.status == "public"]
         assert len(azure_public) >= 1
-        assert azure_public[0].severity == "critical"
+        assert azure_public[0].severity == "high"
         assert "EnumerationResults" in azure_public[0].evidence
 
     @pytest.mark.asyncio
@@ -333,7 +333,7 @@ class TestDiscoverCloudAssetsAzure:
 
         azure_private = [f for f in result.findings if f.provider == "azure_blob" and f.status == "exists_private"]
         assert len(azure_private) >= 1
-        assert azure_private[0].severity == "info"
+        assert azure_private[0].severity == "informational"
 
     @pytest.mark.asyncio
     async def test_azure_blob_not_found(self):
@@ -383,7 +383,7 @@ class TestDiscoverCloudAssetsGCS:
 
         gcs_public = [f for f in result.findings if f.provider == "gcs" and f.status == "public"]
         assert len(gcs_public) >= 1
-        assert gcs_public[0].severity == "critical"
+        assert gcs_public[0].severity == "high"
 
     @pytest.mark.asyncio
     async def test_gcs_bucket_private(self):
@@ -410,7 +410,7 @@ class TestDiscoverCloudAssetsGCS:
 
         gcs_private = [f for f in result.findings if f.provider == "gcs" and f.status == "exists_private"]
         assert len(gcs_private) >= 1
-        assert gcs_private[0].severity == "info"
+        assert gcs_private[0].severity == "informational"
 
     @pytest.mark.asyncio
     async def test_gcs_bucket_not_found(self):

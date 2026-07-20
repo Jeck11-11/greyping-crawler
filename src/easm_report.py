@@ -1577,28 +1577,34 @@ def _classify_typosquatting_findings(result: DomainResult) -> list[PrioritizedFi
     if not result.typosquatting or not result.typosquatting.registered_candidates:
         return findings
     for cand in result.typosquatting.registered_candidates[:10]:
-        if cand.similarity_score >= 0.9:
-            sev = "high"
-        elif cand.similarity_score >= 0.8:
-            sev = "medium"
-        else:
-            sev = "low"
+        # Registration alone is brand intelligence, not confirmed malicious use.
+        # Default to an informational risk_candidate that does not move the grade;
+        # escalation requires evidence of impersonation/abuse (not available here).
         findings.append(PrioritizedFinding(
             id="typosquat_domains_found",
-            title=f"Typosquat domain registered: {cand.domain}",
+            title=f"Registered lookalike domain: {cand.domain}",
             category="brand_protection",
-            severity=sev,
-            classification=FindingClassification.confirmed_issue,
+            severity="informational",
+            classification=FindingClassification.risk_candidate,
             confidence="high",
+            evidence_quality="direct",   # registration is direct evidence…
+            affects_risk_score=False,     # …but malicious use is unverified
             owner=FindingOwner.customer,
-            why_it_matters="Lookalike domains can be used for phishing, credential theft, or brand impersonation.",
-            business_impact="Phishing and brand reputation risk",
+            why_it_matters=(
+                "Registered lookalike domain identified. Ownership and malicious "
+                "use have not been confirmed."
+            ),
+            business_impact="Potential phishing/brand-impersonation surface (unconfirmed).",
             evidence=[
                 f"Domain: {cand.domain}",
                 f"Technique: {cand.technique}",
                 f"Resolves to: {', '.join(cand.a_records[:3])}",
+                "registered=true; ownership_verified=false; malicious_activity_confirmed=false",
             ],
-            recommended_action="Register this domain defensively or request takedown via the registrar.",
+            recommended_action=(
+                "Monitor. Investigate ownership and content before any takedown; "
+                "register defensively only if brand risk is confirmed."
+            ),
             source_field="typosquatting",
         ))
     return findings
@@ -1614,34 +1620,55 @@ def _classify_privacy_findings(result: DomainResult) -> list[PrioritizedFinding]
     pp = indicator_map.get("privacy_policy")
     if pp and not pp.present:
         findings.append(PrioritizedFinding(
-            id="missing_privacy_policy",
-            title="No privacy policy detected",
-            category="privacy_compliance",
-            severity="medium",
-            classification=FindingClassification.confirmed_issue,
-            confidence="medium",
+            id="privacy_policy_not_detected",
+            title="No privacy policy detected at common paths",
+            category="privacy_indicators",
+            severity="low",
+            classification=FindingClassification.potential_issue,
+            confidence="low",
+            evidence_quality="weak_inference",
+            affects_risk_score=False,
             owner=FindingOwner.customer,
-            why_it_matters="Privacy policies are required under GDPR, CCPA, and most privacy regulations.",
-            business_impact="Regulatory non-compliance risk",
-            evidence=["No /privacy or /privacy-policy page returned HTTP 200"],
-            recommended_action="Publish a privacy policy page and link to it from the website footer.",
+            why_it_matters=(
+                "No privacy policy was found at common paths. It may exist "
+                "elsewhere; manual validation is recommended. This is not a "
+                "confirmed regulatory violation."
+            ),
+            business_impact="Possible privacy-transparency gap (unconfirmed).",
+            evidence=["No /privacy or /privacy-policy page returned HTTP 200; footer link not detected"],
+            recommended_action="Confirm a privacy policy is published and linked from the footer.",
             source_field="privacy",
         ))
 
     cc = indicator_map.get("cookie_consent_tool")
     if cc and not cc.present:
+        # Absence of a recognised consent platform is NOT a confirmed regulatory
+        # violation. An external scan can't prove non-essential tracking fires
+        # before consent, so this stays a potential issue needing validation.
         findings.append(PrioritizedFinding(
-            id="missing_cookie_consent",
-            title="No cookie consent tool detected",
-            category="privacy_compliance",
-            severity="medium",
-            classification=FindingClassification.confirmed_issue,
-            confidence="medium",
+            id="consent_platform_not_detected",
+            title="No recognised consent-management platform observed",
+            category="privacy_indicators",
+            severity="informational",
+            classification=FindingClassification.potential_issue,
+            confidence="low",
+            evidence_quality="weak_inference",
+            affects_risk_score=False,
             owner=FindingOwner.customer,
-            why_it_matters="Cookie consent banners are required under GDPR and ePrivacy Directive for EU visitors.",
-            business_impact="Regulatory non-compliance risk for EU-facing sites",
-            evidence=["No consent management platform (OneTrust, Cookiebot, etc.) detected"],
-            recommended_action="Implement a cookie consent tool such as OneTrust, Cookiebot, or Osano.",
+            why_it_matters=(
+                "No recognised consent-management platform was observed. Manual "
+                "validation is required to determine whether consent is necessary "
+                "and correctly implemented."
+            ),
+            business_impact="Possible ePrivacy/GDPR consent gap (unconfirmed).",
+            evidence=[
+                "No consent platform (OneTrust, Cookiebot, Osano, etc.) fingerprinted",
+                "nonessential_tracking_before_consent=not_assessed; manual_validation_required=true",
+            ],
+            recommended_action=(
+                "Manually verify whether non-essential cookies/trackers run before "
+                "consent; implement a consent platform if required."
+            ),
             source_field="privacy",
         ))
 
@@ -1662,21 +1689,10 @@ def _classify_privacy_findings(result: DomainResult) -> list[PrioritizedFinding]
             source_field="privacy",
         ))
 
-    if result.privacy.score < 40:
-        findings.append(PrioritizedFinding(
-            id="privacy_compliance_low",
-            title=f"Low privacy compliance score ({result.privacy.score}/100)",
-            category="privacy_compliance",
-            severity="medium",
-            classification=FindingClassification.confirmed_issue,
-            confidence="medium",
-            owner=FindingOwner.customer,
-            why_it_matters="Low privacy compliance increases regulatory and reputational risk.",
-            business_impact="Regulatory fines and customer trust erosion",
-            evidence=[f"Privacy score: {result.privacy.score}/100, grade: {result.privacy.grade}"],
-            recommended_action="Address missing privacy indicators: privacy policy, cookie consent, GDPR/CCPA compliance pages.",
-            source_field="privacy",
-        ))
+    # NOTE: the old "privacy_compliance_low" finding was circular — it restated
+    # the score as a confirmed regulatory issue. An external scan can't prove
+    # compliance, so it has been removed. The privacy indicators score is
+    # reported as an observation, not a confirmed violation.
 
     return findings
 
@@ -1821,6 +1837,35 @@ def _classify_port_findings(result: DomainResult) -> list[PrioritizedFinding]:
         return findings
 
     for port in result.port_scan.open_ports:
+        # Ports answering on shared CDN/edge infrastructure are not the
+        # customer's origin. Emit an informational observation only — never a
+        # confirmed data-breach finding or a firewall recommendation.
+        if port.network_attribution == "shared_cdn_edge" or not port.affects_risk_score:
+            findings.append(PrioritizedFinding(
+                id=f"port_shared_edge_{port.port}",
+                title=f"Port {port.port} observed on shared CDN edge ({port.service or 'unknown'})",
+                category="network",
+                severity="informational",
+                classification=FindingClassification.attack_surface_observation,
+                confidence="low",
+                evidence_quality="weak_inference",
+                affects_risk_score=False,
+                owner=FindingOwner.not_actionable,
+                why_it_matters=(
+                    "This port answers on shared CDN/edge infrastructure, not the "
+                    "customer origin. The service name is a port-number guess, not "
+                    "confirmed identification."
+                ),
+                business_impact="No confirmed customer-origin exposure.",
+                evidence=[
+                    f"IP attributed to {result.port_scan.cdn_provider or 'shared CDN'}",
+                    f"service_guess={port.service or 'unknown'}; service_confirmed=false; banner={port.banner or 'null'}",
+                    "origin_exposure_confirmed=false; affects_risk_score=false",
+                ],
+                recommended_action="No action — this is not customer-origin exposure. Do not change firewall rules based on this.",
+                source_field="port_scan",
+            ))
+            continue
         if port.port in _RISKY_PORTS:
             service_name, severity = _RISKY_PORTS[port.port]
             findings.append(PrioritizedFinding(

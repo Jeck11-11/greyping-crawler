@@ -287,14 +287,35 @@ async def discover_cloud_assets(
                     for marker in provider_cfg[markers_key]:
                         if marker in body:
                             evidence.append(marker)
-                findings.append(CloudAssetFinding(
-                    bucket_name=bucket,
-                    provider=provider_name,
-                    url=url,
-                    status=status,
-                    evidence=evidence,
-                    severity="critical" if status == "public" else "info",
-                ))
+                if status == "public":
+                    # A public listing is directly observable exposure.
+                    findings.append(CloudAssetFinding(
+                        bucket_name=bucket, provider=provider_name, url=url,
+                        status="public",
+                        classification="publicly_exposed_bucket",
+                        ownership_verified=False,   # name match only; still unproven owner
+                        public_exposure_confirmed=True,
+                        affects_risk_score=True,
+                        evidence=evidence + ["public_listing_observed=true"],
+                        severity="high",
+                    ))
+                else:
+                    # AccessDenied / AllAccessDisabled etc. prove neither ownership
+                    # nor a security exposure — a guessed name existing somewhere is
+                    # an unverified candidate, not a customer bucket.
+                    findings.append(CloudAssetFinding(
+                        bucket_name=bucket, provider=provider_name, url=url,
+                        status="exists_private",
+                        classification="unverified_asset_candidate",
+                        ownership_verified=False,
+                        public_exposure_confirmed=False,
+                        affects_risk_score=False,
+                        evidence=evidence + [
+                            "name_match_only; ownership_verified=false; "
+                            "public_exposure_confirmed=false",
+                        ],
+                        severity="informational",
+                    ))
 
     try:
         async with httpx.AsyncClient(
@@ -319,10 +340,17 @@ async def discover_cloud_assets(
         )
 
     elapsed = round(time.monotonic() - t0, 2)
+    potential = sum(1 for f in findings if f.classification == "unverified_asset_candidate")
+    exposed = sum(1 for f in findings if f.classification == "publicly_exposed_bucket")
+    owned = sum(1 for f in findings if f.classification == "confirmed_owned_bucket")
     return CloudAssetResult(
         domain=domain,
         findings=findings,
         buckets_checked=buckets_checked,
+        bucket_candidates_checked=buckets_checked,
+        potential_bucket_name_matches=potential + exposed,
+        confirmed_owned_buckets=owned,
+        publicly_exposed_buckets=exposed,
         scan_duration_seconds=elapsed,
     )
 

@@ -911,8 +911,13 @@ class FAIRSignals(BaseModel):
 
 class FindingClassification(str, Enum):
     confirmed_issue = "confirmed_issue"
+    potential_issue = "potential_issue"
+    risk_candidate = "risk_candidate"
+    attack_surface_observation = "attack_surface_observation"
+    hardening_recommendation = "hardening_recommendation"
     platform_behavior = "platform_behavior"
     informational = "informational"
+    not_actionable = "not_actionable"
     false_positive_likely = "false_positive_likely"
 
 
@@ -954,6 +959,14 @@ class PrioritizedFinding(BaseModel):
     severity: str = Field(default="medium", description="critical / high / medium / low / info.")
     classification: FindingClassification
     confidence: str = Field(default="medium", description="high / medium / low.")
+    evidence_quality: str = Field(
+        default="strong_inference",
+        description="direct / strong_inference / weak_inference / unverified.",
+    )
+    affects_risk_score: bool = Field(
+        default=True,
+        description="Whether this finding contributes to the overall grade/score.",
+    )
     owner: FindingOwner
     platform_name: str = Field(default="", description="If owner=platform, which platform.")
     why_it_matters: str = Field(default="", description="One sentence explaining business impact.")
@@ -1360,10 +1373,19 @@ class PrivacyIndicator(BaseModel):
 
 class PrivacyComplianceResult(BaseModel):
     domain: str
-    score: int = 0
+    score: int = Field(default=0, description="Privacy INDICATORS score (0-100). Not a compliance determination.")
     grade: str = ""
     indicators: list[PrivacyIndicator] = Field(default_factory=list)
     consent_tool: str = ""
+    consent_platform: str = Field(default="not_detected", description="detected / not_detected.")
+    nonessential_tracking_before_consent: str = Field(
+        default="not_assessed",
+        description="not_assessed / observed / none_observed. External scan cannot prove this.",
+    )
+    manual_validation_required: bool = Field(
+        default=True,
+        description="An external scan cannot determine GDPR/CCPA compliance.",
+    )
     error: str | None = None
 
 
@@ -1392,19 +1414,38 @@ class EmailValidationResult(BaseModel):
 
 
 class WAFResult(BaseModel):
-    """WAF / firewall detection result from C99 API."""
+    """WAF / firewall detection result from C99 API.
+
+    CDN proxying (Cloudflare/Akamai/Fastly in front of a site) does NOT prove a
+    WAF ruleset is enabled — these are tracked separately so the report never
+    says both "WAF not detected" and "WAF/CDN: Cloudflare".
+    """
     url: str = ""
     detected: bool = False
     firewall: str | None = None
     confidence: str = "high"
+    cdn_detected: bool = False
+    cdn_provider: str = ""
+    reverse_proxy_detected: bool = False
+    waf_detected: bool | None = Field(default=None, description="null = not assessed.")
+    waf_provider: str = ""
+    waf_detection_status: str = Field(default="not_assessed", description="detected / not_detected / not_assessed.")
     error: str | None = None
 
 
 class OpenPort(BaseModel):
     port: int
-    service: str = ""
+    service: str = Field(default="", description="Best-effort service name (a guess unless confirmed).")
+    service_confirmed: bool = Field(default=False, description="True only when a banner/protocol confirmed it.")
     banner: str = ""
     is_risky: bool = False
+    network_attribution: str = Field(
+        default="origin",
+        description="origin / shared_cdn_edge. Shared-edge ports aren't the customer's origin.",
+    )
+    origin_exposure_confirmed: bool = Field(default=False, description="Port confirmed on the customer's origin.")
+    affects_risk_score: bool = Field(default=True, description="Shared-CDN ports do not affect the score.")
+    confidence: str = Field(default="medium", description="high / medium / low.")
     fingerprint: str = Field(default="", description="Stable hash for cross-scan deduplication.")
 
     @model_validator(mode="after")
@@ -1417,6 +1458,8 @@ class OpenPort(BaseModel):
 class PortScanResult(BaseModel):
     target: str
     ip: str = ""
+    network_attribution: str = Field(default="origin", description="origin / shared_cdn_edge.")
+    cdn_provider: str = ""
     open_ports: list[OpenPort] = Field(default_factory=list)
     ports_scanned: int = 0
     scan_duration_seconds: float = 0
@@ -1437,8 +1480,15 @@ class CloudAssetFinding(BaseModel):
     provider: str = ""
     url: str = ""
     status: str = ""  # "public", "exists_private"
+    classification: str = Field(
+        default="unverified_asset_candidate",
+        description="unverified_asset_candidate / publicly_exposed_bucket / confirmed_owned_bucket.",
+    )
+    ownership_verified: bool = False
+    public_exposure_confirmed: bool = False
+    affects_risk_score: bool = False
     evidence: list[str] = Field(default_factory=list)
-    severity: str = "critical"
+    severity: str = "informational"
     fingerprint: str = Field(default="", description="Stable hash for cross-scan deduplication.")
 
     @model_validator(mode="after")
@@ -1470,6 +1520,10 @@ class CloudAssetResult(BaseModel):
     findings: list[CloudAssetFinding] = Field(default_factory=list)
     cloud_services: list[CloudServiceFinding] = Field(default_factory=list)
     buckets_checked: int = 0
+    bucket_candidates_checked: int = Field(default=0, description="Total name×provider probes performed.")
+    potential_bucket_name_matches: int = Field(default=0, description="Names that returned a recognisable response.")
+    confirmed_owned_buckets: int = Field(default=0, description="Buckets proven to belong to the customer.")
+    publicly_exposed_buckets: int = Field(default=0, description="Buckets confirmed publicly readable.")
     scan_duration_seconds: float = 0
     error: str | None = None
 
@@ -1545,7 +1599,7 @@ class DomainSummary(BaseModel):
     screenshot_failures: int = Field(default=0, description="Screenshot attempts that produced no image.")
     typosquat_candidates: int = Field(default=0, description="Registered lookalike domains found.")
     waf_detected: str = Field(default="", description="WAF/firewall product detected by C99 (empty if none).")
-    privacy_score: int = Field(default=0, description="Privacy compliance score (0-100).")
+    privacy_score: int = Field(default=0, description="Privacy indicators score (0-100). Not a compliance determination.")
     consent_tool: str = Field(default="", description="Detected cookie consent management tool.")
     overall_grade: str = Field(default="", description="Aggregate domain risk grade A+ to F.")
     ransomware_susceptibility: int = Field(default=0, description="Ransomware Susceptibility Index 0-100.")

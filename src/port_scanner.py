@@ -8,6 +8,7 @@ ports, captures service banners when available, and flags risky services
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import socket
 import time
@@ -16,6 +17,43 @@ from .config import PORT_SCAN_CONCURRENCY, PORT_SCAN_TIMEOUT
 from .models import OpenPort, PortScanResult
 
 logger = logging.getLogger(__name__)
+
+# Published edge ranges for major shared CDN/edge providers. A port answering
+# on one of these IPs belongs to the CDN, not the customer's origin — so a
+# port-number→service guess (e.g. 2082→cPanel) there is meaningless.
+_SHARED_CDN_RANGES: dict[str, tuple[str, ...]] = {
+    "Cloudflare": (
+        "173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22",
+        "141.101.64.0/18", "108.162.192.0/18", "190.93.240.0/20", "188.114.96.0/20",
+        "197.234.240.0/22", "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13",
+        "104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22",
+    ),
+    "Fastly": ("151.101.0.0/16", "199.232.0.0/16"),
+    "Akamai": ("23.32.0.0/11", "23.192.0.0/11", "104.64.0.0/10", "184.24.0.0/13"),
+    "Amazon CloudFront": (
+        "13.32.0.0/15", "13.224.0.0/14", "52.84.0.0/15", "54.182.0.0/16",
+        "54.192.0.0/16", "204.246.164.0/22", "205.251.192.0/19",
+    ),
+    "Imperva": ("199.83.128.0/21", "198.143.32.0/19", "45.64.64.0/22"),
+}
+
+_SHARED_CDN_NETWORKS: list[tuple[str, "ipaddress.IPv4Network"]] = [
+    (provider, ipaddress.ip_network(cidr))
+    for provider, cidrs in _SHARED_CDN_RANGES.items()
+    for cidr in cidrs
+]
+
+
+def classify_network_attribution(ip: str) -> tuple[str, str]:
+    """Return (attribution, provider): ('shared_cdn_edge', name) or ('origin', '')."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return "origin", ""
+    for provider, net in _SHARED_CDN_NETWORKS:
+        if addr in net:
+            return "shared_cdn_edge", provider
+    return "origin", ""
 
 # Top 250 most commonly targeted TCP ports and their service names.
 _TOP_PORTS: dict[int, str] = {
@@ -204,9 +242,26 @@ async def scan_ports(
     open_ports = [r for r in results if r is not None]
     open_ports.sort(key=lambda p: p.port)
 
+    # Attribute the resolved IP. Ports answering on shared CDN/edge infrastructure
+    # are NOT the customer's origin — a port-number→service map there is a guess,
+    # not identification, and must not drive the risk score or firewall advice.
+    attribution, cdn_provider = classify_network_attribution(ip)
+    is_shared = attribution == "shared_cdn_edge"
+    for p in open_ports:
+        p.service_confirmed = bool(p.banner) and not is_shared
+        if is_shared:
+            p.network_attribution = "shared_cdn_edge"
+            p.origin_exposure_confirmed = False
+            p.affects_risk_score = False
+            p.confidence = "low"
+        else:
+            p.confidence = "high" if p.service_confirmed else "medium"
+
     return PortScanResult(
         target=host,
         ip=ip,
+        network_attribution=attribution,
+        cdn_provider=cdn_provider,
         open_ports=open_ports,
         ports_scanned=len(ports),
         scan_duration_seconds=round(duration, 3),
