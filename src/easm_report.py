@@ -186,9 +186,8 @@ _COMPLIANCE_MAP: dict[str, list[str]] = {
         "ISO 27001 A.14.1.2",
     ],
     # -- Typosquatting / brand protection -----------------------------------
-    "typosquat_domains_found": [
-        "ISO 27001 A.7.2.2",
-    ],
+    # (No control mapping — a registered lookalike is brand intelligence, not an
+    # awareness-training failure. Mapping removed.)
     # -- Privacy compliance -------------------------------------------------
     "missing_privacy_policy": [
         "GDPR Art.13",
@@ -714,26 +713,64 @@ def _classify_secret_findings(result: DomainResult) -> list[PrioritizedFinding]:
     return findings
 
 
+# Login/admin pages that are EXPECTED to be reachable on their platform — a
+# reachable page here is attack surface, not a confirmed vulnerability.
+_EXPECTED_LOGIN_PATHS = {
+    "/wp-login.php", "/wp-admin/", "/wp-admin", "/administrator/",
+    "/administrator", "/user/login", "/admin/login", "/login",
+}
+
+
 def _classify_path_findings(result: DomainResult) -> list[PrioritizedFinding]:
     findings: list[PrioritizedFinding] = []
     for p in result.sensitive_paths:
         if p.severity == "info":
             continue
-        if p.status_code == 200:
+        if p.status_code != 200:
+            continue
+        path_norm = p.path.rstrip("/").lower() or "/"
+        if p.path.lower() in _EXPECTED_LOGIN_PATHS or path_norm in {x.rstrip("/") for x in _EXPECTED_LOGIN_PATHS}:
+            # A reachable login page (e.g. /wp-login.php) is expected on many
+            # sites. Report it as an attack-surface observation, not a confirmed
+            # vulnerability, and do not let it inflate ransomware risk.
             findings.append(PrioritizedFinding(
-                id=f"path_{p.path.strip('/').replace('/', '_').replace('.', '_')}",
-                title=f"Exposed sensitive path: {p.path}",
-                category="sensitive_paths",
-                severity=p.severity,
-                classification=FindingClassification.confirmed_issue,
+                id=f"login_reachable_{path_norm.strip('/').replace('/', '_').replace('.', '_') or 'root'}",
+                title=f"Login page reachable: {p.path}",
+                category="attack_surface",
+                severity="informational",
+                classification=FindingClassification.attack_surface_observation,
                 confidence="high",
+                evidence_quality="direct",
+                affects_risk_score=False,
                 owner=FindingOwner.customer,
-                why_it_matters=p.risk or "Sensitive file or directory is publicly accessible.",
-                business_impact="Data exposure, credential leakage",
-                evidence=[f"{p.url} → {p.status_code} ({p.content_length} bytes)"],
-                recommended_action="Remove or restrict access to this path immediately.",
+                why_it_matters=(
+                    "A reachable login/admin page is expected on many platforms. "
+                    "It is attack surface, not a confirmed vulnerability."
+                ),
+                business_impact="Attack surface (no confirmed vulnerability).",
+                evidence=[f"{p.url} → {p.status_code}", "confirmed_vulnerability=false"],
+                recommended_action=(
+                    "Ensure rate-limiting/MFA are in place; restrict by IP if the "
+                    "panel is not for public use. No action if intentionally public."
+                ),
                 source_field="sensitive_paths",
             ))
+            continue
+        findings.append(PrioritizedFinding(
+            id=f"path_{p.path.strip('/').replace('/', '_').replace('.', '_')}",
+            title=f"Exposed sensitive path: {p.path}",
+            category="sensitive_paths",
+            severity=p.severity,
+            classification=FindingClassification.confirmed_issue,
+            confidence="high",
+            evidence_quality="direct",
+            owner=FindingOwner.customer,
+            why_it_matters=p.risk or "Sensitive file or directory is publicly accessible.",
+            business_impact="Data exposure, credential leakage",
+            evidence=[f"{p.url} → {p.status_code} ({p.content_length} bytes)"],
+            recommended_action="Remove or restrict access to this path immediately.",
+            source_field="sensitive_paths",
+        ))
     return findings
 
 
@@ -1927,7 +1964,14 @@ def _compute_overall_grade(result: DomainResult, findings: list[PrioritizedFindi
         result.security.headers.grade if result.security and result.security.headers else ""
     )
 
-    confirmed = [f for f in findings if f.classification == FindingClassification.confirmed_issue]
+    # Only confirmed issues that actually affect the risk score contribute a
+    # penalty. Unverified candidates, shared-CDN observations, attack-surface
+    # observations and informational findings are excluded by construction.
+    confirmed = [
+        f for f in findings
+        if f.classification == FindingClassification.confirmed_issue
+        and f.affects_risk_score
+    ]
     crit_count = sum(1 for f in confirmed if f.severity == "critical")
     high_count = sum(1 for f in confirmed if f.severity == "high")
     finding_penalty = min(30, crit_count * 15 + high_count * 5)
@@ -2064,16 +2108,21 @@ def _compute_ransomware_index(result: DomainResult) -> RansomwareIndex:
         score += min(10, len(result.breaches) * 3)
         factors.append(f"{len(result.breaches)} previous breach(es) on record")
 
-    # Exposed admin panels / sensitive paths
+    # Genuinely sensitive exposed paths only. A reachable login/admin PAGE is
+    # expected attack surface, not a breach vector, so it must not inflate
+    # ransomware susceptibility. Only data-exposure paths (phpmyadmin exposed
+    # DB UI, cpanel) count here.
     if result.security and result.security.sensitive_paths:
         admin_paths = [p for p in result.security.sensitive_paths
-                       if p.status_code == 200 and any(
+                       if p.status_code == 200
+                       and (p.path or "").lower() not in _EXPECTED_LOGIN_PATHS
+                       and any(
                            kw in (p.path or "").lower()
-                           for kw in ("admin", "login", "wp-admin", "phpmyadmin", "cpanel")
+                           for kw in ("phpmyadmin", "cpanel", "adminer")
                        )]
         if admin_paths:
             score += 10
-            factors.append(f"{len(admin_paths)} exposed admin panel(s)")
+            factors.append(f"{len(admin_paths)} exposed admin/data panel(s)")
 
     # Nuclei findings
     if vuln and vuln.nuclei and vuln.nuclei.findings:
@@ -2164,7 +2213,26 @@ def _infer_company_size(result: DomainResult) -> str:
 
 
 def _compute_financial_impact(result: DomainResult) -> FinancialImpact:
-    """Estimate financial exposure using FAIR risk + IBM CODB 2024 benchmarks."""
+    """Estimate financial exposure using FAIR risk + IBM CODB 2024 benchmarks.
+
+    Only produced when a customer-supplied business size (or validated financial
+    inputs) exists. With auto-inferred size alone the estimate is suppressed as
+    'insufficient_data' — an inferred employee count must not drive a dollar
+    range shown to the customer.
+    """
+    explicit_size = result.metadata.get("company_size")
+    validated = bool(result.metadata.get("financial_inputs_validated"))
+    if not (validated or (explicit_size and explicit_size in _SIZE_MULTIPLIER)):
+        return FinancialImpact(
+            financial_impact_status="insufficient_data",
+            factors=[
+                "No customer-supplied financial inputs (revenue, employee count, "
+                "asset criticality, record count, downtime/recovery cost).",
+                "Estimate suppressed — auto-inferred business size is not used for "
+                "customer-facing loss figures.",
+            ],
+        )
+
     fair = result.fair_signals
     overall_risk = fair.overall_risk if fair else 0
     lef = fair.loss_event_frequency if fair else 0
@@ -2239,6 +2307,7 @@ def _compute_financial_impact(result: DomainResult) -> FinancialImpact:
     factors.append("Benchmarks: IBM Cost of a Data Breach 2024, scaled to organisation size")
 
     return FinancialImpact(
+        financial_impact_status="estimated",
         estimated_annual_loss_low=annual_low,
         estimated_annual_loss_high=annual_high,
         single_incident_cost_low=incident_low,
@@ -2282,13 +2351,36 @@ _GDPR_CONTROLS: list[tuple[str, str]] = [
 ]
 
 
+# Controls that require ORGANISATIONAL evidence (procedures, training, incident
+# response, internal access, supplier policy). An external scan cannot pass or
+# fail these — they are always not_assessed.
+_ORGANISATIONAL_CONTROLS: frozenset[str] = frozenset({
+    "PCI-DSS 3.4",      # cardholder-data storage
+    "PCI-DSS 6.5.8",    # improper access control (internal)
+    "PCI-DSS 12.10",    # incident response plan
+    "ISO 27001 A.7.2.2",   # awareness & training
+    "ISO 27001 A.9.4.1",   # access restriction (internal)
+    "ISO 27001 A.12.2.1",  # malware controls
+    "ISO 27001 A.15.1.1",  # supplier-security policy
+    "GDPR Art.33",      # breach notification to authority
+    "GDPR Art.34",      # breach communication to subjects
+})
+
+
 def _compute_compliance_posture(
     findings: list[PrioritizedFinding],
 ) -> list[CompliancePosture]:
-    """Build per-framework compliance readiness from tagged findings."""
+    """Build per-framework EXTERNAL technical observations from tagged findings.
+
+    Only externally-observable controls may be pass/fail. Organisational controls
+    are always not_assessed — an external scan cannot verify procedures, training,
+    incident response, or internal access. Absence of a finding is not a pass.
+    """
     failing_tags: set[str] = set()
     tag_to_findings: dict[str, list[str]] = {}
     for f in findings:
+        # Only confirmed issues fail a control; risk_candidates / observations /
+        # potential issues never fail compliance controls.
         if f.classification != FindingClassification.confirmed_issue:
             continue
         for tag in f.compliance:
@@ -2299,14 +2391,23 @@ def _compute_compliance_posture(
 
     for framework_name, controls_list in [
         ("PCI-DSS 4.0", _PCI_DSS_CONTROLS),
-        ("ISO 27001", _ISO27001_CONTROLS),
+        ("ISO 27001:2022", _ISO27001_CONTROLS),
         ("GDPR", _GDPR_CONTROLS),
     ]:
         controls: list[ComplianceControl] = []
         passing = 0
         failing = 0
+        not_assessed = 0
         for control_id, control_name in controls_list:
-            if control_id in failing_tags:
+            if control_id in _ORGANISATIONAL_CONTROLS:
+                controls.append(ComplianceControl(
+                    control_id=control_id,
+                    control_name=control_name,
+                    status="not_assessed",
+                    findings=["Requires organisational evidence"],
+                ))
+                not_assessed += 1
+            elif control_id in failing_tags:
                 controls.append(ComplianceControl(
                     control_id=control_id,
                     control_name=control_name,
@@ -2322,15 +2423,16 @@ def _compute_compliance_posture(
                 ))
                 passing += 1
 
-        total = len(controls_list)
-        readiness = int(round(passing / total * 100)) if total else 0
+        # Readiness reflects only the externally-observable controls.
+        observable = passing + failing
+        readiness = int(round(passing / observable * 100)) if observable else 0
 
         postures.append(CompliancePosture(
             framework=framework_name,
-            controls_tested=total,
+            controls_tested=observable,
             controls_passing=passing,
             controls_failing=failing,
-            controls_not_tested=0,
+            controls_not_tested=not_assessed,
             readiness_score=readiness,
             controls=controls,
         ))
@@ -2408,6 +2510,25 @@ def build_easm_report(
         plat_beh = sum(1 for f in sorted_findings if f.classification == FindingClassification.platform_behavior)
         info_ct = sum(1 for f in sorted_findings if f.classification == FindingClassification.informational)
 
+        # Scoring traceability — which findings moved the grade vs which were
+        # excluded, so risk tier, grade and narrative stay consistent.
+        score_inputs = [
+            f"{f.id} ({f.severity}, {f.classification.value})"
+            for f in sorted_findings
+            if f.classification == FindingClassification.confirmed_issue and f.affects_risk_score
+        ]
+        excluded_inputs = [
+            f"{f.id}: excluded ({f.classification.value}, evidence={f.evidence_quality})"
+            for f in sorted_findings
+            if not (f.classification == FindingClassification.confirmed_issue and f.affects_risk_score)
+        ]
+        _tier_map = [(25, "critical"), (50, "high"), (70, "moderate"), (100, "low")]
+        _g = _grade_to_score(overall_grade)
+        risk_tier = next((t for thr, t in _tier_map if _g <= thr), "low")
+        scan_confidence = executive.grades.get("confidence", "") or (
+            "medium" if scan_mode == "full" else "low"
+        )
+
         return EASMReport(
             generated_at=datetime.now(timezone.utc).isoformat(),
             scan_mode=scan_mode,
@@ -2424,6 +2545,10 @@ def build_easm_report(
             confirmed_issues=confirmed,
             platform_behaviors=plat_beh,
             informational_count=info_ct,
+            risk_tier=risk_tier,
+            scan_confidence=scan_confidence,
+            score_inputs=score_inputs,
+            excluded_inputs=excluded_inputs,
             compliance_summary=framework_counts,
             platform_detected=platform,
             asset_classification=asset,

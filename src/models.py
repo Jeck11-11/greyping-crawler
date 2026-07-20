@@ -1162,7 +1162,17 @@ class RansomwareIndex(BaseModel):
 
 
 class FinancialImpact(BaseModel):
-    """Estimated financial exposure based on FAIR risk quantification."""
+    """Estimated financial exposure based on FAIR risk quantification.
+
+    Estimates are only produced from customer-supplied / validated inputs. With
+    only auto-inferred business size, status is 'insufficient_data' and the
+    numeric estimate is suppressed (zeros) rather than presenting a spurious
+    dollar range.
+    """
+    financial_impact_status: str = Field(
+        default="insufficient_data",
+        description="estimated / insufficient_data.",
+    )
     estimated_annual_loss_low: int = Field(default=0, description="Conservative annual loss estimate ($).")
     estimated_annual_loss_high: int = Field(default=0, description="Upper annual loss estimate ($).")
     single_incident_cost_low: int = Field(default=0, description="Per-incident cost low ($).")
@@ -1211,6 +1221,10 @@ class EASMReport(BaseModel):
     confirmed_issues: int = 0
     platform_behaviors: int = 0
     informational_count: int = 0
+    risk_tier: str = Field(default="", description="low / moderate / high / critical — must agree with the grade.")
+    scan_confidence: str = Field(default="", description="Scan confidence, shown separately from risk.")
+    score_inputs: list[str] = Field(default_factory=list, description="Findings/inputs that affected the grade.")
+    excluded_inputs: list[str] = Field(default_factory=list, description="Findings excluded from scoring, with reason.")
     compliance_summary: dict[str, int] = Field(
         default_factory=dict,
         description="Count of findings per compliance framework.",

@@ -234,13 +234,23 @@ class TestRansomwareIndex:
 
 class TestFinancialImpact:
     def test_low_risk_low_cost(self):
-        result = DomainResult(target="https://example.com")
+        # With a customer-supplied size, an estimate is produced.
+        result = DomainResult(target="https://example.com", metadata={"company_size": "small"})
         _set_fair(result,overall_risk=10, loss_event_frequency=5)
         fi = _compute_financial_impact(result)
+        assert fi.financial_impact_status == "estimated"
         assert fi.single_incident_cost_low > 0
         assert fi.estimated_annual_loss_low < fi.estimated_annual_loss_high
         assert any("FAIR risk score" in f for f in fi.factors)
         assert any("Company size" in f for f in fi.factors)
+
+    def test_no_estimate_without_customer_inputs(self):
+        # Auto-inferred size alone must NOT produce a dollar figure.
+        result = DomainResult(target="https://example.com")
+        _set_fair(result, overall_risk=10, loss_event_frequency=5)
+        fi = _compute_financial_impact(result)
+        assert fi.financial_impact_status == "insufficient_data"
+        assert fi.estimated_annual_loss_high == 0
 
     def test_critical_risk_high_cost(self):
         result = DomainResult(target="https://example.com", metadata={"company_size": "enterprise"})
@@ -294,11 +304,13 @@ class TestFinancialImpact:
         assert "Enterprise" in fi.factors[0]
         assert "auto-inferred" not in fi.factors[0]
 
-    def test_auto_inferred_size_labelled(self):
+    def test_auto_inferred_size_not_used_for_money(self):
+        # Auto-inferred size no longer drives a customer-facing dollar figure.
         r = DomainResult(target="https://example.com")
         _set_fair(r, overall_risk=50, loss_event_frequency=30)
         fi = _compute_financial_impact(r)
-        assert "auto-inferred" in fi.factors[0]
+        assert fi.financial_impact_status == "insufficient_data"
+        assert "No customer-supplied financial inputs" in fi.factors[0]
 
 
 # ---------------------------------------------------------------------------
@@ -327,8 +339,13 @@ class TestCompliancePosture:
     def test_gdpr_controls_present(self):
         postures = _compute_compliance_posture([])
         gdpr = next(p for p in postures if "GDPR" in p.framework)
-        assert gdpr.controls_tested == 3
+        # Art.33/34 are organisational => not_assessed; only Art.32 is observable.
+        assert gdpr.controls_tested == 1
+        assert gdpr.controls_not_tested == 2
         assert gdpr.readiness_score == 100
+        statuses = {c.control_id: c.status for c in gdpr.controls}
+        assert statuses["GDPR Art.33"] == "not_assessed"
+        assert statuses["GDPR Art.34"] == "not_assessed"
 
     def test_platform_behavior_not_counted_as_failing(self):
         findings = [
@@ -365,10 +382,12 @@ class TestExecutiveReport:
         assert report.ransomware_susceptibility.tier in ("low", "medium", "high", "critical")
 
     def test_includes_financial_impact(self):
-        result = DomainResult(target="https://example.com")
+        # With a customer-supplied size the report carries a dollar estimate.
+        result = DomainResult(target="https://example.com", metadata={"company_size": "medium"})
         _set_fair(result,overall_risk=50, loss_event_frequency=30)
         report = build_easm_report(result, scan_mode="full")
         assert report.financial_impact is not None
+        assert report.financial_impact.financial_impact_status == "estimated"
         assert report.financial_impact.single_incident_cost_low > 0
 
     def test_includes_compliance_posture(self):

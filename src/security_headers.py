@@ -8,25 +8,27 @@ from .models import CORSAnalysis, HeaderFinding, SecurityHeadersResult
 
 
 # Each entry: (header_name, severity_if_missing, recommendation)
+# Severities recalibrated: missing hardening headers are defence-in-depth gaps,
+# not high-severity vulnerabilities. CSP absence is not proof of XSS.
 _REQUIRED_HEADERS: list[tuple[str, str, str]] = [
     (
         "Strict-Transport-Security",
-        "high",
+        "medium",
         "Add 'Strict-Transport-Security: max-age=31536000; includeSubDomains' to enforce HTTPS.",
     ),
     (
         "Content-Security-Policy",
-        "high",
-        "Add a Content-Security-Policy header to prevent XSS and data-injection attacks.",
+        "medium",
+        "Add a Content-Security-Policy header (defence-in-depth against XSS/data injection).",
     ),
     (
         "X-Frame-Options",
-        "medium",
+        "low",
         "Add 'X-Frame-Options: DENY' or 'SAMEORIGIN' to prevent click-jacking.",
     ),
     (
         "X-Content-Type-Options",
-        "medium",
+        "low",
         "Add 'X-Content-Type-Options: nosniff' to prevent MIME-type sniffing.",
     ),
     (
@@ -36,22 +38,22 @@ _REQUIRED_HEADERS: list[tuple[str, str, str]] = [
     ),
     (
         "Permissions-Policy",
-        "low",
+        "info",
         "Add a Permissions-Policy header to restrict browser features (camera, mic, geolocation).",
     ),
     (
         "Cross-Origin-Opener-Policy",
-        "low",
+        "info",
         "Add 'Cross-Origin-Opener-Policy: same-origin' to isolate browsing context from cross-origin popups.",
     ),
     (
         "Cross-Origin-Resource-Policy",
-        "low",
+        "info",
         "Add 'Cross-Origin-Resource-Policy: same-origin' to prevent cross-origin reads of resources.",
     ),
     (
         "X-Permitted-Cross-Domain-Policies",
-        "low",
+        "info",
         "Add 'X-Permitted-Cross-Domain-Policies: none' to prevent Adobe Flash/Acrobat cross-domain data loading.",
     ),
 ]

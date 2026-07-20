@@ -172,7 +172,7 @@ class TestBuildBoardReport:
         assert len(report.compliance_posture) == 3
         frameworks = {cp.framework for cp in report.compliance_posture}
         assert "PCI-DSS 4.0" in frameworks
-        assert "ISO 27001" in frameworks
+        assert "ISO 27001:2022" in frameworks
         assert "GDPR" in frameworks
 
     def test_subdomain_rows_sorted_worst_first(self):
