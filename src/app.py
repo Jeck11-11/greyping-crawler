@@ -43,8 +43,16 @@ from .screenshot import take_screenshot
 from .c99_client import check_ip_reputation, check_url_reputation, detect_waf, find_subdomains, validate_email
 from .postprocess import fill_not_found
 from .middleware import APIKeyMiddleware, RateLimitMiddleware
+from .module_status import nuclei_module_status
 from .js_miner import mine_javascript
-from .extractors import extract_contacts, extract_links, extract_page_metadata
+from .extractors import (
+    classify_social_url,
+    extract_contacts,
+    extract_links,
+    extract_page_metadata,
+    normalize_phone_e164,
+    region_for_tld,
+)
 from .ioc_scanner import scan_ioc
 from .privacy_scanner import analyze_privacy_compliance
 from .typosquatting import check_typosquatting
@@ -168,6 +176,22 @@ def _extract_domain(url: str) -> str:
 # Backwards-compatible aliases — existing callers / tests may import these.
 _normalise_target = normalise_target
 _fetch_landing_page = fetch_landing_page
+
+
+def _screenshot_succeeded(ss: ScreenshotResult) -> bool:
+    """A screenshot only counts as taken when real image data was captured.
+
+    A Playwright-unavailable / navigation-failed result is an *attempt*, not a
+    success — empty base64, zero dimensions, zero bytes, or any error all mean
+    no image was produced.
+    """
+    return bool(
+        ss.error is None
+        and ss.image_base64
+        and ss.size_bytes > 0
+        and ss.width > 0
+        and ss.height > 0
+    )
 
 
 async def _scan_single_target(
@@ -514,8 +538,13 @@ async def _scan_single_target(
 
     # Aggregate contacts, links, and secrets across all pages,
     # tracking which page URL each finding came from.
+    _tld = domain.rsplit(".", 1)[-1] if "." in domain else ""
+    _region_cc, _region_country = region_for_tld(_tld)
+
     email_sources: dict[str, list[str]] = {}
-    phone_sources: dict[str, list[str]] = {}
+    # Keyed by normalized E.164 value so formatting variants of the same number
+    # collapse into one finding.
+    phone_sources: dict[str, dict] = {}
     social_sources: dict[str, list[str]] = {}
     internal_links: set[str] = set()
     ext_link_sources: dict[str, dict] = {}   # url -> {anchor_text, found_on}
@@ -528,7 +557,14 @@ async def _scan_single_target(
         for email in page.contacts.emails:
             email_sources.setdefault(email, []).append(page_url)
         for phone in page.contacts.phone_numbers:
-            phone_sources.setdefault(phone, []).append(page_url)
+            norm = normalize_phone_e164(phone, _region_cc, _region_country)
+            key = norm["normalized_value"] or phone
+            entry = phone_sources.setdefault(
+                key,
+                {"raw": norm["raw_value"], "normalized": norm["normalized_value"],
+                 "country": norm["country"], "confidence": norm["confidence"], "found_on": []},
+            )
+            entry["found_on"].append(page_url)
         for social in page.contacts.social_profiles:
             social_sources.setdefault(social, []).append(page_url)
         for link in page.links:
@@ -558,13 +594,31 @@ async def _scan_single_target(
         for e, urls in sorted(email_sources.items())
     ]
     phone_findings = [
-        PhoneFinding(phone=p, found_on=sorted(set(urls)))
-        for p, urls in sorted(phone_sources.items())
+        PhoneFinding(
+            phone=key,
+            raw_value=d["raw"],
+            normalized_value=d["normalized"],
+            country=d["country"],
+            confidence=d["confidence"],
+            found_on=sorted(set(d["found_on"])),
+        )
+        for key, d in sorted(phone_sources.items())
     ]
     social_findings = [
-        SocialFinding(url=s, platform=detect_platform(s), found_on=sorted(set(urls)))
+        SocialFinding(
+            url=s,
+            platform=detect_platform(s),
+            link_type=classify_social_url(s),
+            found_on=sorted(set(urls)),
+        )
         for s, urls in sorted(social_sources.items())
     ]
+    # Only organisation-owned profiles count as social profiles; share/tracking
+    # buttons are reported separately and excluded from the profile total.
+    organisation_social = [f for f in social_findings if f.link_type == "organisation_profile"]
+    social_share_links = [f for f in social_findings if f.link_type in ("share_link", "tracking_link")]
+    # Confident phone numbers only (bare national fragments are low-confidence).
+    confident_phones = [f for f in phone_findings if f.confidence == "high"]
     ext_link_findings = []
     for u, d in sorted(ext_link_sources.items()):
         unique_pages = sorted(set(d["found_on"]))
@@ -634,12 +688,17 @@ async def _scan_single_target(
             ss_tasks = [take_screenshot(u) for u in screenshot_urls]
             ss_results = await asyncio.gather(*ss_tasks, return_exceptions=True)
             for ss in ss_results:
-                if isinstance(ss, ScreenshotResult) and not ss.error:
-                    screenshots.append(ss)
-                elif isinstance(ss, ScreenshotResult):
+                # Keep every ScreenshotResult (success or failure) in the list so
+                # the payload records the attempt; success is measured separately
+                # via _screenshot_succeeded — a failed/empty capture is not "taken".
+                if isinstance(ss, ScreenshotResult):
                     screenshots.append(ss)
         except Exception as exc:
             logger.warning("Screenshots failed for %s: %s", target, exc)
+
+    screenshot_attempts = len(screenshots)
+    screenshots_taken = sum(1 for ss in screenshots if _screenshot_succeeded(ss))
+    screenshot_failures = screenshot_attempts - screenshots_taken
 
     finished = datetime.now(timezone.utc).isoformat()
 
@@ -652,8 +711,10 @@ async def _scan_single_target(
     domain_summary = DomainSummary(
         pages_scanned=len(pages),
         emails_found=len(email_findings),
-        phone_numbers_found=len(phone_findings),
-        social_profiles_found=len(social_findings),
+        phone_numbers_found=len(confident_phones),
+        social_profiles_found=len(organisation_social),
+        organisation_social_profiles=len(organisation_social),
+        social_share_links=len(social_share_links),
         internal_links_found=len(internal_links),
         external_links_found=len(ext_link_findings),
         secrets_found=len(all_secrets),
@@ -683,7 +744,9 @@ async def _scan_single_target(
         exposed_databases_found=sum(
             1 for s in (cloud_assets_result.cloud_services if cloud_assets_result else []) if s.is_database
         ),
-        screenshots_taken=len(screenshots),
+        screenshot_attempts=screenshot_attempts,
+        screenshots_taken=screenshots_taken,
+        screenshot_failures=screenshot_failures,
         typosquat_candidates=len(typosquat_result.registered_candidates) if typosquat_result else 0,
         waf_detected=waf_result.firewall if waf_result and waf_result.detected else "",
         privacy_score=privacy_result.score if privacy_result else 0,
@@ -828,8 +891,15 @@ async def scan(request: ScanRequest) -> ScanResponse:
         nuclei_status = "pending"
         asyncio.create_task(nuclei_background_scan(scan_id, domain_results))
 
+    scan_profile = getattr(request, "scan_profile", "") or "passive_easm"
+    nuclei_mod = nuclei_module_status(nuclei_status, scan_profile)
     for dr in domain_results:
         dr.metadata["nuclei_status"] = nuclei_status
+        dr.metadata["scan_profile"] = scan_profile
+        dr.metadata["active_vulnerability_scanning_included"] = (
+            nuclei_mod.included_in_scan_profile
+        )
+        dr.metadata["nuclei_module"] = nuclei_mod.model_dump(mode="json")
 
     return ScanResponse(
         scan_id=scan_id,
@@ -1306,14 +1376,29 @@ async def _lighttouch_single_target(target: str, timeout: int, *, company_size: 
     email_findings = [
         EmailFinding(email=e, found_on=[target]) for e in sorted(set(contacts.emails))
     ]
+    _lt_tld = domain.rsplit(".", 1)[-1] if "." in domain else ""
+    _lt_cc, _lt_country = region_for_tld(_lt_tld)
+    _lt_phones: dict[str, dict] = {}
+    for p in contacts.phone_numbers:
+        n = normalize_phone_e164(p, _lt_cc, _lt_country)
+        _lt_phones.setdefault(n["normalized_value"] or p, n)
     phone_findings = [
-        PhoneFinding(phone=p, found_on=[target])
-        for p in sorted(set(contacts.phone_numbers))
+        PhoneFinding(
+            phone=key, raw_value=n["raw_value"], normalized_value=n["normalized_value"],
+            country=n["country"], confidence=n["confidence"], found_on=[target],
+        )
+        for key, n in sorted(_lt_phones.items())
     ]
     social_findings = [
-        SocialFinding(url=s, platform=detect_platform(s), found_on=[target])
+        SocialFinding(
+            url=s, platform=detect_platform(s), link_type=classify_social_url(s),
+            found_on=[target],
+        )
         for s in sorted(set(contacts.social_profiles))
     ]
+    organisation_social = [f for f in social_findings if f.link_type == "organisation_profile"]
+    social_share_links = [f for f in social_findings if f.link_type in ("share_link", "tracking_link")]
+    confident_phones = [f for f in phone_findings if f.confidence == "high"]
 
     page = PageResult(
         url=target,
@@ -1332,8 +1417,10 @@ async def _lighttouch_single_target(target: str, timeout: int, *, company_size: 
     summary = DomainSummary(
         pages_scanned=1 if html else 0,
         emails_found=len(email_findings),
-        phone_numbers_found=len(phone_findings),
-        social_profiles_found=len(social_findings),
+        phone_numbers_found=len(confident_phones),
+        social_profiles_found=len(organisation_social),
+        organisation_social_profiles=len(organisation_social),
+        social_share_links=len(social_share_links),
         internal_links_found=len(internal_links),
         external_links_found=len(ext_link_findings),
         secrets_found=len(secrets),

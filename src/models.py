@@ -66,6 +66,10 @@ class ScanRequest(BaseModel):
         description="Organisation size tier (micro/small/medium/large/enterprise). "
                     "Calibrates financial impact estimates. Auto-inferred if omitted.",
     )
+    scan_profile: str = Field(
+        default="passive_easm",
+        description="Scan profile. 'passive_easm' excludes active Nuclei vulnerability testing.",
+    )
 
 
 class ReconRequest(BaseModel):
@@ -166,7 +170,11 @@ class EmailFinding(BaseModel):
 
 
 class PhoneFinding(BaseModel):
-    phone: str
+    phone: str = Field(description="Normalized (E.164 where possible) value; canonical key.")
+    raw_value: str = Field(default="", description="Original formatting as seen on the page.")
+    normalized_value: str | None = Field(default=None, description="E.164 form, or null if not resolvable.")
+    country: str = Field(default="", description="ISO country inferred from the domain region, if any.")
+    confidence: str = Field(default="high", description="high / low. Low = bare national fragment.")
     found_on: list[str] = Field(
         default_factory=list,
         description="Page URLs where this phone number was found.",
@@ -176,6 +184,10 @@ class PhoneFinding(BaseModel):
 class SocialFinding(BaseModel):
     url: str
     platform: str = Field(default="", description="Detected platform name.")
+    link_type: str = Field(
+        default="organisation_profile",
+        description="organisation_profile / share_link / tracking_link / embedded_widget / unknown.",
+    )
     found_on: list[str] = Field(
         default_factory=list,
         description="Page URLs where this social profile was found.",
@@ -386,6 +398,14 @@ class SitemapResult(BaseModel):
     url_count: int = 0
     urls: list[str] = Field(default_factory=list, description="Up to 100 URLs.")
     nested_sitemaps: list[str] = Field(default_factory=list)
+    sitemap_indexes_found: int = Field(default=0, description="Sitemap index documents seen.")
+    nested_sitemaps_found: int = Field(default=0, description="Nested sitemap files referenced by an index.")
+    sitemap_urls_extracted: int = Field(default=0, description="Page URLs actually extracted.")
+    sitemap_parse_status: str = Field(
+        default="",
+        description="complete / partial / empty / failed. 'partial' = an index/nested "
+        "sitemaps exist but page URLs were not (yet) extracted.",
+    )
 
 
 class IoCFinding(BaseModel):
@@ -901,6 +921,30 @@ class FindingOwner(str, Enum):
     platform = "platform"
     third_party = "third_party"
     not_actionable = "not_actionable"
+
+
+class ModuleStatus(BaseModel):
+    """Standard status object for a single scanner module.
+
+    Distinguishes intentionally-skipped and not-applicable modules from failures
+    and from clean passes, so absence of a module is never rendered as a
+    successful security pass.
+    """
+
+    module: str
+    status: str = Field(
+        default="not_run",
+        description="completed / completed_with_findings / partial / failed / "
+        "not_run / skipped / not_applicable / not_assessed.",
+    )
+    attempted: bool = False
+    successful: bool = False
+    applicable: bool = True
+    included_in_scan_profile: bool = True
+    intentional: bool = Field(default=False, description="True when the module was deliberately excluded.")
+    error: str | None = None
+    findings_count: int | None = Field(default=None, description="null when not applicable/unknown.")
+    message: str = ""
 
 
 class PrioritizedFinding(BaseModel):
@@ -1463,6 +1507,8 @@ class DomainSummary(BaseModel):
     emails_found: int = 0
     phone_numbers_found: int = 0
     social_profiles_found: int = 0
+    organisation_social_profiles: int = Field(default=0, description="Owned social profiles (excludes share buttons).")
+    social_share_links: int = Field(default=0, description="Social share/tracking links (not owned profiles).")
     internal_links_found: int = 0
     external_links_found: int = 0
     secrets_found: int = 0
@@ -1494,7 +1540,9 @@ class DomainSummary(BaseModel):
     spf_services_found: int = Field(default=0, description="Third-party services identified in SPF includes.")
     vulnerable_libraries: int = Field(default=0, description="Known vulnerable third-party libraries detected.")
     scripts_without_sri: int = Field(default=0, description="External scripts missing Subresource Integrity.")
-    screenshots_taken: int = 0
+    screenshot_attempts: int = Field(default=0, description="Screenshot captures attempted.")
+    screenshots_taken: int = Field(default=0, description="Screenshots that produced real image data.")
+    screenshot_failures: int = Field(default=0, description="Screenshot attempts that produced no image.")
     typosquat_candidates: int = Field(default=0, description="Registered lookalike domains found.")
     waf_detected: str = Field(default="", description="WAF/firewall product detected by C99 (empty if none).")
     privacy_score: int = Field(default=0, description="Privacy compliance score (0-100).")
