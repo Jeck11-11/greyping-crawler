@@ -14,7 +14,6 @@ from .config import (
     XANO_WEBHOOK_URL,
 )
 from .easm_report import build_easm_report
-from .fair_signals import compute_fair_signals
 from .models import BoardReport, DomainResult, RiskAssessmentGroup
 from .nuclei_client import run_nuclei_scan
 
@@ -63,7 +62,7 @@ async def nuclei_background_scan(
     scan_id: str,
     domain_results: list[DomainResult],
 ) -> None:
-    """Run nuclei for each target, re-compute FAIR, POST full result to Xano."""
+    """Run nuclei for each target, rebuild the EASM report, POST result to Xano."""
     for idx, result in enumerate(domain_results):
         try:
             nuclei = await run_nuclei_scan([result.target])
@@ -71,7 +70,6 @@ async def nuclei_background_scan(
             if result.vulnerabilities:
                 result.vulnerabilities.nuclei = nuclei
             result.risk_assessment = RiskAssessmentGroup(
-                fair_signals=compute_fair_signals(result, scan_mode="full"),
                 easm_report=build_easm_report(result, scan_mode="full"),
             )
 

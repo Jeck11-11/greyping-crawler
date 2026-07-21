@@ -35,7 +35,6 @@ from .crawler import crawl_domain, fetch_rendered_cookies
 from .cve_lookup import enrich_cves_with_epss_kev, lookup_cves
 from .attack_paths import analyze_attack_paths
 from .easm_report import build_easm_report
-from .fair_signals import compute_fair_signals
 from .favicon import fetch_favicon
 from .cloud_assets import discover_cloud_assets
 from .port_scanner import scan_ports
@@ -267,7 +266,6 @@ async def _scan_single_target(
             error=str(crawl_result),
         )
         failed.risk_assessment = RiskAssessmentGroup(
-            fair_signals=compute_fair_signals(failed, scan_mode="full"),
             easm_report=build_easm_report(failed, scan_mode="full"),
         )
         fill_not_found(failed)
@@ -858,8 +856,7 @@ async def _scan_single_target(
         },
     )
     result.attack_paths = analyze_attack_paths(result)
-    fair = compute_fair_signals(result, scan_mode="full")
-    result.risk_assessment = RiskAssessmentGroup(fair_signals=fair)
+    result.risk_assessment = RiskAssessmentGroup()
     result.risk_assessment.easm_report = build_easm_report(result, scan_mode="full")
     if result.risk_assessment.easm_report:
         result.summary.overall_grade = result.risk_assessment.easm_report.overall_grade
@@ -1511,8 +1508,7 @@ async def _lighttouch_single_target(target: str, timeout: int, *, company_size: 
         error=None if html else "landing page fetch failed",
     )
     result.attack_paths = analyze_attack_paths(result)
-    fair = compute_fair_signals(result, scan_mode="lighttouch")
-    result.risk_assessment = RiskAssessmentGroup(fair_signals=fair)
+    result.risk_assessment = RiskAssessmentGroup()
     result.risk_assessment.easm_report = build_easm_report(result, scan_mode="lighttouch")
     if result.risk_assessment.easm_report:
         result.summary.overall_grade = result.risk_assessment.easm_report.overall_grade
@@ -1699,8 +1695,7 @@ async def _passive_single_target(
         error=passive_error,
     )
     result.attack_paths = analyze_attack_paths(result)
-    fair = compute_fair_signals(result, scan_mode="passive")
-    result.risk_assessment = RiskAssessmentGroup(fair_signals=fair)
+    result.risk_assessment = RiskAssessmentGroup()
     result.risk_assessment.easm_report = build_easm_report(result, scan_mode="passive")
     if result.risk_assessment.easm_report:
         result.summary.overall_grade = result.risk_assessment.easm_report.overall_grade

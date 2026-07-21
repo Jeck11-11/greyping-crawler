@@ -13,7 +13,6 @@ from src.models import (
     BreachRecord,
     CookieFinding,
     DomainResult,
-    FAIRSignals,
     FindingClassification,
     FindingOwner,
     PrioritizedFinding,
@@ -38,11 +37,6 @@ from src.models import (
     NucleiFinding,
     HeaderFinding,
 )
-
-
-def _set_fair(result: DomainResult, **kwargs) -> None:
-    """Set FAIR signals on a DomainResult via risk_assessment."""
-    result.risk_assessment = RiskAssessmentGroup(fair_signals=FAIRSignals(**kwargs))
 
 
 def _make_finding(severity="medium", classification=FindingClassification.confirmed_issue,
@@ -70,7 +64,6 @@ class TestOverallGrade:
             ssl=SSLCertResult(cert_valid=True, grade="A"),
             security=SecurityGroup(headers=SecurityHeadersResult(grade="A")),
         )
-        _set_fair(result,overall_risk=5)
         grade = _compute_overall_grade(result, [])
         assert grade in ("A+", "A", "A-")
 
@@ -80,7 +73,6 @@ class TestOverallGrade:
             ssl=SSLCertResult(cert_valid=False, grade="F"),
             security=SecurityGroup(headers=SecurityHeadersResult(grade="F")),
         )
-        _set_fair(result,overall_risk=90)
         findings = [
             _make_finding("critical"),
             _make_finding("critical"),
@@ -95,7 +87,6 @@ class TestOverallGrade:
             ssl=SSLCertResult(cert_valid=True, grade="B"),
             security=SecurityGroup(headers=SecurityHeadersResult(grade="B")),
         )
-        _set_fair(result, overall_risk=40)
         no_findings = _compute_overall_grade(result, [])
         many_criticals = [_make_finding("critical") for _ in range(3)]
         with_findings = _compute_overall_grade(result, many_criticals)
@@ -233,84 +224,26 @@ class TestRansomwareIndex:
 # ---------------------------------------------------------------------------
 
 class TestFinancialImpact:
-    def test_low_risk_low_cost(self):
-        # With a customer-supplied size, an estimate is produced.
-        result = DomainResult(target="https://example.com", metadata={"company_size": "small"})
-        _set_fair(result,overall_risk=10, loss_event_frequency=5)
-        fi = _compute_financial_impact(result)
-        assert fi.financial_impact_status == "estimated"
-        assert fi.single_incident_cost_low > 0
-        assert fi.estimated_annual_loss_low < fi.estimated_annual_loss_high
-        assert any("FAIR risk score" in f for f in fi.factors)
-        assert any("Company size" in f for f in fi.factors)
+    """Financial quantification (FAIR) is performed downstream in Xano; the
+    scanner always defers with insufficient_data."""
 
-    def test_no_estimate_without_customer_inputs(self):
-        # Auto-inferred size alone must NOT produce a dollar figure.
+    def test_always_insufficient_data(self):
         result = DomainResult(target="https://example.com")
-        _set_fair(result, overall_risk=10, loss_event_frequency=5)
         fi = _compute_financial_impact(result)
         assert fi.financial_impact_status == "insufficient_data"
+        assert fi.estimated_annual_loss_low == 0
         assert fi.estimated_annual_loss_high == 0
+        assert fi.single_incident_cost_low == 0
 
-    def test_critical_risk_high_cost(self):
+    def test_customer_size_does_not_produce_estimate(self):
+        # Even with a size hint, the scanner no longer estimates money.
         result = DomainResult(target="https://example.com", metadata={"company_size": "enterprise"})
-        _set_fair(result,overall_risk=80, loss_event_frequency=60)
         fi = _compute_financial_impact(result)
-        assert fi.single_incident_cost_low >= 2_500_000
-        assert fi.estimated_annual_loss_high > 0
-
-    def test_breach_data_amplifies_cost(self):
-        result_base = DomainResult(target="https://example.com", metadata={"company_size": "medium"})
-        _set_fair(result_base, overall_risk=50, loss_event_frequency=30)
-
-        result_breach = DomainResult(
-            target="https://example.com",
-            metadata={"company_size": "medium"},
-            breaches=[BreachRecord(
-                source="HIBP",
-                breach_name="Breach",
-                breach_date="2023-01-01",
-                data_types=["Credit cards", "Passwords"],
-            )],
-        )
-        _set_fair(result_breach, overall_risk=50, loss_event_frequency=30)
-
-        fi_base = _compute_financial_impact(result_base)
-        fi_breach = _compute_financial_impact(result_breach)
-        assert fi_breach.single_incident_cost_high > fi_base.single_incident_cost_high
-
-    def test_methodology_field(self):
-        result = DomainResult(target="https://example.com")
-        _set_fair(result,overall_risk=30, loss_event_frequency=15)
-        fi = _compute_financial_impact(result)
-        assert "IBM" in fi.methodology
-
-    def test_company_size_scales_costs(self):
-        results = {}
-        for size in ("micro", "small", "medium", "large", "enterprise"):
-            r = DomainResult(target="https://example.com", metadata={"company_size": size})
-            _set_fair(r, overall_risk=50, loss_event_frequency=30)
-            results[size] = _compute_financial_impact(r)
-
-        assert results["micro"].single_incident_cost_high < results["small"].single_incident_cost_high
-        assert results["small"].single_incident_cost_high < results["medium"].single_incident_cost_high
-        assert results["medium"].single_incident_cost_high < results["large"].single_incident_cost_high
-        assert results["large"].single_incident_cost_high < results["enterprise"].single_incident_cost_high
-
-    def test_explicit_size_not_overridden(self):
-        r = DomainResult(target="https://example.com", metadata={"company_size": "enterprise"})
-        _set_fair(r, overall_risk=50, loss_event_frequency=30)
-        fi = _compute_financial_impact(r)
-        assert "Enterprise" in fi.factors[0]
-        assert "auto-inferred" not in fi.factors[0]
-
-    def test_auto_inferred_size_not_used_for_money(self):
-        # Auto-inferred size no longer drives a customer-facing dollar figure.
-        r = DomainResult(target="https://example.com")
-        _set_fair(r, overall_risk=50, loss_event_frequency=30)
-        fi = _compute_financial_impact(r)
         assert fi.financial_impact_status == "insufficient_data"
-        assert "No customer-supplied financial inputs" in fi.factors[0]
+
+    def test_defers_downstream_note(self):
+        fi = _compute_financial_impact(DomainResult(target="https://example.com"))
+        assert any("downstream" in f.lower() for f in fi.factors)
 
 
 # ---------------------------------------------------------------------------
@@ -382,13 +315,12 @@ class TestExecutiveReport:
         assert report.ransomware_susceptibility.tier in ("low", "medium", "high", "critical")
 
     def test_includes_financial_impact(self):
-        # With a customer-supplied size the report carries a dollar estimate.
+        # The scanner defers financial quantification (FAIR) to Xano.
         result = DomainResult(target="https://example.com", metadata={"company_size": "medium"})
-        _set_fair(result,overall_risk=50, loss_event_frequency=30)
         report = build_easm_report(result, scan_mode="full")
         assert report.financial_impact is not None
-        assert report.financial_impact.financial_impact_status == "estimated"
-        assert report.financial_impact.single_incident_cost_low > 0
+        assert report.financial_impact.financial_impact_status == "insufficient_data"
+        assert report.financial_impact.single_incident_cost_low == 0
 
     def test_includes_compliance_posture(self):
         result = DomainResult(target="https://example.com")

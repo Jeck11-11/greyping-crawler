@@ -2,8 +2,8 @@
 
 Post-processes a populated ``DomainResult`` into a business-grade report
 with classified findings, ownership tagging, condensed summaries, and a
-deterministic executive summary. Follows the same pattern as
-``fair_signals.py`` — a pure function, no I/O, no scanner changes.
+deterministic executive summary — a pure function, no I/O. The grade is
+evidence-driven; quantitative risk modelling (FAIR) is performed downstream.
 """
 
 from __future__ import annotations
@@ -1517,12 +1517,6 @@ def _build_executive_summary(
     else:
         risk_posture = "Low"
 
-    fair = result.fair_signals
-    if fair and fair.risk_tier == "critical":
-        risk_posture = "Critical"
-    elif fair and fair.risk_tier == "high" and risk_posture != "Critical":
-        risk_posture = "High"
-
     parts: list[str] = []
     if overall_grade:
         parts.append(f"Overall grade: {overall_grade}.")
@@ -1959,10 +1953,12 @@ _RISK_TO_GRADE: list[tuple[int, str]] = [
 
 
 def _compute_overall_grade(result: DomainResult, findings: list[PrioritizedFinding]) -> str:
-    """Compute an aggregate A+ to F grade from FAIR risk + individual grades."""
-    fair = result.fair_signals
-    overall_risk = fair.overall_risk if fair else 50
+    """Aggregate A+ to F grade from observed component grades + confirmed findings.
 
+    Evidence-driven only — no FAIR input. The grade is derived from the SSL/TLS
+    and security-header component grades and a penalty for confirmed, scoring
+    findings. Quantitative risk modelling (FAIR) is performed downstream.
+    """
     ssl_grade_score = _grade_to_score(result.ssl.grade if result.ssl else "")
     headers_grade_score = _grade_to_score(
         result.security.headers.grade if result.security and result.security.headers else ""
@@ -1978,12 +1974,14 @@ def _compute_overall_grade(result: DomainResult, findings: list[PrioritizedFindi
     ]
     crit_count = sum(1 for f in confirmed if f.severity == "critical")
     high_count = sum(1 for f in confirmed if f.severity == "high")
-    finding_penalty = min(30, crit_count * 15 + high_count * 5)
+    medium_count = sum(1 for f in confirmed if f.severity == "medium")
+    low_count = sum(1 for f in confirmed if f.severity == "low")
+    finding_penalty = min(45, crit_count * 18 + high_count * 8 + medium_count * 3 + low_count * 1)
 
     component_avg = (ssl_grade_score + headers_grade_score) / 2.0
     component_risk = max(0, 100 - component_avg)
 
-    composite = int(round(overall_risk * 0.50 + component_risk * 0.25 + finding_penalty * 0.25))
+    composite = int(round(component_risk * 0.6 + finding_penalty))
     composite = max(0, min(100, composite))
 
     for threshold, grade in _RISK_TO_GRADE:
@@ -2224,106 +2222,19 @@ def _infer_company_size(result: DomainResult) -> str:
 
 
 def _compute_financial_impact(result: DomainResult) -> FinancialImpact:
-    """Estimate financial exposure using FAIR risk + IBM CODB 2024 benchmarks.
+    """Financial exposure is not estimated in the scanner.
 
-    Only produced when a customer-supplied business size (or validated financial
-    inputs) exists. With auto-inferred size alone the estimate is suppressed as
-    'insufficient_data' — an inferred employee count must not drive a dollar
-    range shown to the customer.
+    Quantitative risk modelling (FAIR) and loss estimation are performed
+    downstream (Xano) where validated business inputs — revenue, employee count,
+    asset criticality, record counts, downtime/recovery cost — are available. The
+    scanner only reports evidence, so this always returns ``insufficient_data``.
     """
-    explicit_size = result.metadata.get("company_size")
-    validated = bool(result.metadata.get("financial_inputs_validated"))
-    if not (validated or (explicit_size and explicit_size in _SIZE_MULTIPLIER)):
-        return FinancialImpact(
-            financial_impact_status="insufficient_data",
-            factors=[
-                "No customer-supplied financial inputs (revenue, employee count, "
-                "asset criticality, record count, downtime/recovery cost).",
-                "Estimate suppressed — auto-inferred business size is not used for "
-                "customer-facing loss figures.",
-            ],
-        )
-
-    fair = result.fair_signals
-    overall_risk = fair.overall_risk if fair else 0
-    lef = fair.loss_event_frequency if fair else 0
-
-    if overall_risk >= 75:
-        bracket = "critical"
-    elif overall_risk >= 50:
-        bracket = "high"
-    elif overall_risk >= 25:
-        bracket = "medium"
-    else:
-        bracket = "low"
-
-    base_low, base_high = _INCIDENT_COST_BASE[bracket]
-
-    factors: list[str] = []
-
-    explicit_size = result.metadata.get("company_size")
-    if explicit_size and explicit_size in _SIZE_MULTIPLIER:
-        size_key = explicit_size
-        inferred = False
-    else:
-        size_key = _infer_company_size(result)
-        inferred = True
-
-    size_mult, size_label = _SIZE_MULTIPLIER[size_key]
-    base_low = int(base_low * size_mult)
-    base_high = int(base_high * size_mult)
-    factors.append(
-        f"Company size: {size_label}{' (auto-inferred)' if inferred else ''} — "
-        f"{size_mult:.0%} of enterprise benchmark"
-    )
-
-    multiplier = 1.0
-    if result.breaches:
-        has_financial = any(
-            any(t in b.data_types for t in ("Credit cards", "Bank account numbers", "Payment histories"))
-            for b in result.breaches if b.data_types
-        )
-        if has_financial:
-            multiplier += 0.5
-            factors.append("Financial data in breach history (+50% cost)")
-        has_health = any(
-            "Health records" in (b.data_types or [])
-            for b in result.breaches
-        )
-        if has_health:
-            multiplier += 0.3
-            factors.append("Health data in breach history (+30% cost)")
-
-    if result.security and result.security.secrets:
-        crit_secrets = [s for s in result.security.secrets if s.severity == "critical"]
-        if crit_secrets:
-            multiplier += 0.25
-            factors.append(f"{len(crit_secrets)} critical credential(s) exposed (+25% cost)")
-
-    if result.cloud_assets:
-        dbs = [s for s in result.cloud_assets.cloud_services if s.is_database]
-        if dbs:
-            multiplier += 0.4
-            factors.append(f"{len(dbs)} cloud database(s) exposed (+40% cost)")
-
-    incident_low = int(base_low * multiplier)
-    incident_high = int(base_high * multiplier)
-
-    annual_prob = lef / 100.0
-    annual_low = int(incident_low * annual_prob)
-    annual_high = int(incident_high * annual_prob)
-
-    factors.append(f"FAIR risk score: {overall_risk}/100 ({bracket})")
-    factors.append(f"Annualised probability: {annual_prob:.0%}")
-    factors.append("Benchmarks: IBM Cost of a Data Breach 2024, scaled to organisation size")
-
     return FinancialImpact(
-        financial_impact_status="estimated",
-        estimated_annual_loss_low=annual_low,
-        estimated_annual_loss_high=annual_high,
-        single_incident_cost_low=incident_low,
-        single_incident_cost_high=incident_high,
-        factors=factors,
+        financial_impact_status="insufficient_data",
+        factors=[
+            "Financial estimation is performed downstream from validated business "
+            "inputs; the scanner does not produce customer-facing loss figures.",
+        ],
     )
 
 

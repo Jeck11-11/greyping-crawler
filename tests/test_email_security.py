@@ -24,7 +24,6 @@ from src.models import (
     SPFSenderInfo,
     WaybackResult,
 )
-from src.fair_signals import compute_fair_signals
 from src.passive_intel import (
     _check_bimi,
     _check_mta_sts,
@@ -174,56 +173,6 @@ class TestEmailSecurityGrading:
 
 
 # ---------------------------------------------------------------------------
-# Unit tests — FAIR signal integration
-# ---------------------------------------------------------------------------
-
-class TestFAIREmailSignals:
-    def test_missing_email_auth_creates_vulnerability_signal(self):
-        result = DomainResult(
-            target="https://no-email-auth.example.com",
-            dns=DNSGroup(email_security=EmailSecurityResult(
-                domain="no-email-auth.example.com",
-                spf=SPFResult(exists=False, issues=["No SPF record"]),
-                dmarc=DMARCResult(exists=False, issues=["No DMARC record"]),
-                dkim=DKIMResult(issues=["No DKIM selectors found"]),
-                grade="F",
-            )),
-        )
-        signals = compute_fair_signals(result, scan_mode="passive")
-        vuln_names = {s.name for s in signals.vulnerability.signals}
-        assert "email_auth_missing" in vuln_names
-
-    def test_strong_email_auth_creates_control_signal(self):
-        result = DomainResult(
-            target="https://strong-email.example.com",
-            dns=DNSGroup(email_security=EmailSecurityResult(
-                domain="strong-email.example.com",
-                spf=SPFResult(exists=True, all_qualifier="-all"),
-                dmarc=DMARCResult(exists=True, policy="reject"),
-                dkim=DKIMResult(selectors_found=["google"]),
-                grade="A",
-            )),
-        )
-        signals = compute_fair_signals(result, scan_mode="passive")
-        ctrl_names = {s.name for s in signals.control_strength.signals}
-        assert "email_security_posture" in ctrl_names
-        # Grade A → score 95
-        email_sig = next(
-            s for s in signals.control_strength.signals
-            if s.name == "email_security_posture"
-        )
-        assert email_sig.score >= 90
-
-    def test_no_email_security_data_emits_no_signal(self):
-        result = DomainResult(target="https://no-passive.example.com")
-        signals = compute_fair_signals(result, scan_mode="full")
-        vuln_names = {s.name for s in signals.vulnerability.signals}
-        ctrl_names = {s.name for s in signals.control_strength.signals}
-        assert "email_auth_missing" not in vuln_names
-        assert "email_security_posture" not in ctrl_names
-
-
-# ---------------------------------------------------------------------------
 # Integration — /scan/passive returns email_security
 # ---------------------------------------------------------------------------
 
@@ -277,10 +226,6 @@ class TestEmailSecurityIntegration:
         assert es["dmarc"]["policy"] == "reject"
         assert "Google Workspace" in es["mail_providers"]
 
-        # FAIR should pick up the email signals.
-        fair = r["risk_assessment"]["fair_signals"]
-        ctrl_names = [s["name"] for s in fair["control_strength"]["signals"]]
-        assert "email_security_posture" in ctrl_names
 
 
 # ---------------------------------------------------------------------------
@@ -512,71 +457,6 @@ class TestEnumerateSPF:
 
         assert "2001:db8::/32" in result.ip6_ranges
         assert "10.0.0.1" in result.ip4_ranges
-
-
-# ---------------------------------------------------------------------------
-# FAIR signal — SPF lookup limit exceeded
-# ---------------------------------------------------------------------------
-
-class TestFAIRSPFLookupLimit:
-    def test_exceeds_limit_fires_signal(self):
-        result = DomainResult(
-            target="https://example.com",
-            dns=DNSGroup(email_security=EmailSecurityResult(
-                domain="example.com",
-                spf=SPFResult(
-                    exists=True,
-                    raw="v=spf1 include:a include:b -all",
-                    intel=SPFIntelResult(
-                        domain="example.com",
-                        dns_lookup_count=14,
-                        exceeds_lookup_limit=True,
-                    ),
-                ),
-                grade="C",
-            )),
-        )
-        signals = compute_fair_signals(result, scan_mode="full")
-        vuln_names = [s.name for s in signals.vulnerability.signals]
-        assert "spf_lookup_limit_exceeded" in vuln_names
-
-        sig = next(s for s in signals.vulnerability.signals if s.name == "spf_lookup_limit_exceeded")
-        assert sig.score == 65
-        assert "14" in sig.evidence[0]
-
-    def test_under_limit_no_signal(self):
-        result = DomainResult(
-            target="https://example.com",
-            dns=DNSGroup(email_security=EmailSecurityResult(
-                domain="example.com",
-                spf=SPFResult(
-                    exists=True,
-                    raw="v=spf1 include:a -all",
-                    intel=SPFIntelResult(
-                        domain="example.com",
-                        dns_lookup_count=5,
-                        exceeds_lookup_limit=False,
-                    ),
-                ),
-                grade="B",
-            )),
-        )
-        signals = compute_fair_signals(result, scan_mode="full")
-        vuln_names = [s.name for s in signals.vulnerability.signals]
-        assert "spf_lookup_limit_exceeded" not in vuln_names
-
-    def test_no_intel_no_signal(self):
-        result = DomainResult(
-            target="https://example.com",
-            dns=DNSGroup(email_security=EmailSecurityResult(
-                domain="example.com",
-                spf=SPFResult(exists=True, raw="v=spf1 -all"),
-                grade="A",
-            )),
-        )
-        signals = compute_fair_signals(result, scan_mode="full")
-        vuln_names = [s.name for s in signals.vulnerability.signals]
-        assert "spf_lookup_limit_exceeded" not in vuln_names
 
 
 # ---------------------------------------------------------------------------

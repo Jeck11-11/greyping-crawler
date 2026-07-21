@@ -131,7 +131,8 @@ class TestFinancialGating:
         assert fi.financial_impact_status == "insufficient_data"
         assert fi.estimated_annual_loss_high == 0
 
-    def test_estimate_with_explicit_company_size(self):
+    def test_scanner_never_estimates_money(self):
+        # FAIR/financial quantification moved to Xano — scanner always defers.
         result = DomainResult(target="https://x.example.com", metadata={"company_size": "small"})
         fi = _compute_financial_impact(result)
-        assert fi.financial_impact_status == "estimated"
+        assert fi.financial_impact_status == "insufficient_data"

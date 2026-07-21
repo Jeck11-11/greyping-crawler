@@ -4,7 +4,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.fair_signals import compute_fair_signals
 from src.models import DomainResult, OpenPort, PortScanResult
 from src.port_scanner import _RISKY_PORTS, _TOP_PORTS, scan_ports
 
@@ -211,101 +210,4 @@ class TestDNSResolution:
 
 
 # ---------------------------------------------------------------------------
-# FAIR signal integration
-# ---------------------------------------------------------------------------
 
-class TestFAIRExposedServicesSignal:
-    def test_exposed_services_signal_from_risky_ports(self):
-        """Port scan with risky open ports produces an exposed_services FAIR signal."""
-        result = DomainResult(
-            target="https://example.com",
-            port_scan=PortScanResult(
-                target="example.com",
-                ip="93.184.216.34",
-                open_ports=[
-                    OpenPort(port=80, service="HTTP", is_risky=False),
-                    OpenPort(port=3306, service="MySQL", is_risky=True, banner="5.7.38-MySQL"),
-                    OpenPort(port=6379, service="Redis", is_risky=True, banner=""),
-                ],
-                ports_scanned=21,
-                scan_duration_seconds=1.5,
-            ),
-        )
-        signals = compute_fair_signals(result, scan_mode="full")
-
-        vuln_names = [s.name for s in signals.vulnerability.signals]
-        assert "exposed_services" in vuln_names
-
-        sig = next(s for s in signals.vulnerability.signals if s.name == "exposed_services")
-        # 2 risky ports: score = min(100, 50 + 10 * 2) = 70
-        assert sig.score == 70
-        assert sig.weight == 1.3
-        assert any("3306" in e for e in sig.evidence)
-        assert any("6379" in e for e in sig.evidence)
-
-    def test_no_signal_when_no_risky_ports(self):
-        """Port scan with only non-risky open ports does not produce exposed_services."""
-        result = DomainResult(
-            target="https://example.com",
-            port_scan=PortScanResult(
-                target="example.com",
-                ip="93.184.216.34",
-                open_ports=[
-                    OpenPort(port=80, service="HTTP", is_risky=False),
-                    OpenPort(port=443, service="HTTPS", is_risky=False),
-                ],
-                ports_scanned=21,
-            ),
-        )
-        signals = compute_fair_signals(result, scan_mode="full")
-
-        vuln_names = [s.name for s in signals.vulnerability.signals]
-        assert "exposed_services" not in vuln_names
-
-    def test_no_signal_when_no_port_scan(self):
-        """Without port_scan data, exposed_services signal is absent."""
-        result = DomainResult(target="https://example.com")
-        signals = compute_fair_signals(result, scan_mode="full")
-
-        vuln_names = [s.name for s in signals.vulnerability.signals]
-        assert "exposed_services" not in vuln_names
-
-    def test_banner_included_in_evidence(self):
-        """Banner text appears in the signal evidence when available."""
-        result = DomainResult(
-            target="https://example.com",
-            port_scan=PortScanResult(
-                target="example.com",
-                ip="10.0.0.1",
-                open_ports=[
-                    OpenPort(port=27017, service="MongoDB", is_risky=True, banner="MongoDB 4.4"),
-                ],
-                ports_scanned=21,
-            ),
-        )
-        signals = compute_fair_signals(result, scan_mode="full")
-        sig = next(s for s in signals.vulnerability.signals if s.name == "exposed_services")
-        assert any("MongoDB 4.4" in e for e in sig.evidence)
-
-    def test_exposed_services_increases_overall_risk(self):
-        """Risky exposed ports push overall risk higher than a bare result."""
-        bare = DomainResult(target="https://example.com")
-        bare_signals = compute_fair_signals(bare, scan_mode="full")
-
-        with_ports = DomainResult(
-            target="https://example.com",
-            port_scan=PortScanResult(
-                target="example.com",
-                ip="10.0.0.1",
-                open_ports=[
-                    OpenPort(port=3306, service="MySQL", is_risky=True),
-                    OpenPort(port=5432, service="PostgreSQL", is_risky=True),
-                    OpenPort(port=6379, service="Redis", is_risky=True),
-                    OpenPort(port=27017, service="MongoDB", is_risky=True),
-                ],
-                ports_scanned=21,
-            ),
-        )
-        port_signals = compute_fair_signals(with_ports, scan_mode="full")
-
-        assert port_signals.vulnerability.score > bare_signals.vulnerability.score
