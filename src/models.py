@@ -845,6 +845,8 @@ class FindingOwner(str, Enum):
     platform = "platform"
     third_party = "third_party"
     not_actionable = "not_actionable"
+    # Back-compat alias: older report builders may reference this member.
+    informational = "not_actionable"
 
 
 class AssetClassification(BaseModel):
