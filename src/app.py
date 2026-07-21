@@ -107,6 +107,7 @@ from .models import (
     WaybackResult,
 )
 from .passive_intel import (
+    _clean_hostname,
     enumerate_spf,
     query_ct_logs,
     query_dns,
@@ -406,18 +407,23 @@ async def _scan_single_target(
 
     c99_subs = c99_subs_result if isinstance(c99_subs_result, list) else []
     if c99_subs and ct_result:
-        merged = set(ct_result.subdomains or [])
+        # Single choke point for subdomains from BOTH sources (crt.sh + C99):
+        # validate every hostname so markdown-wrapped / malformed values never
+        # reach the output (e.g. "[www.x.com](https://www.x.com)").
+        merged = {h for h in (ct_result.subdomains or []) if _clean_hostname(h)}
+        details: list[SubdomainEntry] = []
         for entry in c99_subs:
-            merged.add(entry["subdomain"])
+            host = _clean_hostname(entry.get("subdomain", ""))
+            if not host:
+                continue
+            merged.add(host)
+            details.append(SubdomainEntry(
+                subdomain=host,
+                ip=entry.get("ip"),
+                cloudflare=entry.get("cloudflare"),
+            ))
         ct_result.subdomains = sorted(merged)
-        ct_result.subdomain_details = [
-            SubdomainEntry(
-                subdomain=e["subdomain"],
-                ip=e.get("ip"),
-                cloudflare=e.get("cloudflare"),
-            )
-            for e in c99_subs
-        ]
+        ct_result.subdomain_details = details
         if ct_result.error:
             ct_result.error = None
 
