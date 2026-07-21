@@ -28,7 +28,11 @@ RUN set -eux && \
 # automatically. For JS rendering, run the API outside Docker with
 # requirements-dev.txt and `playwright install chromium`.
 COPY requirements.txt /tmp/requirements.txt
-RUN pip3 install --no-cache-dir --break-system-packages -r /tmp/requirements.txt && \
+# mmh3 (favicon hashing) is a C extension with no musl wheel — install a build
+# toolchain, compile it, then drop the toolchain to keep the image slim.
+RUN apk add --no-cache --virtual .build-deps gcc g++ musl-dev python3-dev && \
+    pip3 install --no-cache-dir --break-system-packages -r /tmp/requirements.txt && \
+    apk del .build-deps && \
     rm /tmp/requirements.txt
 
 COPY config/nuclei-config.yaml /etc/nuclei/config.yaml
