@@ -1084,7 +1084,7 @@ class FinancialImpact(BaseModel):
     estimated_annual_loss_high: int = Field(default=0, description="Upper annual loss estimate ($).")
     single_incident_cost_low: int = Field(default=0, description="Per-incident cost low ($).")
     single_incident_cost_high: int = Field(default=0, description="Per-incident cost high ($).")
-    methodology: str = Field(default="FAIR-based with IBM CODB 2024 benchmarks")
+    methodology: str = Field(default="Performed downstream from validated business inputs.")
     factors: list[str] = Field(default_factory=list)
 
 
@@ -1105,6 +1105,18 @@ class CompliancePosture(BaseModel):
     controls_not_tested: int = 0
     readiness_score: int = Field(default=0, ge=0, le=100)
     controls: list[ComplianceControl] = Field(default_factory=list)
+
+
+class RemediationItem(BaseModel):
+    """A single ranked remediation action for the action plan."""
+
+    rank: int = 0
+    title: str = ""
+    category: str = ""
+    severity: str = ""
+    confidence: str = ""
+    action: str = ""
+    affects_grade: bool = True
 
 
 class EASMReport(BaseModel):
@@ -1128,6 +1140,18 @@ class EASMReport(BaseModel):
     confirmed_issues: int = 0
     platform_behaviors: int = 0
     informational_count: int = 0
+    severity_breakdown: dict[str, int] = Field(
+        default_factory=dict,
+        description="Count of confirmed, scoring findings by severity (critical/high/medium/low).",
+    )
+    posture_summary: dict[str, str] = Field(
+        default_factory=dict,
+        description="Plain-English posture per assessed category (e.g. {'TLS':'Strong','Email':'Needs attention'}).",
+    )
+    remediation_priorities: list[RemediationItem] = Field(
+        default_factory=list,
+        description="Top customer-owned fixes, ranked most-impactful first.",
+    )
     risk_tier: str = Field(default="", description="low / moderate / high / critical — must agree with the grade.")
     scan_confidence: str = Field(default="", description="Scan confidence, shown separately from risk.")
     score_inputs: list[str] = Field(default_factory=list, description="Findings/inputs that affected the grade.")

@@ -25,6 +25,7 @@ from .models import (
     FindingOwner,
     PrioritizedFinding,
     RansomwareIndex,
+    RemediationItem,
     ReconArtifact,
 )
 
@@ -377,6 +378,22 @@ def _sort_findings(findings: list[PrioritizedFinding]) -> list[PrioritizedFindin
 # Classifiers — one per finding source
 # ---------------------------------------------------------------------------
 
+# Business consequence (not the fix) for each missing header — populates
+# why_it_matters so it never just restates recommended_action.
+_HEADER_CONSEQUENCE: dict[str, str] = {
+    "strict-transport-security": "Visitors can be silently downgraded to unencrypted HTTP on a hostile network, exposing sessions and credentials.",
+    "content-security-policy": "If any script-injection flaw exists, there is no browser-side backstop to stop it executing — a defence-in-depth gap, not proof of XSS.",
+    "x-frame-options": "The site can be embedded in an attacker's page and used for click-jacking (tricking users into unintended clicks).",
+    "x-content-type-options": "Browsers may mis-interpret file types, which can turn an uploaded file into executable script.",
+    "referrer-policy": "Full URLs (which can contain tokens or IDs) may leak to third-party sites via the Referer header.",
+    "permissions-policy": "Browser features like camera, microphone and geolocation are not explicitly restricted for embedded content.",
+    "cross-origin-opener-policy": "Cross-origin popups share a browsing context, enabling some side-channel attacks.",
+    "cross-origin-resource-policy": "Resources can be read cross-origin, aiding certain data-theft techniques.",
+    "x-permitted-cross-domain-policies": "Legacy Adobe clients could load cross-domain data policies.",
+    "cache-control": "Sensitive responses may be cached by browsers or shared proxies and exposed to later users of the same device.",
+}
+
+
 def _classify_header_findings(
     result: DomainResult, platform: str, profile: PlatformProfile,
 ) -> list[PrioritizedFinding]:
@@ -413,7 +430,9 @@ def _classify_header_findings(
                     classification=FindingClassification.confirmed_issue,
                     confidence="high",
                     owner=FindingOwner.customer,
-                    why_it_matters=h.recommendation or f"Missing {h.header} weakens browser-side protections.",
+                    why_it_matters=_HEADER_CONSEQUENCE.get(
+                        hdr_lower, f"Missing {h.header} weakens browser-side protections."
+                    ),
                     business_impact="Web security hygiene",
                     evidence=[f"{h.header} not present in response"],
                     recommended_action=h.recommendation or f"Add {h.header} header to server configuration.",
@@ -1537,8 +1556,13 @@ def _build_executive_summary(
     else:
         parts.append("No evidence of leaked secrets, active compromise, or breach exposure.")
 
-    if ransomware and ransomware.score >= 50:
-        parts.append(f"Ransomware susceptibility is {ransomware.tier} ({ransomware.score}/100).")
+    # Surface ransomware whenever it's above 'low' so a medium/high tier never
+    # sits silently next to a "Low" posture (which reads as a contradiction).
+    if ransomware and ransomware.tier != "low":
+        driver = f" — driven by {ransomware.factors[0].lower()}" if ransomware.factors else ""
+        parts.append(
+            f"Ransomware susceptibility is rated {ransomware.tier} ({ransomware.score}/100){driver}."
+        )
 
     if financial and financial.estimated_annual_loss_high > 0:
         lo = financial.estimated_annual_loss_low
@@ -1585,11 +1609,19 @@ def _build_executive_summary(
     if ransomware and ransomware.tier == "low":
         positives.append(f"Low ransomware susceptibility ({ransomware.score}/100)")
 
-    concerns = [f.title for f in critical_high[:3]]
-
-    # Top risks + recommendations from findings
-    top_risks = [f.title for f in critical_high[:3]]
-    recommendations = [f.recommended_action for f in critical_high[:3]]
+    # Rank confirmed, scoring findings so the board always gets a top-risks and
+    # recommendations list — even when nothing reached high severity (after the
+    # header/CSP severity recalibration, "medium" is often the top tier present).
+    _sev_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+    ranked = sorted(
+        [f for f in confirmed if f.affects_risk_score],
+        key=lambda f: (_sev_rank.get(f.severity, 5), 0 if f.owner == FindingOwner.customer else 1),
+    )
+    # Prefer critical/high for the headline; fall back to the ranked list.
+    headline = critical_high[:3] or ranked[:3]
+    concerns = [f.title for f in headline]
+    top_risks = [f.title for f in headline]
+    recommendations = [f.recommended_action for f in ranked[:3] if f.recommended_action]
 
     grades = _collect_grades(result)
     if overall_grade:
@@ -2231,6 +2263,7 @@ def _compute_financial_impact(result: DomainResult) -> FinancialImpact:
     """
     return FinancialImpact(
         financial_impact_status="insufficient_data",
+        methodology="Performed downstream from validated business inputs.",
         factors=[
             "Financial estimation is performed downstream from validated business "
             "inputs; the scanner does not produce customer-facing loss figures.",
@@ -2463,6 +2496,55 @@ def build_easm_report(
             "medium" if scan_mode == "full" else "low"
         )
 
+        # Plain-English posture per assessed category, from component grades.
+        _grade_label = {
+            "A+": "Strong", "A": "Strong", "A-": "Strong",
+            "B+": "Good", "B": "Good", "B-": "Good",
+            "C+": "Adequate", "C": "Adequate", "C-": "Adequate",
+            "D+": "Needs attention", "D": "Needs attention", "D-": "Needs attention",
+            "F": "Weak",
+        }
+        _cat_label = {"ssl": "TLS / Certificate", "headers": "Web security headers",
+                      "email": "Email authentication", "privacy": "Privacy indicators"}
+        posture_summary = {
+            _cat_label.get(k, k): _grade_label.get(v, "Not assessed")
+            for k, v in executive.grades.items()
+            if k in _cat_label and v
+        }
+
+        # Severity breakdown of confirmed, scoring findings.
+        _scoring = [
+            f for f in sorted_findings
+            if f.classification == FindingClassification.confirmed_issue and f.affects_risk_score
+        ]
+        severity_breakdown = {
+            sev: sum(1 for f in _scoring if f.severity == sev)
+            for sev in ("critical", "high", "medium", "low")
+        }
+
+        # Ranked customer action plan — customer-owned confirmed issues first,
+        # most severe first, then any other scoring finding.
+        _sev_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+        _ranked = sorted(
+            _scoring,
+            key=lambda f: (
+                0 if f.owner == FindingOwner.customer else 1,
+                _sev_rank.get(f.severity, 4),
+            ),
+        )
+        remediation_priorities = [
+            RemediationItem(
+                rank=i + 1,
+                title=f.title,
+                category=f.category,
+                severity=f.severity,
+                confidence=f.confidence,
+                action=f.recommended_action,
+                affects_grade=f.affects_risk_score,
+            )
+            for i, f in enumerate(_ranked[:5])
+        ]
+
         return EASMReport(
             generated_at=datetime.now(timezone.utc).isoformat(),
             scan_mode=scan_mode,
@@ -2479,6 +2561,9 @@ def build_easm_report(
             confirmed_issues=confirmed,
             platform_behaviors=plat_beh,
             informational_count=info_ct,
+            severity_breakdown=severity_breakdown,
+            posture_summary=posture_summary,
+            remediation_priorities=remediation_priorities,
             risk_tier=risk_tier,
             scan_confidence=scan_confidence,
             score_inputs=score_inputs,
