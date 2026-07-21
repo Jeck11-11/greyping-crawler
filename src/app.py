@@ -406,11 +406,13 @@ async def _scan_single_target(
         cloud_assets_result.cloud_services = cloud_svcs + db_findings
 
     c99_subs = c99_subs_result if isinstance(c99_subs_result, list) else []
-    if c99_subs and ct_result:
+    if ct_result:
         # Single choke point for subdomains from BOTH sources (crt.sh + C99):
         # validate every hostname so markdown-wrapped / malformed values never
-        # reach the output (e.g. "[www.x.com](https://www.x.com)").
-        merged = {h for h in (ct_result.subdomains or []) if _clean_hostname(h)}
+        # reach the output (e.g. "[www.x.com](https://www.x.com)"). Runs even when
+        # C99 returned nothing, so crt.sh-only results are cleaned too. Note the
+        # walrus keeps the CLEANED value, not the original.
+        merged = {c for h in (ct_result.subdomains or []) if (c := _clean_hostname(h))}
         details: list[SubdomainEntry] = []
         for entry in c99_subs:
             host = _clean_hostname(entry.get("subdomain", ""))
@@ -423,8 +425,9 @@ async def _scan_single_target(
                 cloudflare=entry.get("cloudflare"),
             ))
         ct_result.subdomains = sorted(merged)
-        ct_result.subdomain_details = details
-        if ct_result.error:
+        if details:
+            ct_result.subdomain_details = details
+        if c99_subs and ct_result.error:
             ct_result.error = None
 
     # Prepare inputs for Phase 2.
