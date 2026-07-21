@@ -120,7 +120,7 @@ class TestNucleiBackgroundScan:
         assert "result" in payload
         result_data = payload["result"]
         assert result_data["target"] == "https://example.com"
-        assert result_data["risk_assessment"]["fair_signals"] is not None
+        assert result_data["risk_assessment"]["easm_report"] is not None
 
     @patch("src.nuclei_webhook._post_webhook", new_callable=AsyncMock)
     @patch("src.nuclei_webhook.run_nuclei_scan", new_callable=AsyncMock)
@@ -140,7 +140,7 @@ class TestNucleiBackgroundScan:
     @patch("src.nuclei_webhook._post_webhook", new_callable=AsyncMock)
     @patch("src.nuclei_webhook.run_nuclei_scan", new_callable=AsyncMock)
     @pytest.mark.asyncio
-    async def test_recomputes_fair_signals(self, mock_nuclei, mock_webhook, sample_domain_result):
+    async def test_rebuilds_easm_report(self, mock_nuclei, mock_webhook, sample_domain_result):
         mock_nuclei.return_value = NucleiResult(
             target="https://example.com",
             findings=[
@@ -152,10 +152,9 @@ class TestNucleiBackgroundScan:
         await nuclei_background_scan("scan789", [sample_domain_result])
 
         payload = mock_webhook.call_args[0][0]
-        fair = payload["result"]["risk_assessment"]["fair_signals"]
-        assert fair is not None
-        vuln_names = [s["name"] for s in fair["vulnerability"]["signals"]]
-        assert "nuclei_vulnerabilities" in vuln_names
+        easm = payload["result"]["risk_assessment"]["easm_report"]
+        assert easm is not None
+        assert "overall_grade" in easm
 
     @patch("src.nuclei_webhook._post_webhook", new_callable=AsyncMock)
     @patch("src.nuclei_webhook.run_nuclei_scan", new_callable=AsyncMock)
@@ -166,117 +165,3 @@ class TestNucleiBackgroundScan:
 
         await nuclei_background_scan("scan_crash", [sample_domain_result])
         mock_webhook.assert_not_called()
-
-
-class TestAggregateScoreSoftening:
-    def test_single_critical_below_100(self):
-        from src.fair_signals import _aggregate_findings_score
-        from src.models import SecretFinding
-
-        items = [
-            SecretFinding(
-                secret_type="aws_key", matched_pattern="AKIA",
-                value_preview="AKIA...", location="script", severity="critical",
-            ),
-        ]
-        score = _aggregate_findings_score(items)
-        assert score < 100
-        assert score == 85  # int(100 * 0.8) + 0 + 5
-
-    def test_five_criticals_reach_100(self):
-        from src.fair_signals import _aggregate_findings_score
-        from src.models import SecretFinding
-
-        items = [
-            SecretFinding(
-                secret_type=f"key_{i}", matched_pattern="AKIA",
-                value_preview="AKIA...", location="script", severity="critical",
-            )
-            for i in range(5)
-        ]
-        score = _aggregate_findings_score(items)
-        assert score == 100  # int(100 * 0.8) + 20 + 5 = 105, capped at 100
-
-    def test_empty_returns_zero(self):
-        from src.fair_signals import _aggregate_findings_score
-        assert _aggregate_findings_score([]) == 0
-
-
-class TestDoubleCountingWeights:
-    def test_credential_exposure_weight_reduced(self):
-        from src.fair_signals import compute_fair_signals
-        from src.models import DomainResult, SecurityGroup, SecretFinding
-
-        result = DomainResult(
-            target="https://example.com",
-            security=SecurityGroup(
-                secrets=[
-                    SecretFinding(
-                        secret_type="api_key", matched_pattern="sk-",
-                        value_preview="sk-...", location="js", severity="high",
-                    ),
-                ],
-            ),
-        )
-        signals = compute_fair_signals(result, scan_mode="full")
-        cred_sig = next(
-            s for s in signals.loss_magnitude.signals if s.name == "credential_exposure"
-        )
-        assert cred_sig.weight == 0.8
-
-    def test_brand_impersonation_weight_reduced(self):
-        from src.fair_signals import compute_fair_signals
-        from src.models import DomainResult, TyposquattingResult, TyposquatCandidate
-
-        result = DomainResult(
-            target="https://example.com",
-            typosquatting=TyposquattingResult(
-                domain="example.com",
-                registered_candidates=[
-                    TyposquatCandidate(domain="examp1e.com", registered=True),
-                ],
-            ),
-        )
-        signals = compute_fair_signals(result, scan_mode="full")
-        brand_sig = next(
-            s for s in signals.loss_magnitude.signals if s.name == "brand_impersonation_risk"
-        )
-        assert brand_sig.weight == 0.6
-
-
-class TestWeakHeaderSignalInVulnerability:
-    def test_weak_headers_counted(self):
-        from src.fair_signals import compute_fair_signals
-        from src.models import DomainResult, SecurityGroup, SecurityHeadersResult, HeaderFinding
-
-        result = DomainResult(
-            target="https://example.com",
-            security=SecurityGroup(
-                headers=SecurityHeadersResult(
-                    grade="C", score=55,
-                    findings=[
-                        HeaderFinding(
-                            header="Strict-Transport-Security",
-                            status="weak",
-                            severity="high",
-                            value="max-age=3600",
-                            recommendation="HSTS max-age too low.",
-                        ),
-                        HeaderFinding(
-                            header="Content-Security-Policy",
-                            status="weak",
-                            severity="high",
-                            value="default-src * 'unsafe-inline'",
-                            recommendation="CSP weak.",
-                        ),
-                    ],
-                ),
-            ),
-        )
-        signals = compute_fair_signals(result, scan_mode="full")
-        header_sig = next(
-            s for s in signals.vulnerability.signals
-            if s.name == "missing_security_headers"
-        )
-        assert header_sig.score > 0
-        assert any("weak" in e for e in header_sig.evidence)

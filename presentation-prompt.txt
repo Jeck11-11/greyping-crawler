@@ -1,0 +1,209 @@
+Create a PowerPoint / Google Slides presentation for "GreyPing" — a SaaS External Attack Surface Management (EASM) platform. The presentation is aimed at SMB owners and IT managers who are NOT security specialists. The tone should be professional but approachable — translate security concepts into plain-English business risk.
+
+Generate a slide-by-slide outline (12-15 slides) with:
+- Slide title
+- 3-5 bullet points of content
+- Speaker notes (2-4 sentences explaining what to say)
+- Suggested visual / layout direction
+
+---
+
+ABOUT GREYPING
+
+GreyPing is a cloud-based platform that scans any website or domain and produces a comprehensive security report in under 2 minutes. It shows business owners their external attack surface — everything a hacker can see from the outside — and translates technical findings into business risk with euro/dollar figures, compliance scores, and plain-English recommendations.
+
+Think of it as a full security health check for your online presence, delivered instantly.
+
+---
+
+TARGET AUDIENCE
+
+- SMB owners (10-250 employees) who know security matters but don't have a dedicated security team
+- IT managers at SMBs who need to demonstrate due diligence to leadership or insurers
+- Companies preparing for Cyber Essentials, ISO 27001, or regulatory audits
+- Businesses who've been breached or had a near-miss and want visibility
+
+---
+
+THREE SCAN MODES
+
+1. FULL SCAN (30-120 seconds)
+   - Crawls up to 50 pages with optional JavaScript rendering
+   - Tests 57 sensitive paths (.env, .git, /admin, wp-login, etc.)
+   - Checks breach databases, scans ports, discovers cloud storage
+   - Mines JavaScript bundles for leaked API endpoints and internal hosts
+   - Detects technologies, supply chain dependencies, and typosquat domains
+   - Produces a complete EASM report with financial impact and compliance scoring
+
+2. LIGHT TOUCH SCAN (10-20 seconds)
+   - Single HTTP request — won't trigger WAF alerts
+   - Still extracts SSL, headers, DNS, email security, technologies, and supply chain
+   - Ideal for quick checks or sensitive environments
+
+3. PASSIVE SCAN (5-10 seconds)
+   - Zero traffic to the target domain — queries only third-party sources
+   - DNS records, Certificate Transparency logs, WHOIS, Wayback Machine, breach databases
+   - Perfect for pre-engagement reconnaissance or monitoring domains you don't own
+
+---
+
+WHAT GREYPING SCANS (16+ CAPABILITIES)
+
+Website Security:
+- SSL/TLS certificate grading (A-F), expiry warnings, cipher strength
+- HTTP security headers audit (15+ headers, A-F grade)
+- Cookie security analysis (Secure, HttpOnly, SameSite flags)
+- Sensitive path detection (57 paths: .env, .git, /admin, /graphql, backup files)
+- Secret & credential detection (AWS keys, API tokens, database URLs, private keys)
+- Indicators of Compromise (cryptominers, hidden iframes, credential harvesting)
+
+Network & Infrastructure:
+- Port scanning (detect exposed databases, RDP, admin panels)
+- Cloud storage discovery (S3 buckets, Azure Blob, Google Cloud Storage, Firebase)
+- Technology fingerprinting (CMS, frameworks, CDNs, analytics — 60+ signatures)
+- Supply chain analysis (third-party scripts, SRI compliance, vulnerable libraries)
+- WAF/firewall detection
+
+Email Security:
+- SPF record analysis with full include-tree resolution
+- DMARC policy validation
+- DKIM selector checking
+- MTA-STS and BIMI assessment
+- Email service enumeration (which providers send on your behalf)
+
+Passive Intelligence (zero traffic to target):
+- DNS record enumeration (A, AAAA, MX, NS, TXT, CAA, SOA, SRV + DNSSEC)
+- Certificate Transparency log search — discovers all subdomains ever issued certificates
+- WHOIS/RDAP registration details
+- Wayback Machine historical snapshots
+- Breach database checking (Have I Been Pwned)
+
+Brand Protection:
+- Typosquatting detection — finds registered lookalike domains (TLD swaps, character omissions, homoglyphs)
+- Privacy compliance scoring (privacy policy, cookie consent, GDPR/CCPA indicators)
+
+---
+
+THE EASM REPORT (THE CORE DELIVERABLE)
+
+Every scan produces a business-grade EASM report containing:
+
+1. OVERALL GRADE (A-F)
+   - Single letter grade combining SSL, headers, email security, and privacy scores
+   - Component breakdown: SSL: A, Headers: F, Email: C, Privacy: D → Overall: B
+
+2. EXECUTIVE SUMMARY
+   - 2-4 sentence plain-English narrative of the organisation's external risk posture
+   - Top 3 strengths and top 3 concerns
+   - Actionable recommendations
+
+3. FINANCIAL IMPACT (FAIR Risk Quantification)
+   - Estimated single-incident cost and annualised loss in dollars/euros
+   - Based on the FAIR (Factor Analysis of Information Risk) framework
+   - Scaled by company size (micro/small/medium/large/enterprise) — can be set explicitly or auto-inferred from scan signals
+   - Adjusted for breach history, data sensitivity, credential exposure, and cloud database exposure
+   - Benchmarked against IBM Cost of a Data Breach 2024 report
+
+4. RANSOMWARE SUSCEPTIBILITY INDEX (0-100)
+   - Score based on: exposed admin panels, weak email auth, missing WAF, unpatched vulnerabilities, exposed secrets
+   - Tier: Low (0-24), Medium (25-49), High (50-74), Critical (75+)
+   - Lists both risk factors and active mitigations
+
+5. COMPLIANCE POSTURE
+   - PCI-DSS 4.0: Tests 10 controls with pass/fail per control
+   - ISO 27001: Tests 8 controls
+   - GDPR: Tests 3 controls (Art.32, Art.33, Art.34)
+   - Each finding is auto-tagged to relevant compliance frameworks
+   - Readiness score per framework (0-100%)
+
+6. PRIORITIZED FINDINGS (typically 30-50 per scan)
+   - Each finding includes:
+     * Severity: critical / high / medium / low / info
+     * Classification: confirmed issue, platform behavior, informational, or likely false positive
+     * Ownership: customer responsibility, platform-managed, third-party, or not actionable
+     * Plain-English "why it matters" explanation
+     * Business impact statement
+     * Specific remediation action
+     * Compliance framework tags
+
+7. ATTACK PATH ANALYSIS
+   - Connects individual findings into multi-step exploit chains
+   - Example: "Exposed .env file + database credentials = direct data breach path"
+   - Shows likelihood, impact, and remediation for each chain
+
+---
+
+REAL SCAN EXAMPLE — DNA IT SOLUTIONS (dnait.ie)
+
+Use this real output to create a "live demo" slide showing what a customer would see:
+
+Target: dnait.ie (Irish IT managed services provider, ~50 employees, WordPress on Cloudflare)
+Scan time: 40 seconds
+
+Results:
+- Overall Grade: B
+- SSL Grade: A | Headers Grade: F | Email Grade: C | Privacy Grade: D
+- Ransomware Susceptibility: 20/100 (Low)
+- Financial Impact: $900 - $13,500/year estimated annual loss
+- Single Incident Cost: $2,500 - $37,500
+- Company Size: Medium (auto-inferred from 25 subdomains, 18 technologies, 9 open ports)
+
+Findings Summary:
+- 40 total findings (21 confirmed issues, 19 informational)
+- Top concerns: Missing HSTS header, missing CSP header, 3 typosquat domains registered (dnait.com, dnait.net, dnait.org)
+- Compliance: PCI-DSS 60% ready, ISO 27001 50% ready, GDPR 100% ready
+
+Key Positives:
+- No exposed secrets or credentials
+- No breach history
+- SSL/TLS certificate valid (grade A)
+- WAF/CDN protection active (Cloudflare)
+- DMARC enforcement active
+
+Email Security Intel:
+- SPF record with 5 authorised senders: Microsoft 365, StatusPage, SendGrid, Autotask, MailAnyone
+- DMARC: quarantine policy with EasyDMARC reporting
+- 3 typosquat domains could be used for phishing impersonation
+
+---
+
+SLIDE STRUCTURE GUIDANCE
+
+Slide 1: Title slide — "GreyPing: See Your Business the Way Hackers Do" + tagline + logo placeholder
+Slide 2: The problem — SMBs are targets, 43% of cyberattacks target small businesses, most don't know what's exposed
+Slide 3: What is GreyPing — one-sentence positioning + 3 key benefits (instant, automated, plain English)
+Slide 4: How it works — 3 scan modes visual (passive → light touch → full) with time and depth comparison
+Slide 5: What we scan — icon grid of 16+ capabilities grouped by category
+Slide 6: The EASM Report — overview of the 7 report sections with a mock dashboard visual
+Slide 7: Live example — the dnait.ie scan results (grade, financial impact, top findings)
+Slide 8: Financial impact — how FAIR risk quantification works, scaled by company size, IBM benchmarks
+Slide 9: Compliance ready — PCI-DSS, ISO 27001, GDPR scoring with the control-level detail
+Slide 10: Ransomware risk score — what it measures, the 0-100 scale, factors and mitigations
+Slide 11: Attack path analysis — visual showing how individual findings chain into exploit paths
+Slide 12: Who it's for — use cases (pre-audit prep, insurance evidence, board reporting, ongoing monitoring, supplier risk)
+Slide 13: Why GreyPing vs. alternatives — comparison: faster than pentests, deeper than basic scanners, cheaper than MSSP retainers, plain English not CVE soup
+Slide 14: Pricing / plans placeholder (leave flexible — the user will fill this in)
+Slide 15: Call to action — "Get your free scan" + contact details placeholder
+
+---
+
+DESIGN DIRECTION
+
+- Colour palette: dark navy/charcoal backgrounds with green (#00C853 or similar) accent — "security dashboard" feel
+- Clean, modern, minimal text per slide — let visuals carry the message
+- Use dashboard mockup screenshots where possible
+- Icons for each scanning capability
+- The overall vibe: "enterprise-grade security intelligence, accessible to everyone"
+
+---
+
+IMPORTANT NOTES
+
+- Do NOT use overly technical jargon — the audience is business owners, not pentesters
+- Translate every technical finding into business impact (e.g., "Missing HSTS" → "Visitors could be redirected to a fake version of your site")
+- Emphasise speed (under 2 minutes) and automation (no agents to install, no consultants needed)
+- The financial impact feature is a key differentiator — most scanners give you CVE lists, GreyPing gives you dollar figures
+- Compliance scoring is a major selling point for companies facing audits or cyber insurance renewals
+- GreyPing is Irish-built — mention this if relevant to the audience
+
+Please generate the full slide-by-slide outline now with titles, bullet points, speaker notes, and visual suggestions for each slide.

@@ -11,19 +11,22 @@ def _soup(html: str) -> BeautifulSoup:
 
 class TestExtractContacts:
     def test_extracts_emails_from_text(self):
-        html = "<p>Contact us at info@example.com for details.</p>"
+        # Use a real-looking domain — example.com is now treated as placeholder.
+        html = "<p>Contact us at info@acme.com for details.</p>"
         contacts = extract_contacts(_soup(html), html)
-        assert "info@example.com" in contacts.emails
+        assert "info@acme.com" in contacts.emails
 
     def test_extracts_mailto_links(self):
-        html = '<a href="mailto:sales@example.com">Email Sales</a>'
+        html = '<a href="mailto:sales@acme.com">Email Sales</a>'
         contacts = extract_contacts(_soup(html), html)
-        assert "sales@example.com" in contacts.emails
+        assert "sales@acme.com" in contacts.emails
 
     def test_skips_placeholder_emails(self):
-        html = "<p>Use user@example.com as a template.</p>"
+        # Placeholder addresses AND any address on a placeholder domain are dropped.
+        html = "<p>Use user@example.com or contact@example.com as a template.</p>"
         contacts = extract_contacts(_soup(html), html)
         assert "user@example.com" not in contacts.emails
+        assert "contact@example.com" not in contacts.emails
 
     def test_extracts_tel_links(self):
         html = '<a href="tel:+1-555-123-4567">Call us</a>'

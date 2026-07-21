@@ -37,7 +37,7 @@ class TestLightTouchScan:
             '</head><body>'
             '<a href="/about">About</a>'
             '<a href="https://partner.com">Partner</a>'
-            'contact: hi@example.com'
+            'contact: hi@acme.com'
             '</body></html>'
         )
         mock_fetch.return_value = (
@@ -65,7 +65,7 @@ class TestLightTouchScan:
         assert "Nginx" in tech_names
         assert r["ssl"]["grade"] == "A"
         assert r["links"]["internal"] == ["https://example.com/about"]
-        assert any(e["email"] == "hi@example.com" for e in r["contacts"]["emails"])
+        assert any(e["email"] == "hi@acme.com" for e in r["contacts"]["emails"])
 
         # Stealth flag was set
         _args, kwargs = mock_fetch.call_args

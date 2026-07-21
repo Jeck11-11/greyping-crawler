@@ -20,6 +20,15 @@ def _fingerprint(*parts: str) -> str:
 # Request models
 # ---------------------------------------------------------------------------
 
+class CompanySize(str, Enum):
+    """Organisation size tier for financial impact calibration."""
+    micro = "micro"          # 1-10 employees
+    small = "small"          # 11-50 employees
+    medium = "medium"        # 51-250 employees
+    large = "large"          # 251-1000 employees
+    enterprise = "enterprise"  # 1000+ employees
+
+
 class ScanRequest(BaseModel):
     """Payload accepted by POST /scan."""
 
@@ -52,6 +61,15 @@ class ScanRequest(BaseModel):
         le=120,
         description="Per-page request timeout in seconds.",
     )
+    company_size: CompanySize | None = Field(
+        default=None,
+        description="Organisation size tier (micro/small/medium/large/enterprise). "
+                    "Calibrates financial impact estimates. Auto-inferred if omitted.",
+    )
+    scan_profile: str = Field(
+        default="passive_easm",
+        description="Scan profile. 'passive_easm' excludes active Nuclei vulnerability testing.",
+    )
 
 
 class ReconRequest(BaseModel):
@@ -68,6 +86,10 @@ class ReconRequest(BaseModel):
         ge=5,
         le=120,
         description="Per-request timeout in seconds.",
+    )
+    company_size: CompanySize | None = Field(
+        default=None,
+        description="Organisation size tier. Calibrates financial impact estimates.",
     )
 
 
@@ -148,7 +170,11 @@ class EmailFinding(BaseModel):
 
 
 class PhoneFinding(BaseModel):
-    phone: str
+    phone: str = Field(description="Normalized (E.164 where possible) value; canonical key.")
+    raw_value: str = Field(default="", description="Original formatting as seen on the page.")
+    normalized_value: str | None = Field(default=None, description="E.164 form, or null if not resolvable.")
+    country: str = Field(default="", description="ISO country inferred from the domain region, if any.")
+    confidence: str = Field(default="high", description="high / low. Low = bare national fragment.")
     found_on: list[str] = Field(
         default_factory=list,
         description="Page URLs where this phone number was found.",
@@ -158,6 +184,10 @@ class PhoneFinding(BaseModel):
 class SocialFinding(BaseModel):
     url: str
     platform: str = Field(default="", description="Detected platform name.")
+    link_type: str = Field(
+        default="organisation_profile",
+        description="organisation_profile / share_link / tracking_link / embedded_widget / unknown.",
+    )
     found_on: list[str] = Field(
         default_factory=list,
         description="Page URLs where this social profile was found.",
@@ -248,6 +278,19 @@ class HeaderFinding(BaseModel):
         return self
 
 
+class CORSAnalysis(BaseModel):
+    """Detailed CORS policy analysis extracted from Access-Control-* headers."""
+
+    origin_policy: str = Field(default="", description="Access-Control-Allow-Origin value.")
+    allows_credentials: bool = False
+    allowed_methods: list[str] = Field(default_factory=list)
+    allowed_headers: list[str] = Field(default_factory=list)
+    exposed_headers: list[str] = Field(default_factory=list)
+    max_age: int | None = None
+    null_origin: bool = False
+    issues: list[str] = Field(default_factory=list)
+
+
 class SecurityHeadersResult(BaseModel):
     """Aggregated security-headers audit for a target."""
 
@@ -256,6 +299,7 @@ class SecurityHeadersResult(BaseModel):
     findings: list[HeaderFinding] = Field(default_factory=list)
     server: str = Field(default="", description="Server header value (information leakage).")
     powered_by: str = Field(default="", description="X-Powered-By value (information leakage).")
+    cors: CORSAnalysis = Field(default_factory=CORSAnalysis, description="Detailed CORS policy analysis.")
 
 
 class CookieFinding(BaseModel):
@@ -307,6 +351,15 @@ class SSLCertResult(BaseModel):
     grade: str = Field(default="")
     tls_version: str = Field(default="")
     cipher: str = Field(default="")
+    cipher_bits: int = Field(default=0, description="Negotiated cipher key exchange bit length.")
+    cipher_strength: str = Field(default="", description="strong (256+), acceptable (128), weak (<128).")
+    pfs: bool = Field(default=False, description="True if cipher uses ephemeral key exchange (ECDHE/DHE).")
+    key_type: str = Field(default="", description="Public key type: RSA, EC, DSA, Ed25519, Ed448.")
+    key_size: int = Field(default=0, description="Public key size in bits (e.g. 2048, 256).")
+    ocsp_must_staple: bool = Field(default=False, description="True if cert has OCSP Must-Staple extension.")
+    ocsp_responder: str = Field(default="", description="OCSP responder URL from AIA extension.")
+    ca_issuers_url: str = Field(default="", description="CA Issuers URL from AIA extension.")
+    has_sct: bool = Field(default=False, description="True if cert has embedded Signed Certificate Timestamps.")
     issues: list[str] = Field(default_factory=list)
 
 
@@ -345,6 +398,14 @@ class SitemapResult(BaseModel):
     url_count: int = 0
     urls: list[str] = Field(default_factory=list, description="Up to 100 URLs.")
     nested_sitemaps: list[str] = Field(default_factory=list)
+    sitemap_indexes_found: int = Field(default=0, description="Sitemap index documents seen.")
+    nested_sitemaps_found: int = Field(default=0, description="Nested sitemap files referenced by an index.")
+    sitemap_urls_extracted: int = Field(default=0, description="Page URLs actually extracted.")
+    sitemap_parse_status: str = Field(
+        default="",
+        description="complete / partial / empty / failed. 'partial' = an index/nested "
+        "sitemaps exist but page URLs were not (yet) extracted.",
+    )
 
 
 class IoCFinding(BaseModel):
@@ -402,6 +463,28 @@ class JSIntelResult(BaseModel):
     sourcemaps_found: list[str] = Field(default_factory=list)
     recovered_source_files: list[str] = Field(default_factory=list)
     error: str | None = None
+
+
+class ThirdPartyResource(BaseModel):
+    url: str = ""
+    resource_type: str = Field(default="", description="script or stylesheet.")
+    provider: str = Field(default="unknown", description="CDN provider name or 'unknown'.")
+    library: str = Field(default="", description="Detected library name or empty.")
+    version: str = Field(default="", description="Extracted version or empty.")
+    has_sri: bool = Field(default=False, description="True if integrity= attribute present.")
+    risk: str = Field(default="info", description="high, medium, low, or info.")
+    issues: list[str] = Field(default_factory=list)
+
+
+class SupplyChainResult(BaseModel):
+    total_external_resources: int = 0
+    scripts_without_sri: int = 0
+    stylesheets_without_sri: int = 0
+    vulnerable_libraries: int = 0
+    providers: list[str] = Field(default_factory=list, description="Unique CDN/hosting providers.")
+    resources: list[ThirdPartyResource] = Field(default_factory=list)
+    risk_summary: str = Field(default="none", description="Overall risk: high, medium, low, none.")
+    issues: list[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -472,6 +555,63 @@ class CAARecord(BaseModel):
     ttl: int = 0
 
 
+class TLSARecord(BaseModel):
+    usage: int = Field(0, description="Certificate usage: 0=CA, 1=EE, 2=Trust anchor, 3=Domain-issued.")
+    selector: int = Field(0, description="Selector: 0=full cert, 1=SubjectPublicKeyInfo.")
+    matching_type: int = Field(0, description="Matching type: 0=exact, 1=SHA-256, 2=SHA-512.")
+    certificate_data: str = Field("", description="Hex-encoded certificate association data.")
+    port: int = Field(0, description="Port from the TLSA query name (e.g. 25, 443).")
+    protocol: str = Field("tcp", description="Protocol from the TLSA query name.")
+    ttl: int = 0
+
+
+class SSHFPRecord(BaseModel):
+    algorithm: int = Field(0, description="Key algorithm: 1=RSA, 2=DSA, 3=ECDSA, 4=Ed25519.")
+    fingerprint_type: int = Field(0, description="Hash type: 1=SHA-1, 2=SHA-256.")
+    fingerprint: str = Field("", description="Hex-encoded key fingerprint.")
+    ttl: int = 0
+
+
+class DSRecord(BaseModel):
+    key_tag: int = 0
+    algorithm: int = Field(0, description="DNSSEC algorithm number.")
+    digest_type: int = Field(0, description="Digest type: 1=SHA-1, 2=SHA-256, 4=SHA-384.")
+    digest: str = Field("", description="Hex-encoded digest.")
+    ttl: int = 0
+
+
+class NAPTRRecord(BaseModel):
+    order: int = 0
+    preference: int = 0
+    flags: str = Field("", description="NAPTR flags (e.g. 'S', 'A', 'U').")
+    service: str = Field("", description="Service field (e.g. 'SIP+D2U', 'E2U+sip').")
+    regexp: str = Field("", description="Regular expression for URI rewriting.")
+    replacement: str = Field("", description="Replacement domain name.")
+    ttl: int = 0
+
+
+class LOCRecord(BaseModel):
+    latitude: float = Field(0.0, description="Latitude in decimal degrees.")
+    longitude: float = Field(0.0, description="Longitude in decimal degrees.")
+    altitude: float = Field(0.0, description="Altitude in meters above sea level.")
+    size: float = Field(0.0, description="Diameter of sphere enclosing the location (meters).")
+    horizontal_precision: float = Field(0.0, description="Horizontal precision (meters).")
+    vertical_precision: float = Field(0.0, description="Vertical precision (meters).")
+    ttl: int = 0
+
+
+class RPRecord(BaseModel):
+    mbox: str = Field("", description="Email address of responsible person (encoded as DNS name).")
+    txt_domain: str = Field("", description="Domain name with TXT record containing additional info.")
+    ttl: int = 0
+
+
+class HINFORecord(BaseModel):
+    cpu: str = Field("", description="CPU type string.")
+    os: str = Field("", description="Operating system string.")
+    ttl: int = 0
+
+
 class DNSResult(BaseModel):
     domain: str
     a_records: list[ARecord] = Field(default_factory=list)
@@ -485,6 +625,56 @@ class DNSResult(BaseModel):
     caa_records: list[CAARecord] = Field(default_factory=list, description="CAA records — which CAs may issue certs.")
     ptr_records: list[str] = Field(default_factory=list, description="Reverse DNS lookup results for A records.")
     dnssec: bool | None = Field(default=None, description="True if DNSSEC is enabled (DNSKEY found).")
+    tlsa_records: list[TLSARecord] = Field(default_factory=list, description="DANE/TLSA certificate association records.")
+    sshfp_records: list[SSHFPRecord] = Field(default_factory=list, description="SSH key fingerprints published in DNS.")
+    ds_records: list[DSRecord] = Field(default_factory=list, description="DNSSEC delegation signer records.")
+    naptr_records: list[NAPTRRecord] = Field(default_factory=list, description="Naming authority pointer records (SIP/VoIP).")
+    loc_records: list[LOCRecord] = Field(default_factory=list, description="Geographic location records.")
+    rp_records: list[RPRecord] = Field(default_factory=list, description="Responsible person records.")
+    hinfo_records: list[HINFORecord] = Field(default_factory=list, description="Host information records (CPU/OS).")
+    error: str | None = None
+
+
+class SPFMechanism(BaseModel):
+    """A single parsed SPF mechanism (ip4, ip6, a, mx, include, redirect, etc.)."""
+    qualifier: str = Field(default="+", description="'+' pass, '-' fail, '~' softfail, '?' neutral.")
+    mechanism: str = Field(..., description="Mechanism type: ip4, ip6, a, mx, include, redirect, all, etc.")
+    value: str = Field(default="", description="Mechanism value (IP, CIDR, domain).")
+
+
+class SPFIncludeNode(BaseModel):
+    """One node in the SPF include resolution tree."""
+    domain: str
+    raw_record: str | None = None
+    service: str = Field(default="", description="Mapped service name, e.g. 'Google Workspace'.")
+    ip4_ranges: list[str] = Field(default_factory=list)
+    ip6_ranges: list[str] = Field(default_factory=list)
+    children: list[SPFIncludeNode] = Field(default_factory=list)
+    error: str | None = None
+
+
+class SPFSenderInfo(BaseModel):
+    """An IP address extracted from SPF with ASN enrichment."""
+    ip: str
+    source: str = Field(default="", description="Which SPF mechanism/include produced this IP.")
+    asn: int | None = None
+    asn_name: str = ""
+    prefix: str = ""
+    country_code: str = ""
+    provider: str = ""
+
+
+class SPFIntelResult(BaseModel):
+    """Full SPF intelligence: mechanisms, include tree, resolved IPs, enrichment."""
+    domain: str
+    mechanisms: list[SPFMechanism] = Field(default_factory=list)
+    include_tree: list[SPFIncludeNode] = Field(default_factory=list)
+    ip4_ranges: list[str] = Field(default_factory=list, description="All ip4 CIDRs/addresses from SPF chain.")
+    ip6_ranges: list[str] = Field(default_factory=list, description="All ip6 CIDRs/addresses from SPF chain.")
+    senders: list[SPFSenderInfo] = Field(default_factory=list, description="Enriched sender IPs (ASN/org/country).")
+    services_detected: list[str] = Field(default_factory=list, description="Mapped third-party services from includes.")
+    dns_lookup_count: int = Field(default=0, description="Total DNS lookups in SPF chain (RFC 7208 limit: 10).")
+    exceeds_lookup_limit: bool = Field(default=False, description="True if >10 DNS lookups required.")
     error: str | None = None
 
 
@@ -497,6 +687,7 @@ class SPFResult(BaseModel):
     )
     includes: list[str] = Field(default_factory=list, description="SPF include: targets.")
     issues: list[str] = Field(default_factory=list)
+    intel: SPFIntelResult | None = Field(default=None, description="Deep SPF enumeration results.")
 
 
 class DMARCResult(BaseModel):
@@ -506,6 +697,11 @@ class DMARCResult(BaseModel):
     subdomain_policy: str | None = Field(default=None, description="sp= tag.")
     pct: int = Field(default=100, description="Percentage of messages subject to policy.")
     rua: list[str] = Field(default_factory=list, description="Aggregate report URIs.")
+    inherited_from_parent: bool = Field(
+        default=False,
+        description="True when policy is inherited from the organizational domain's DMARC (sp=/p=).",
+    )
+    parent_domain: str = Field(default="", description="Organizational domain the policy was inherited from.")
     issues: list[str] = Field(default_factory=list)
 
 
@@ -515,16 +711,42 @@ class DKIMResult(BaseModel):
     issues: list[str] = Field(default_factory=list)
 
 
+class MTASTSResult(BaseModel):
+    raw: str | None = None
+    exists: bool = False
+    version: str = Field(default="", description="MTA-STS version (e.g. 'STSv1').")
+    sts_id: str = Field(default="", description="MTA-STS policy ID.")
+    issues: list[str] = Field(default_factory=list)
+
+
+class BIMIResult(BaseModel):
+    raw: str | None = None
+    exists: bool = False
+    version: str = Field(default="", description="BIMI version (e.g. 'BIMI1').")
+    logo_url: str = Field(default="", description="URL to the brand logo SVG (l= tag).")
+    authority_url: str = Field(default="", description="URL to the VMC certificate (a= tag).")
+    issues: list[str] = Field(default_factory=list)
+
+
 class EmailSecurityResult(BaseModel):
     domain: str
     spf: SPFResult = Field(default_factory=SPFResult)
     dmarc: DMARCResult = Field(default_factory=DMARCResult)
     dkim: DKIMResult = Field(default_factory=DKIMResult)
+    mta_sts: MTASTSResult = Field(default_factory=MTASTSResult)
+    bimi: BIMIResult = Field(default_factory=BIMIResult)
     mail_providers: list[str] = Field(
         default_factory=list,
         description="Inferred mail providers from MX records (e.g. 'Google Workspace', 'Microsoft 365').",
     )
     grade: str = Field(default="", description="A-F email security grade.")
+    is_organizational_domain: bool = Field(default=True, description="True for the apex/registrable domain.")
+    receives_mail: bool = Field(default=False, description="Has MX records.")
+    applicable: bool = Field(default=True, description="Whether core email-security checks apply to this host.")
+    email_security_status: str = Field(
+        default="assessed",
+        description="assessed / not_applicable. Non-mail web subdomains are not_applicable.",
+    )
     error: str | None = None
 
 
@@ -602,107 +824,19 @@ class PassiveIntelResult(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# FAIR (Factor Analysis of Information Risk) signals
-# ---------------------------------------------------------------------------
-# Maps the evidence collected by the scanner onto the FAIR risk model so a
-# downstream system (e.g. Xano) can assemble a consistent risk profile.
-#
-# FAIR core relationships:
-#   Risk               = Loss Event Frequency × Loss Magnitude
-#   Loss Event Freq.   = Threat Event Freq. × Vulnerability
-#   Vulnerability      = Threat Capability vs. Resistance (Control) Strength
-#
-# Every score is normalised 0-100 (higher = more of that factor), regardless
-# of whether the factor is "bad" (TEF, Vulnerability, Loss Magnitude) or
-# "good" (Control Strength). Loss Event Frequency and the composite
-# overall_risk are derived from the factor scores.
-
-
-class FAIRSignal(BaseModel):
-    """A single piece of evidence mapped onto a FAIR factor."""
-
-    name: str = Field(..., description="Short machine-readable identifier, e.g. 'exposed_secrets'.")
-    score: int = Field(
-        ..., ge=0, le=100,
-        description="Normalised 0-100 score for this signal within its factor.",
-    )
-    weight: float = Field(
-        default=1.0, ge=0.0,
-        description="Relative weight of this signal when aggregating the factor.",
-    )
-    evidence: list[str] = Field(
-        default_factory=list,
-        description="Human-readable evidence strings that drove the score.",
-    )
-
-
-class FAIRFactor(BaseModel):
-    """A single FAIR factor: its aggregated score and the underlying signals."""
-
-    score: int = Field(
-        default=0, ge=0, le=100,
-        description="Weighted average of the signal scores below.",
-    )
-    signals: list[FAIRSignal] = Field(default_factory=list)
-    notes: str = Field(
-        default="",
-        description="Free-form commentary about how this factor was derived.",
-    )
-
-
-class FAIRSignals(BaseModel):
-    """FAIR-aligned risk signals derived from a single DomainResult."""
-
-    threat_event_frequency: FAIRFactor = Field(
-        default_factory=FAIRFactor,
-        description="How often threat actors are likely to engage with this target.",
-    )
-    vulnerability: FAIRFactor = Field(
-        default_factory=FAIRFactor,
-        description="Probability that a threat engagement becomes a loss event.",
-    )
-    control_strength: FAIRFactor = Field(
-        default_factory=FAIRFactor,
-        description="Strength of observed defences (WAF, TLS, headers, cookies…).",
-    )
-    loss_magnitude: FAIRFactor = Field(
-        default_factory=FAIRFactor,
-        description="Potential impact of a loss event based on observed exposure.",
-    )
-    loss_event_frequency: int = Field(
-        default=0, ge=0, le=100,
-        description="Derived: TEF × Vulnerability, attenuated by Control Strength.",
-    )
-    overall_risk: int = Field(
-        default=0, ge=0, le=100,
-        description="Derived composite: LEF × Loss Magnitude (both normalised).",
-    )
-    risk_tier: str = Field(
-        default="low",
-        description="Banded tier: low (0-24), medium (25-49), high (50-74), critical (75-100).",
-    )
-    confidence: str = Field(
-        default="low",
-        description=(
-            "How much evidence was available when scoring. 'low' for passive, "
-            "'medium' for light-touch, 'high' for standard/full scans."
-        ),
-    )
-    scan_mode: str = Field(
-        default="",
-        description="Which orchestrator produced these signals: passive, lighttouch, standard, full.",
-    )
-
-
-# ---------------------------------------------------------------------------
 # EASM report layer — business-grade classification and prioritization
 # ---------------------------------------------------------------------------
 
 
 class FindingClassification(str, Enum):
     confirmed_issue = "confirmed_issue"
+    potential_issue = "potential_issue"
+    risk_candidate = "risk_candidate"
+    attack_surface_observation = "attack_surface_observation"
+    hardening_recommendation = "hardening_recommendation"
     platform_behavior = "platform_behavior"
     informational = "informational"
+    not_actionable = "not_actionable"
     false_positive_likely = "false_positive_likely"
 
 
@@ -715,6 +849,53 @@ class FindingOwner(str, Enum):
     informational = "not_actionable"
 
 
+class AssetClassification(BaseModel):
+    """Classification of a single asset (hostname), driving which checks apply.
+
+    Website/privacy/cookie/email checks must not be applied to non-website
+    assets (autodiscover, mail, API, CDN edge, unresolved), so grading a
+    Microsoft 365 autodiscover CNAME as a customer website is avoided.
+    """
+
+    hostname: str = ""
+    asset_type: str = Field(
+        default="unknown",
+        description="website / web_application / api / mail_service / autodiscover_service / "
+        "remote_access / vpn / cdn_proxy / cloud_service / redirect / parked_domain / "
+        "inactive / unresolved / unknown.",
+    )
+    provider: str = ""
+    evidence: list[str] = Field(default_factory=list)
+    website_checks_applicable: bool = True
+    privacy_checks_applicable: bool = True
+    cookie_checks_applicable: bool = True
+    email_domain_checks_applicable: bool = True
+
+
+class ModuleStatus(BaseModel):
+    """Standard status object for a single scanner module.
+
+    Distinguishes intentionally-skipped and not-applicable modules from failures
+    and from clean passes, so absence of a module is never rendered as a
+    successful security pass.
+    """
+
+    module: str
+    status: str = Field(
+        default="not_run",
+        description="completed / completed_with_findings / partial / failed / "
+        "not_run / skipped / not_applicable / not_assessed.",
+    )
+    attempted: bool = False
+    successful: bool = False
+    applicable: bool = True
+    included_in_scan_profile: bool = True
+    intentional: bool = Field(default=False, description="True when the module was deliberately excluded.")
+    error: str | None = None
+    findings_count: int | None = Field(default=None, description="null when not applicable/unknown.")
+    message: str = ""
+
+
 class PrioritizedFinding(BaseModel):
     id: str = Field(..., description="Stable identifier, e.g. 'missing_hsts', 'exposed_env'.")
     title: str
@@ -722,6 +903,14 @@ class PrioritizedFinding(BaseModel):
     severity: str = Field(default="medium", description="critical / high / medium / low / info.")
     classification: FindingClassification
     confidence: str = Field(default="medium", description="high / medium / low.")
+    evidence_quality: str = Field(
+        default="strong_inference",
+        description="direct / strong_inference / weak_inference / unverified.",
+    )
+    affects_risk_score: bool = Field(
+        default=True,
+        description="Whether this finding contributes to the overall grade/score.",
+    )
     owner: FindingOwner
     platform_name: str = Field(default="", description="If owner=platform, which platform.")
     why_it_matters: str = Field(default="", description="One sentence explaining business impact.")
@@ -864,6 +1053,72 @@ class ExecutiveSummary(BaseModel):
     key_positives: list[str] = Field(default_factory=list, description="Up to 3 strengths observed.")
     key_concerns: list[str] = Field(default_factory=list, description="Up to 3 areas of concern.")
     scan_coverage: str = Field(default="", description="full / lighttouch / passive.")
+    overall_grade: str = Field(default="", description="Overall domain risk grade A+ to F.")
+    grades: dict[str, str] = Field(
+        default_factory=dict,
+        description="Per-domain grades: ssl, headers, email, overall.",
+    )
+    top_risks: list[str] = Field(default_factory=list, description="Top 3 findings by severity.")
+    recommendations: list[str] = Field(default_factory=list, description="Top 3 remediation priorities.")
+
+
+class RansomwareIndex(BaseModel):
+    """Ransomware Susceptibility Index — 0-100 score predicting attack likelihood."""
+    score: int = Field(default=0, ge=0, le=100)
+    tier: str = Field(default="low", description="low / medium / high / critical.")
+    factors: list[str] = Field(default_factory=list, description="Contributing risk factors.")
+    mitigations: list[str] = Field(default_factory=list, description="Observed defences reducing risk.")
+
+
+class FinancialImpact(BaseModel):
+    """Estimated financial exposure based on FAIR risk quantification.
+
+    Estimates are only produced from customer-supplied / validated inputs. With
+    only auto-inferred business size, status is 'insufficient_data' and the
+    numeric estimate is suppressed (zeros) rather than presenting a spurious
+    dollar range.
+    """
+    financial_impact_status: str = Field(
+        default="insufficient_data",
+        description="estimated / insufficient_data.",
+    )
+    estimated_annual_loss_low: int = Field(default=0, description="Conservative annual loss estimate ($).")
+    estimated_annual_loss_high: int = Field(default=0, description="Upper annual loss estimate ($).")
+    single_incident_cost_low: int = Field(default=0, description="Per-incident cost low ($).")
+    single_incident_cost_high: int = Field(default=0, description="Per-incident cost high ($).")
+    methodology: str = Field(default="Performed downstream from validated business inputs.")
+    factors: list[str] = Field(default_factory=list)
+
+
+class ComplianceControl(BaseModel):
+    """A single compliance control and its observed status."""
+    control_id: str = ""
+    control_name: str = ""
+    status: str = Field(default="not_tested", description="pass / fail / not_tested.")
+    findings: list[str] = Field(default_factory=list, description="Finding IDs affecting this control.")
+
+
+class CompliancePosture(BaseModel):
+    """Compliance readiness for a single framework."""
+    framework: str = ""
+    controls_tested: int = 0
+    controls_passing: int = 0
+    controls_failing: int = 0
+    controls_not_tested: int = 0
+    readiness_score: int = Field(default=0, ge=0, le=100)
+    controls: list[ComplianceControl] = Field(default_factory=list)
+
+
+class RemediationItem(BaseModel):
+    """A single ranked remediation action for the action plan."""
+
+    rank: int = 0
+    title: str = ""
+    category: str = ""
+    severity: str = ""
+    confidence: str = ""
+    action: str = ""
+    affects_grade: bool = True
 
 
 class EASMReport(BaseModel):
@@ -871,8 +1126,13 @@ class EASMReport(BaseModel):
 
     generated_at: str = ""
     scan_mode: str = ""
+    overall_grade: str = Field(default="", description="Aggregate A+ to F domain risk grade.")
     executive_summary: ExecutiveSummary = Field(default_factory=ExecutiveSummary)
+    ransomware_susceptibility: RansomwareIndex = Field(default_factory=RansomwareIndex)
+    financial_impact: FinancialImpact = Field(default_factory=FinancialImpact)
+    compliance_posture: list[CompliancePosture] = Field(default_factory=list)
     asset_context: AssetContext | None = None
+    asset_classification: AssetClassification | None = None
     cloud_assets: list[CloudAsset] = Field(default_factory=list)
     recon_artifacts: list[ReconArtifact] = Field(default_factory=list)
     prioritized_findings: list[PrioritizedFinding] = Field(
@@ -882,6 +1142,22 @@ class EASMReport(BaseModel):
     confirmed_issues: int = 0
     platform_behaviors: int = 0
     informational_count: int = 0
+    severity_breakdown: dict[str, int] = Field(
+        default_factory=dict,
+        description="Count of confirmed, scoring findings by severity (critical/high/medium/low).",
+    )
+    posture_summary: dict[str, str] = Field(
+        default_factory=dict,
+        description="Plain-English posture per assessed category (e.g. {'TLS':'Strong','Email':'Needs attention'}).",
+    )
+    remediation_priorities: list[RemediationItem] = Field(
+        default_factory=list,
+        description="Top customer-owned fixes, ranked most-impactful first.",
+    )
+    risk_tier: str = Field(default="", description="low / moderate / high / critical — must agree with the grade.")
+    scan_confidence: str = Field(default="", description="Scan confidence, shown separately from risk.")
+    score_inputs: list[str] = Field(default_factory=list, description="Findings/inputs that affected the grade.")
+    excluded_inputs: list[str] = Field(default_factory=list, description="Findings excluded from scoring, with reason.")
     compliance_summary: dict[str, int] = Field(
         default_factory=dict,
         description="Count of findings per compliance framework.",
@@ -980,18 +1256,6 @@ class KatanaCrawlResult(BaseModel):
     endpoints: list[KatanaEndpoint] = Field(default_factory=list)
     error: str | None = None
 
-
-class NaabuPort(BaseModel):
-    host: str = ""
-    ip: str = ""
-    port: int = 0
-    protocol: str = "tcp"
-
-
-class NaabuScanResult(BaseModel):
-    target: str
-    ports: list[NaabuPort] = Field(default_factory=list)
-    error: str | None = None
 
 
 class CVEFinding(BaseModel):
@@ -1092,10 +1356,19 @@ class PrivacyIndicator(BaseModel):
 
 class PrivacyComplianceResult(BaseModel):
     domain: str
-    score: int = 0
+    score: int = Field(default=0, description="Privacy INDICATORS score (0-100). Not a compliance determination.")
     grade: str = ""
     indicators: list[PrivacyIndicator] = Field(default_factory=list)
     consent_tool: str = ""
+    consent_platform: str = Field(default="not_detected", description="detected / not_detected.")
+    nonessential_tracking_before_consent: str = Field(
+        default="not_assessed",
+        description="not_assessed / observed / none_observed. External scan cannot prove this.",
+    )
+    manual_validation_required: bool = Field(
+        default=True,
+        description="An external scan cannot determine GDPR/CCPA compliance.",
+    )
     error: str | None = None
 
 
@@ -1124,19 +1397,38 @@ class EmailValidationResult(BaseModel):
 
 
 class WAFResult(BaseModel):
-    """WAF / firewall detection result from C99 API."""
+    """WAF / firewall detection result from C99 API.
+
+    CDN proxying (Cloudflare/Akamai/Fastly in front of a site) does NOT prove a
+    WAF ruleset is enabled — these are tracked separately so the report never
+    says both "WAF not detected" and "WAF/CDN: Cloudflare".
+    """
     url: str = ""
     detected: bool = False
     firewall: str | None = None
     confidence: str = "high"
+    cdn_detected: bool = False
+    cdn_provider: str = ""
+    reverse_proxy_detected: bool = False
+    waf_detected: bool | None = Field(default=None, description="null = not assessed.")
+    waf_provider: str = ""
+    waf_detection_status: str = Field(default="not_assessed", description="detected / not_detected / not_assessed.")
     error: str | None = None
 
 
 class OpenPort(BaseModel):
     port: int
-    service: str = ""
+    service: str = Field(default="", description="Best-effort service name (a guess unless confirmed).")
+    service_confirmed: bool = Field(default=False, description="True only when a banner/protocol confirmed it.")
     banner: str = ""
     is_risky: bool = False
+    network_attribution: str = Field(
+        default="origin",
+        description="origin / shared_cdn_edge. Shared-edge ports aren't the customer's origin.",
+    )
+    origin_exposure_confirmed: bool = Field(default=False, description="Port confirmed on the customer's origin.")
+    affects_risk_score: bool = Field(default=True, description="Shared-CDN ports do not affect the score.")
+    confidence: str = Field(default="medium", description="high / medium / low.")
     fingerprint: str = Field(default="", description="Stable hash for cross-scan deduplication.")
 
     @model_validator(mode="after")
@@ -1149,6 +1441,8 @@ class OpenPort(BaseModel):
 class PortScanResult(BaseModel):
     target: str
     ip: str = ""
+    network_attribution: str = Field(default="origin", description="origin / shared_cdn_edge.")
+    cdn_provider: str = ""
     open_ports: list[OpenPort] = Field(default_factory=list)
     ports_scanned: int = 0
     scan_duration_seconds: float = 0
@@ -1169,8 +1463,15 @@ class CloudAssetFinding(BaseModel):
     provider: str = ""
     url: str = ""
     status: str = ""  # "public", "exists_private"
+    classification: str = Field(
+        default="unverified_asset_candidate",
+        description="unverified_asset_candidate / publicly_exposed_bucket / confirmed_owned_bucket.",
+    )
+    ownership_verified: bool = False
+    public_exposure_confirmed: bool = False
+    affects_risk_score: bool = False
     evidence: list[str] = Field(default_factory=list)
-    severity: str = "critical"
+    severity: str = "informational"
     fingerprint: str = Field(default="", description="Stable hash for cross-scan deduplication.")
 
     @model_validator(mode="after")
@@ -1180,10 +1481,32 @@ class CloudAssetFinding(BaseModel):
         return self
 
 
+class CloudServiceFinding(BaseModel):
+    """A cloud service detected via DNS records."""
+    service: str = Field(..., description="e.g. 'aws_cloudfront', 'azure_app_service', 'aws_rds'")
+    provider: str = Field(..., description="e.g. 'aws', 'azure', 'gcp'")
+    record_type: str = Field(default="CNAME", description="DNS record type where found")
+    record_value: str = Field(default="", description="The actual DNS record value")
+    is_database: bool = Field(default=False)
+    severity: str = Field(default="info")
+    fingerprint: str = Field(default="")
+
+    @model_validator(mode="after")
+    def _set_fingerprint(self) -> CloudServiceFinding:
+        if not self.fingerprint:
+            self.fingerprint = _fingerprint("cloudsvc", self.service, self.record_value)
+        return self
+
+
 class CloudAssetResult(BaseModel):
     domain: str
     findings: list[CloudAssetFinding] = Field(default_factory=list)
+    cloud_services: list[CloudServiceFinding] = Field(default_factory=list)
     buckets_checked: int = 0
+    bucket_candidates_checked: int = Field(default=0, description="Total name×provider probes performed.")
+    potential_bucket_name_matches: int = Field(default=0, description="Names that returned a recognisable response.")
+    confirmed_owned_buckets: int = Field(default=0, description="Buckets proven to belong to the customer.")
+    publicly_exposed_buckets: int = Field(default=0, description="Buckets confirmed publicly readable.")
     scan_duration_seconds: float = 0
     error: str | None = None
 
@@ -1221,6 +1544,8 @@ class DomainSummary(BaseModel):
     emails_found: int = 0
     phone_numbers_found: int = 0
     social_profiles_found: int = 0
+    organisation_social_profiles: int = Field(default=0, description="Owned social profiles (excludes share buttons).")
+    social_share_links: int = Field(default=0, description="Social share/tracking links (not owned profiles).")
     internal_links_found: int = 0
     external_links_found: int = 0
     secrets_found: int = 0
@@ -1246,11 +1571,21 @@ class DomainSummary(BaseModel):
     open_ports: int = 0
     risky_ports: int = 0
     cloud_buckets_found: int = 0
-    screenshots_taken: int = 0
+    cloud_services_found: int = 0
+    exposed_databases_found: int = 0
+    spf_senders_found: int = Field(default=0, description="Unique IPs/CIDRs in SPF chain.")
+    spf_services_found: int = Field(default=0, description="Third-party services identified in SPF includes.")
+    vulnerable_libraries: int = Field(default=0, description="Known vulnerable third-party libraries detected.")
+    scripts_without_sri: int = Field(default=0, description="External scripts missing Subresource Integrity.")
+    screenshot_attempts: int = Field(default=0, description="Screenshot captures attempted.")
+    screenshots_taken: int = Field(default=0, description="Screenshots that produced real image data.")
+    screenshot_failures: int = Field(default=0, description="Screenshot attempts that produced no image.")
     typosquat_candidates: int = Field(default=0, description="Registered lookalike domains found.")
     waf_detected: str = Field(default="", description="WAF/firewall product detected by C99 (empty if none).")
-    privacy_score: int = Field(default=0, description="Privacy compliance score (0-100).")
+    privacy_score: int = Field(default=0, description="Privacy indicators score (0-100). Not a compliance determination.")
     consent_tool: str = Field(default="", description="Detected cookie consent management tool.")
+    overall_grade: str = Field(default="", description="Aggregate domain risk grade A+ to F.")
+    ransomware_susceptibility: int = Field(default=0, description="Ransomware Susceptibility Index 0-100.")
 
 
 # ---------------------------------------------------------------------------
@@ -1342,8 +1677,7 @@ class AttackPathResult(BaseModel):
 
 
 class RiskAssessmentGroup(BaseModel):
-    """Risk scoring and EASM report."""
-    fair_signals: FAIRSignals | None = None
+    """EASM report container. Quantitative risk modelling is done downstream."""
     easm_report: EASMReport | None = None
 
 
@@ -1366,6 +1700,7 @@ class DomainResult(BaseModel):
     technologies: list[TechFinding] = Field(default_factory=list)
     breaches: list[BreachRecord] = Field(default_factory=list)
     js_intel: JSIntelResult | None = None
+    supply_chain: SupplyChainResult | None = None
     port_scan: PortScanResult | None = None
     cloud_assets: CloudAssetResult | None = None
     passive_intel: PassiveIntelSlim | None = None
@@ -1451,10 +1786,6 @@ class DomainResult(BaseModel):
     @property
     def url_reputation(self) -> URLReputationResult | None:
         return self.reputation.url if self.reputation else None
-
-    @property
-    def fair_signals(self) -> FAIRSignals | None:
-        return self.risk_assessment.fair_signals if self.risk_assessment else None
 
     @property
     def easm_report(self) -> EASMReport | None:
@@ -1575,3 +1906,186 @@ class GitHubSecretsReconResult(BaseModel):
     error: str | None = None
 
 
+# ---------------------------------------------------------------------------
+# Board report models (estate-wide aggregation)
+# ---------------------------------------------------------------------------
+
+class BoardScanRequest(BaseModel):
+    """Payload accepted by POST /scan/board."""
+
+    root_domain: str = Field(
+        ...,
+        description="Root domain to discover subdomains for and scan (e.g. example.com).",
+    )
+    render_js: bool = Field(default=True, description="Render JS-heavy pages via headless browser.")
+    follow_redirects: bool = Field(default=True, description="Follow HTTP redirects.")
+    max_depth: int = Field(default=2, ge=0, le=5, description="Maximum crawl depth per subdomain.")
+    check_breaches: bool = Field(default=True, description="Query breach databases.")
+    timeout: int = Field(default=30, ge=5, le=120, description="Per-page request timeout in seconds.")
+    company_size: CompanySize | None = Field(
+        default=None,
+        description="Organisation size tier. Calibrates financial impact estimates.",
+    )
+    max_subdomains: int = Field(
+        default=0,
+        ge=0,
+        description="Cap on subdomains to scan (0 = unlimited).",
+    )
+
+
+class SubdomainReportRow(BaseModel):
+    """Per-subdomain summary row in the board report."""
+
+    target: str
+    grade: str = ""
+    ransomware_score: int = 0
+    financial_low: int = 0
+    financial_high: int = 0
+    confirmed_issues: int = 0
+    total_findings: int = 0
+    top_concern: str = ""
+
+
+class BoardFinding(BaseModel):
+    """A deduplicated finding with the list of subdomains it affects."""
+
+    finding: PrioritizedFinding
+    affected_subdomains: list[str] = Field(default_factory=list)
+
+
+class BoardReport(BaseModel):
+    """Estate-wide board-level EASM report aggregating per-subdomain scans."""
+
+    root_domain: str = ""
+    generated_at: str = ""
+    subdomains_discovered: int = 0
+    subdomains_scanned: int = 0
+    estate_grade: str = ""
+    grade_distribution: dict[str, int] = Field(default_factory=dict)
+    executive_summary: ExecutiveSummary = Field(default_factory=ExecutiveSummary)
+    ransomware_susceptibility: RansomwareIndex = Field(default_factory=RansomwareIndex)
+    financial_impact: FinancialImpact = Field(default_factory=FinancialImpact)
+    financial_breakdown: list[SubdomainReportRow] = Field(default_factory=list)
+    compliance_posture: list[CompliancePosture] = Field(default_factory=list)
+    compliance_summary: dict[str, int] = Field(default_factory=dict)
+    top_findings: list[BoardFinding] = Field(default_factory=list)
+    subdomain_rows: list[SubdomainReportRow] = Field(default_factory=list)
+    asset_summary: dict[str, int] = Field(
+        default_factory=dict,
+        description="Asset counts by type/status (total_assets, websites, mail_services, unresolved, etc.).",
+    )
+    total_confirmed_issues: int = 0
+
+
+class BoardReportResponse(BaseModel):
+    """Top-level JSON response returned by POST /scan/board."""
+
+    scan_id: str
+    status: str = Field(default="completed", description="completed / partial / failed.")
+    started_at: str = ""
+    finished_at: str = ""
+    board_report: BoardReport = Field(default_factory=BoardReport)
+    results: list[DomainResult] = Field(default_factory=list)
+    scanner_version: str = Field(default="1.4.0")
+
+
+class BoardScanAck(BaseModel):
+    """Immediate 202 response from POST /scan/board (async job started)."""
+
+    scan_id: str
+    status: str = Field(default="pending", description="pending / running / completed / partial / failed.")
+    root_domain: str = ""
+    started_at: str = ""
+    poll_url: str = ""
+    message: str = ""
+
+
+class BoardJobStatus(BaseModel):
+    """Polling response from GET /scan/board/{scan_id}."""
+
+    scan_id: str
+    status: str = Field(default="pending", description="pending / running / completed / partial / failed.")
+    root_domain: str = ""
+    started_at: str = ""
+    finished_at: str = ""
+    subdomains_discovered: int = 0
+    targets_total: int = 0
+    targets_completed: int = 0
+    board_report: BoardReport | None = None
+    results: list[DomainResult] = Field(default_factory=list)
+    error: str | None = None
+    scanner_version: str = Field(default="1.4.0")
+
+
+# ---------------------------------------------------------------------------
+# Aggregation endpoint — accepts stored EASM data, returns board report
+# ---------------------------------------------------------------------------
+
+class SubdomainEASMInput(BaseModel):
+    """One subdomain's stored EASM data, as sent from Xano."""
+
+    target: str = Field(..., description="Hostname, e.g. 'www.bwg.ie' or 'mail.bwg.ie'.")
+    overall_grade: str = Field(default="", description="A+ to F grade for this subdomain.")
+    prioritized_findings: list[PrioritizedFinding] = Field(default_factory=list)
+    financial_impact: FinancialImpact = Field(default_factory=FinancialImpact)
+    ransomware_susceptibility: RansomwareIndex = Field(default_factory=RansomwareIndex)
+    executive_summary: ExecutiveSummary = Field(default_factory=ExecutiveSummary)
+    confirmed_issues: int = 0
+    total_findings: int = 0
+    compliance_summary: dict[str, int] = Field(default_factory=dict)
+
+
+class AggregateRequest(BaseModel):
+    """Payload for POST /report/aggregate — accepts stored EASM data from Xano."""
+
+    root_domain: str = Field(..., description="Root domain, e.g. 'bwg.ie'.")
+    subdomains: list[SubdomainEASMInput] = Field(
+        ...,
+        min_length=1,
+        description="EASM report data for each subdomain.",
+    )
+    company_size: CompanySize | None = Field(
+        default=None,
+        description="Organisation size tier (optional, for context).",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Async batch scan — scan many targets in the background, webhook each result
+# ---------------------------------------------------------------------------
+
+class AsyncScanAck(BaseModel):
+    """Immediate 202 response from POST /scan/async (background job started)."""
+
+    scan_id: str
+    status: str = Field(default="pending", description="pending / running / completed / failed.")
+    targets_total: int = 0
+    poll_url: str = ""
+    message: str = ""
+
+
+class AsyncScanRow(BaseModel):
+    """Per-target progress row in an async scan job (lightweight, no full result)."""
+
+    target: str
+    status: str = Field(default="pending", description="pending / completed / failed.")
+    grade: str = ""
+
+
+class AsyncScanJobStatus(BaseModel):
+    """Polling response from GET /scan/async/{scan_id}.
+
+    Progress only — full per-target results are delivered via webhook, not held
+    here, so a 265-target job doesn't balloon memory.
+    """
+
+    scan_id: str
+    status: str = Field(default="pending", description="pending / running / completed / failed.")
+    started_at: str = ""
+    finished_at: str = ""
+    targets_total: int = 0
+    targets_completed: int = 0
+    targets_failed: int = 0
+    delivered: int = Field(default=0, description="Results successfully POSTed to the webhook.")
+    rows: list[AsyncScanRow] = Field(default_factory=list)
+    error: str | None = None

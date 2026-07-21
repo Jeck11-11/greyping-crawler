@@ -52,6 +52,13 @@ _SKIP_NAMES = frozenset({
     "caa_records",
     "ptr_records",
     "cname_chain",
+    "tlsa_records",
+    "sshfp_records",
+    "ds_records",
+    "naptr_records",
+    "loc_records",
+    "rp_records",
+    "hinfo_records",
     # Passive intel lists
     "issuers",
     "recent_snapshots",
@@ -62,6 +69,9 @@ _SKIP_NAMES = frozenset({
     "mail_providers",
     "selectors_checked",
     "selectors_found",
+    "allowed_methods",
+    "allowed_headers",
+    "exposed_headers",
     "includes",
     "rua",
     "records",
@@ -110,6 +120,17 @@ _SKIP_NAMES = frozenset({
     # Links group — empty means none found
     "internal",
     "external",
+    # Supply chain — empty means no external resources found
+    "resources",
+    "providers",
+    # Risk assessment — empty means no data available
+    "factors",
+    "mitigations",
+    "compliance_posture",
+    "controls",
+    "top_risks",
+    "recommendations",
+    "grades",
     # Port scan — empty means no open ports / no banner
     "open_ports",
     "banner",

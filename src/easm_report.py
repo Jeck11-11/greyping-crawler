@@ -2,8 +2,8 @@
 
 Post-processes a populated ``DomainResult`` into a business-grade report
 with classified findings, ownership tagging, condensed summaries, and a
-deterministic executive summary. Follows the same pattern as
-``fair_signals.py`` — a pure function, no I/O, no scanner changes.
+deterministic executive summary — a pure function, no I/O. The grade is
+evidence-driven; quantitative risk modelling (FAIR) is performed downstream.
 """
 
 from __future__ import annotations
@@ -16,12 +16,17 @@ from datetime import datetime, timezone
 from .models import (
     AssetContext,
     CloudAsset,
+    ComplianceControl,
+    CompliancePosture,
     DomainResult,
     EASMReport,
     ExecutiveSummary,
+    FinancialImpact,
     FindingClassification,
     FindingOwner,
     PrioritizedFinding,
+    RansomwareIndex,
+    RemediationItem,
     ReconArtifact,
 )
 
@@ -77,6 +82,34 @@ _COMPLIANCE_MAP: dict[str, list[str]] = {
         "PCI-DSS 4.1",
         "ISO 27001 A.10.1.1",
     ],
+    "ssl_weak_cipher": [
+        "PCI-DSS 4.1",
+        "ISO 27001 A.10.1.1",
+    ],
+    "ssl_no_pfs": [
+        "PCI-DSS 4.1",
+        "ISO 27001 A.10.1.1",
+    ],
+    "ssl_weak_key": [
+        "PCI-DSS 4.1",
+        "ISO 27001 A.10.1.1",
+    ],
+    "ssl_no_sct": [
+        "ISO 27001 A.10.1.1",
+    ],
+    # -- Supply chain ------------------------------------------------------
+    "supply_chain_vulnerable_lib": [
+        "PCI-DSS 6.2",
+        "ISO 27001 A.12.6.1",
+    ],
+    "supply_chain_no_sri": [
+        "PCI-DSS 6.5.7",
+        "ISO 27001 A.14.1.2",
+    ],
+    "supply_chain_compromised_provider": [
+        "PCI-DSS 6.2",
+        "ISO 27001 A.15.1.1",
+    ],
     # -- Email security ----------------------------------------------------
     "email_no_spf": [
         "ISO 27001 A.13.2.1",
@@ -123,6 +156,18 @@ _COMPLIANCE_MAP: dict[str, list[str]] = {
         "PCI-DSS 6.5.8",
         "ISO 27001 A.14.1.2",
     ],
+    "cors_null_origin": [
+        "PCI-DSS 6.5.8",
+        "ISO 27001 A.14.1.2",
+    ],
+    "cors_sensitive_methods": [
+        "PCI-DSS 6.5.8",
+        "ISO 27001 A.14.1.2",
+    ],
+    "cors_sensitive_headers_exposed": [
+        "PCI-DSS 6.5.8",
+        "ISO 27001 A.14.1.2",
+    ],
     # -- Directory listing / GraphQL ----------------------------------------
     "directory_listing": [
         "PCI-DSS 6.5.8",
@@ -143,9 +188,8 @@ _COMPLIANCE_MAP: dict[str, list[str]] = {
         "ISO 27001 A.14.1.2",
     ],
     # -- Typosquatting / brand protection -----------------------------------
-    "typosquat_domains_found": [
-        "ISO 27001 A.7.2.2",
-    ],
+    # (No control mapping — a registered lookalike is brand intelligence, not an
+    # awareness-training failure. Mapping removed.)
     # -- Privacy compliance -------------------------------------------------
     "missing_privacy_policy": [
         "GDPR Art.13",
@@ -335,6 +379,22 @@ def _sort_findings(findings: list[PrioritizedFinding]) -> list[PrioritizedFindin
 # Classifiers — one per finding source
 # ---------------------------------------------------------------------------
 
+# Business consequence (not the fix) for each missing header — populates
+# why_it_matters so it never just restates recommended_action.
+_HEADER_CONSEQUENCE: dict[str, str] = {
+    "strict-transport-security": "Visitors can be silently downgraded to unencrypted HTTP on a hostile network, exposing sessions and credentials.",
+    "content-security-policy": "If any script-injection flaw exists, there is no browser-side backstop to stop it executing — a defence-in-depth gap, not proof of XSS.",
+    "x-frame-options": "The site can be embedded in an attacker's page and used for click-jacking (tricking users into unintended clicks).",
+    "x-content-type-options": "Browsers may mis-interpret file types, which can turn an uploaded file into executable script.",
+    "referrer-policy": "Full URLs (which can contain tokens or IDs) may leak to third-party sites via the Referer header.",
+    "permissions-policy": "Browser features like camera, microphone and geolocation are not explicitly restricted for embedded content.",
+    "cross-origin-opener-policy": "Cross-origin popups share a browsing context, enabling some side-channel attacks.",
+    "cross-origin-resource-policy": "Resources can be read cross-origin, aiding certain data-theft techniques.",
+    "x-permitted-cross-domain-policies": "Legacy Adobe clients could load cross-domain data policies.",
+    "cache-control": "Sensitive responses may be cached by browsers or shared proxies and exposed to later users of the same device.",
+}
+
+
 def _classify_header_findings(
     result: DomainResult, platform: str, profile: PlatformProfile,
 ) -> list[PrioritizedFinding]:
@@ -371,7 +431,9 @@ def _classify_header_findings(
                     classification=FindingClassification.confirmed_issue,
                     confidence="high",
                     owner=FindingOwner.customer,
-                    why_it_matters=h.recommendation or f"Missing {h.header} weakens browser-side protections.",
+                    why_it_matters=_HEADER_CONSEQUENCE.get(
+                        hdr_lower, f"Missing {h.header} weakens browser-side protections."
+                    ),
                     business_impact="Web security hygiene",
                     evidence=[f"{h.header} not present in response"],
                     recommended_action=h.recommendation or f"Add {h.header} header to server configuration.",
@@ -394,19 +456,66 @@ def _classify_header_findings(
             ))
         elif h.status == "misconfigured" and h.header == "Access-Control-Allow-Origin":
             is_wildcard = h.value == "*"
+            is_null = h.value == "null"
+            if is_null:
+                findings.append(PrioritizedFinding(
+                    id="cors_null_origin",
+                    title="CORS allows null origin (file:// bypass risk)",
+                    category="security_headers",
+                    severity="high",
+                    classification=FindingClassification.confirmed_issue,
+                    confidence="high",
+                    owner=FindingOwner.customer,
+                    why_it_matters=h.recommendation,
+                    business_impact="Cross-origin data theft via sandboxed iframe or local file exploit",
+                    evidence=[f"Access-Control-Allow-Origin: {h.value}"],
+                    recommended_action=h.recommendation,
+                    source_field="security_headers",
+                ))
+            else:
+                findings.append(PrioritizedFinding(
+                    id="cors_wildcard" if is_wildcard else "cors_credentials",
+                    title="CORS wildcard allows any origin" if is_wildcard
+                        else "CORS with credentials — verify trusted origin",
+                    category="security_headers",
+                    severity=h.severity,
+                    classification=FindingClassification.confirmed_issue,
+                    confidence="high",
+                    owner=FindingOwner.customer,
+                    why_it_matters=h.recommendation,
+                    business_impact="Cross-origin data theft risk" if is_wildcard
+                        else "Authenticated cross-origin request risk",
+                    evidence=[f"Access-Control-Allow-Origin: {h.value}"],
+                    recommended_action=h.recommendation,
+                    source_field="security_headers",
+                ))
+        elif h.status == "misconfigured" and h.header == "Access-Control-Allow-Methods":
             findings.append(PrioritizedFinding(
-                id="cors_wildcard" if is_wildcard else "cors_credentials",
-                title="CORS wildcard allows any origin" if is_wildcard
-                    else "CORS with credentials — verify trusted origin",
+                id="cors_sensitive_methods",
+                title="CORS exposes sensitive HTTP methods",
                 category="security_headers",
                 severity=h.severity,
                 classification=FindingClassification.confirmed_issue,
                 confidence="high",
                 owner=FindingOwner.customer,
                 why_it_matters=h.recommendation,
-                business_impact="Cross-origin data theft risk" if is_wildcard
-                    else "Authenticated cross-origin request risk",
-                evidence=[f"Access-Control-Allow-Origin: {h.value}"],
+                business_impact="Cross-origin state-changing requests risk",
+                evidence=[f"Access-Control-Allow-Methods: {h.value}"],
+                recommended_action=h.recommendation,
+                source_field="security_headers",
+            ))
+        elif h.status == "misconfigured" and h.header == "Access-Control-Expose-Headers":
+            findings.append(PrioritizedFinding(
+                id="cors_sensitive_headers_exposed",
+                title="CORS exposes sensitive response headers",
+                category="security_headers",
+                severity=h.severity,
+                classification=FindingClassification.confirmed_issue,
+                confidence="high",
+                owner=FindingOwner.customer,
+                why_it_matters=h.recommendation,
+                business_impact="Credential or token leakage via cross-origin reads",
+                evidence=[f"Access-Control-Expose-Headers: {h.value}"],
                 recommended_action=h.recommendation,
                 source_field="security_headers",
             ))
@@ -466,7 +575,31 @@ def _classify_ssl_findings(result: DomainResult) -> list[PrioritizedFinding]:
     if not ssl or (not ssl.grade and not ssl.issues and ssl.cert_valid):
         return findings
 
-    if not ssl.cert_valid:
+    first_issue = ssl.issues[0].lower() if ssl.issues else ""
+    # A failed TLS connection (host unreachable, refused, timed out) is NOT a
+    # certificate validity problem — the host may be internal-only or offline.
+    # Don't mislabel it as a critical "invalid certificate" finding.
+    unreachable = (
+        first_issue.startswith("tls connection failed")
+        or "could not parse hostname" in first_issue
+    )
+
+    if not ssl.cert_valid and unreachable:
+        findings.append(PrioritizedFinding(
+            id="ssl_unreachable",
+            title="HTTPS endpoint unreachable",
+            category="ssl",
+            severity="info",
+            classification=FindingClassification.informational,
+            confidence="medium",
+            owner=FindingOwner.customer,
+            why_it_matters="The scanner could not establish a TLS connection. The host may be internal-only, firewalled, or offline — this is not necessarily a certificate problem.",
+            business_impact="No external HTTPS exposure detected for this host",
+            evidence=ssl.issues[:3] or ["TLS connection could not be established"],
+            recommended_action="Confirm whether this host is meant to be publicly reachable. If it is internal-only, no action is needed.",
+            source_field="ssl_certificate",
+        ))
+    elif not ssl.cert_valid:
         findings.append(PrioritizedFinding(
             id="ssl_invalid",
             title="Invalid SSL/TLS certificate",
@@ -496,6 +629,86 @@ def _classify_ssl_findings(result: DomainResult) -> list[PrioritizedFinding]:
             recommended_action="Renew the certificate before expiry. Enable auto-renewal if possible.",
             source_field="ssl_certificate",
         ))
+
+    if ssl.cipher_bits and ssl.cipher_bits < 128:
+        findings.append(PrioritizedFinding(
+            id="ssl_weak_cipher",
+            title=f"Weak cipher key length ({ssl.cipher_bits} bits)",
+            category="ssl",
+            severity="medium",
+            classification=FindingClassification.confirmed_issue,
+            confidence="high",
+            owner=FindingOwner.customer,
+            why_it_matters="Cipher suites with less than 128-bit keys are vulnerable to brute-force attacks.",
+            business_impact="Encrypted traffic may be decryptable",
+            evidence=[f"Cipher: {ssl.cipher}, Key bits: {ssl.cipher_bits}"],
+            recommended_action="Configure the server to use cipher suites with at least 128-bit keys (256-bit preferred).",
+            source_field="ssl_certificate",
+        ))
+
+    if ssl.cipher and not ssl.pfs:
+        findings.append(PrioritizedFinding(
+            id="ssl_no_pfs",
+            title="No Perfect Forward Secrecy (PFS)",
+            category="ssl",
+            severity="medium",
+            classification=FindingClassification.confirmed_issue,
+            confidence="high",
+            owner=FindingOwner.customer,
+            why_it_matters="Without PFS, compromise of the server's private key allows decryption of all past traffic.",
+            business_impact="Historical traffic decryption risk if key is compromised",
+            evidence=[f"Cipher: {ssl.cipher} (no ECDHE/DHE key exchange)"],
+            recommended_action="Configure the server to prefer ECDHE or DHE cipher suites for forward secrecy.",
+            source_field="ssl_certificate",
+        ))
+
+    if ssl.key_type == "RSA" and 0 < ssl.key_size < 2048:
+        findings.append(PrioritizedFinding(
+            id="ssl_weak_key",
+            title=f"Weak RSA key ({ssl.key_size} bits)",
+            category="ssl",
+            severity="high",
+            classification=FindingClassification.confirmed_issue,
+            confidence="high",
+            owner=FindingOwner.customer,
+            why_it_matters="RSA keys under 2048 bits are considered factorizable with modern computing resources.",
+            business_impact="Certificate key may be compromised",
+            evidence=[f"Key: {ssl.key_type} {ssl.key_size}-bit"],
+            recommended_action="Reissue the certificate with at least a 2048-bit RSA key (3072+ recommended).",
+            source_field="ssl_certificate",
+        ))
+    elif ssl.key_type == "EC" and 0 < ssl.key_size < 256:
+        findings.append(PrioritizedFinding(
+            id="ssl_weak_key",
+            title=f"Weak EC key ({ssl.key_size} bits)",
+            category="ssl",
+            severity="high",
+            classification=FindingClassification.confirmed_issue,
+            confidence="high",
+            owner=FindingOwner.customer,
+            why_it_matters="EC keys under 256 bits do not provide adequate security for modern threats.",
+            business_impact="Certificate key may be compromised",
+            evidence=[f"Key: {ssl.key_type} {ssl.key_size}-bit"],
+            recommended_action="Reissue the certificate with at least a P-256 (256-bit) EC key.",
+            source_field="ssl_certificate",
+        ))
+
+    if ssl.grade and ssl.key_type and not ssl.has_sct:
+        findings.append(PrioritizedFinding(
+            id="ssl_no_sct",
+            title="No embedded Certificate Transparency timestamps",
+            category="ssl",
+            severity="low",
+            classification=FindingClassification.informational,
+            confidence="medium",
+            owner=FindingOwner.customer,
+            why_it_matters="Certificates without SCTs may not comply with Certificate Transparency requirements.",
+            business_impact="Limited — most CAs now include SCTs by default",
+            evidence=["Certificate does not contain embedded SCT extension"],
+            recommended_action="Ensure the CA includes SCTs when issuing/renewing the certificate.",
+            source_field="ssl_certificate",
+        ))
+
     return findings
 
 
@@ -520,41 +733,64 @@ def _classify_secret_findings(result: DomainResult) -> list[PrioritizedFinding]:
     return findings
 
 
+# Login/admin pages that are EXPECTED to be reachable on their platform — a
+# reachable page here is attack surface, not a confirmed vulnerability.
+_EXPECTED_LOGIN_PATHS = {
+    "/wp-login.php", "/wp-admin/", "/wp-admin", "/administrator/",
+    "/administrator", "/user/login", "/admin/login", "/login",
+}
+
+
 def _classify_path_findings(result: DomainResult) -> list[PrioritizedFinding]:
     findings: list[PrioritizedFinding] = []
     for p in result.sensitive_paths:
         if p.severity == "info":
             continue
-        if p.status_code == 403:
+        if p.status_code != 200:
+            continue
+        path_norm = p.path.rstrip("/").lower() or "/"
+        if p.path.lower() in _EXPECTED_LOGIN_PATHS or path_norm in {x.rstrip("/") for x in _EXPECTED_LOGIN_PATHS}:
+            # A reachable login page (e.g. /wp-login.php) is expected on many
+            # sites. Report it as an attack-surface observation, not a confirmed
+            # vulnerability, and do not let it inflate ransomware risk.
             findings.append(PrioritizedFinding(
-                id=f"path_{p.path.strip('/').replace('/', '_').replace('.', '_')}",
-                title=f"Path {p.path} exists (403 Forbidden)",
-                category="sensitive_paths",
-                severity="info",
-                classification=FindingClassification.informational,
-                confidence="low",
-                owner=FindingOwner.customer,
-                why_it_matters="Path exists but is access-restricted. Confirms infrastructure detail.",
-                business_impact="Minimal — access denied",
-                evidence=[f"{p.url} → {p.status_code}"],
-                recommended_action="Verify access controls are intentional. Consider returning 404 instead.",
-                source_field="sensitive_paths",
-            ))
-        elif p.status_code == 200:
-            findings.append(PrioritizedFinding(
-                id=f"path_{p.path.strip('/').replace('/', '_').replace('.', '_')}",
-                title=f"Exposed sensitive path: {p.path}",
-                category="sensitive_paths",
-                severity=p.severity,
-                classification=FindingClassification.confirmed_issue,
+                id=f"login_reachable_{path_norm.strip('/').replace('/', '_').replace('.', '_') or 'root'}",
+                title=f"Login page reachable: {p.path}",
+                category="attack_surface",
+                severity="informational",
+                classification=FindingClassification.attack_surface_observation,
                 confidence="high",
+                evidence_quality="direct",
+                affects_risk_score=False,
                 owner=FindingOwner.customer,
-                why_it_matters=p.risk or "Sensitive file or directory is publicly accessible.",
-                business_impact="Data exposure, credential leakage",
-                evidence=[f"{p.url} → {p.status_code} ({p.content_length} bytes)"],
-                recommended_action="Remove or restrict access to this path immediately.",
+                why_it_matters=(
+                    "A reachable login/admin page is expected on many platforms. "
+                    "It is attack surface, not a confirmed vulnerability."
+                ),
+                business_impact="Attack surface (no confirmed vulnerability).",
+                evidence=[f"{p.url} → {p.status_code}", "confirmed_vulnerability=false"],
+                recommended_action=(
+                    "Ensure rate-limiting/MFA are in place; restrict by IP if the "
+                    "panel is not for public use. No action if intentionally public."
+                ),
                 source_field="sensitive_paths",
             ))
+            continue
+        findings.append(PrioritizedFinding(
+            id=f"path_{p.path.strip('/').replace('/', '_').replace('.', '_')}",
+            title=f"Exposed sensitive path: {p.path}",
+            category="sensitive_paths",
+            severity=p.severity,
+            classification=FindingClassification.confirmed_issue,
+            confidence="high",
+            evidence_quality="direct",
+            owner=FindingOwner.customer,
+            why_it_matters=p.risk or "Sensitive file or directory is publicly accessible.",
+            business_impact="Data exposure, credential leakage",
+            evidence=[f"{p.url} → {p.status_code} ({p.content_length} bytes)"],
+            recommended_action="Remove or restrict access to this path immediately.",
+            source_field="sensitive_paths",
+        ))
     return findings
 
 
@@ -589,7 +825,12 @@ def _classify_email_security(result: DomainResult) -> list[PrioritizedFinding]:
     if es.error:
         return findings
 
-    if not es.spf.exists:
+    # Core email security is assessed at the organizational domain (or any host
+    # that sends/receives mail). Ordinary non-mail web subdomains don't get an
+    # independent SPF/DMARC/MTA-STS F — a parent DMARC policy covers them.
+    applicable = getattr(es, "applicable", True)
+
+    if applicable and not es.spf.exists:
         findings.append(PrioritizedFinding(
             id="email_no_spf",
             title="No SPF record configured",
@@ -620,7 +861,7 @@ def _classify_email_security(result: DomainResult) -> list[PrioritizedFinding]:
             source_field="passive_intel.email_security",
         ))
 
-    if not es.dmarc.exists:
+    if applicable and not es.dmarc.exists:
         findings.append(PrioritizedFinding(
             id="email_no_dmarc",
             title="No DMARC record configured",
@@ -631,7 +872,7 @@ def _classify_email_security(result: DomainResult) -> list[PrioritizedFinding]:
             owner=FindingOwner.customer,
             why_it_matters="Without DMARC, email spoofing of this domain is trivial and undetectable.",
             business_impact="Phishing, brand impersonation, BEC risk",
-            evidence=["No _dmarc TXT record found"],
+            evidence=["No _dmarc TXT record found (and no applicable parent policy)"],
             recommended_action="Add a DMARC record (e.g., v=DMARC1; p=quarantine; rua=mailto:dmarc@yourdomain.com).",
             source_field="passive_intel.email_security",
         ))
@@ -666,6 +907,117 @@ def _classify_email_security(result: DomainResult) -> list[PrioritizedFinding]:
             recommended_action="Verify DKIM is configured with your email provider. Non-standard selectors may exist.",
             source_field="passive_intel.email_security",
         ))
+
+    # Duplicate SPF records (RFC 7208 violation)
+    if es.spf.exists and any(
+        "Multiple SPF records" in issue for issue in es.spf.issues
+    ):
+        findings.append(PrioritizedFinding(
+            id="email_duplicate_spf",
+            title="Multiple SPF records (RFC 7208 violation)",
+            category="email_security",
+            severity="medium",
+            classification=FindingClassification.confirmed_issue,
+            confidence="high",
+            owner=FindingOwner.customer,
+            why_it_matters="RFC 7208 requires exactly one SPF record per domain. Multiple records cause receiving servers to return permerror, effectively disabling SPF.",
+            business_impact="Email authentication completely broken — SPF provides no protection",
+            evidence=[i for i in es.spf.issues if "Multiple SPF" in i],
+            recommended_action="Merge all SPF records into a single TXT record combining all include: and ip4: mechanisms.",
+            source_field="passive_intel.email_security",
+        ))
+
+    # SPF deep intel findings.
+    spf_intel = es.spf.intel
+    if spf_intel:
+        if spf_intel.exceeds_lookup_limit:
+            findings.append(PrioritizedFinding(
+                id="spf_lookup_limit_exceeded",
+                title=f"SPF exceeds 10-lookup limit ({spf_intel.dns_lookup_count} lookups)",
+                category="email_security",
+                severity="medium",
+                classification=FindingClassification.confirmed_issue,
+                confidence="high",
+                owner=FindingOwner.customer,
+                why_it_matters="RFC 7208 limits SPF to 10 DNS lookups. Exceeding this causes receiving servers to return permerror, breaking email authentication.",
+                business_impact="Email delivery failures and SPF bypass",
+                evidence=[f"SPF chain requires {spf_intel.dns_lookup_count} DNS lookups (limit: 10)"],
+                recommended_action="Flatten SPF includes by replacing nested includes with direct ip4/ip6 mechanisms, or use an SPF flattening service.",
+                source_field="passive_intel.email_security.spf.intel",
+            ))
+
+        if spf_intel.services_detected:
+            findings.append(PrioritizedFinding(
+                id="spf_services_enumerated",
+                title=f"{len(spf_intel.services_detected)} email service(s) identified via SPF",
+                category="email_security",
+                severity="info",
+                classification=FindingClassification.informational,
+                confidence="high",
+                owner=FindingOwner.not_actionable,
+                why_it_matters="SPF includes reveal third-party email services used by the organisation.",
+                business_impact="Attack surface awareness — each service is a potential phishing vector",
+                evidence=[f"Services: {', '.join(spf_intel.services_detected)}"],
+                recommended_action="Audit whether all listed services are still actively used. Remove unused includes.",
+                source_field="passive_intel.email_security.spf.intel",
+            ))
+
+        if spf_intel.senders:
+            countries = sorted({s.country_code for s in spf_intel.senders if s.country_code})
+            providers = sorted({s.provider for s in spf_intel.senders if s.provider})
+            findings.append(PrioritizedFinding(
+                id="spf_senders_enumerated",
+                title=f"{len(spf_intel.senders)} sender IP(s) resolved from SPF chain",
+                category="email_security",
+                severity="info",
+                classification=FindingClassification.informational,
+                confidence="high",
+                owner=FindingOwner.not_actionable,
+                why_it_matters="SPF-authorized IP addresses reveal email sending infrastructure and hosting providers.",
+                business_impact="Infrastructure intelligence for security assessment",
+                evidence=[
+                    f"IP ranges: {len(spf_intel.ip4_ranges)} IPv4, {len(spf_intel.ip6_ranges)} IPv6",
+                    *(f"Provider: {p}" for p in providers[:5]),
+                    *(f"Country: {c}" for c in countries[:5]),
+                ],
+                recommended_action="Review authorised sender list for unexpected or unused IP ranges.",
+                source_field="passive_intel.email_security.spf.intel",
+            ))
+
+    # MTA-STS — only meaningful for hosts that actually receive mail.
+    if applicable and getattr(es, "receives_mail", False) and not es.mta_sts.exists:
+        findings.append(PrioritizedFinding(
+            id="email_no_mta_sts",
+            title="No MTA-STS policy configured",
+            category="email_security",
+            severity="low",
+            classification=FindingClassification.informational,
+            confidence="high",
+            owner=FindingOwner.customer,
+            why_it_matters="MTA-STS enforces TLS for inbound email, preventing downgrade attacks.",
+            business_impact="Email in transit may be intercepted via TLS stripping",
+            evidence=["No _mta-sts TXT record found"],
+            recommended_action="Publish an MTA-STS policy to enforce TLS for inbound SMTP connections.",
+            source_field="passive_intel.email_security",
+        ))
+
+    # BIMI
+    if not es.bimi.exists:
+        findings.append(PrioritizedFinding(
+            id="email_no_bimi",
+            title="No BIMI record configured",
+            category="email_security",
+            severity="info",
+            classification=FindingClassification.informational,
+            confidence="high",
+            owner=FindingOwner.not_actionable,
+            why_it_matters="BIMI displays your brand logo in email clients, improving trust and recognition.",
+            business_impact="Missed brand visibility in email clients that support BIMI",
+            evidence=["No default._bimi TXT record found"],
+            recommended_action="Consider adding a BIMI record with your brand logo SVG and optional VMC certificate.",
+            source_field="passive_intel.email_security",
+        ))
+
     return findings
 
 
@@ -722,6 +1074,86 @@ def _classify_dns_findings(result: DomainResult) -> list[PrioritizedFinding]:
             business_impact="Accessibility gap for IPv6-only networks",
             evidence=["No AAAA records resolved"],
             recommended_action="Consider adding AAAA records if your hosting supports IPv6.",
+            source_field="passive_intel.dns",
+        ))
+
+    if dns.hinfo_records:
+        findings.append(PrioritizedFinding(
+            id="dns_hinfo_exposed",
+            title="HINFO records expose host OS/hardware details",
+            category="dns",
+            severity="medium",
+            classification=FindingClassification.confirmed_issue,
+            confidence="high",
+            owner=FindingOwner.customer,
+            why_it_matters="HINFO records reveal CPU and OS details, aiding targeted attacks.",
+            business_impact="Information leakage enables targeted exploitation",
+            evidence=[f"{r.cpu} / {r.os}" for r in dns.hinfo_records[:3]],
+            recommended_action="Remove HINFO records unless explicitly required.",
+            source_field="passive_intel.dns",
+        ))
+
+    if dns.loc_records:
+        findings.append(PrioritizedFinding(
+            id="dns_loc_exposed",
+            title="LOC records expose physical location",
+            category="dns",
+            severity="low",
+            classification=FindingClassification.informational,
+            confidence="high",
+            owner=FindingOwner.customer,
+            why_it_matters="LOC records publish geographic coordinates, potentially revealing data center or office locations.",
+            business_impact="Physical security intelligence leakage",
+            evidence=[f"lat={r.latitude:.4f}, lon={r.longitude:.4f}" for r in dns.loc_records[:3]],
+            recommended_action="Remove LOC records if physical location should not be publicly disclosed.",
+            source_field="passive_intel.dns",
+        ))
+
+    if dns.rp_records:
+        findings.append(PrioritizedFinding(
+            id="dns_rp_exposed",
+            title="RP records expose responsible person contact",
+            category="dns",
+            severity="low",
+            classification=FindingClassification.informational,
+            confidence="high",
+            owner=FindingOwner.customer,
+            why_it_matters="RP records reveal administrator email addresses, useful for social engineering.",
+            business_impact="Contact information leakage for targeted phishing",
+            evidence=[f"mbox={r.mbox}" for r in dns.rp_records[:3]],
+            recommended_action="Remove RP records if admin contacts should not be publicly exposed.",
+            source_field="passive_intel.dns",
+        ))
+
+    if dns.ds_records:
+        findings.append(PrioritizedFinding(
+            id="dns_ds_records_found",
+            title="DNSSEC delegation signer (DS) records found",
+            category="dns",
+            severity="info",
+            classification=FindingClassification.informational,
+            confidence="high",
+            owner=FindingOwner.not_actionable,
+            why_it_matters="DS records complete the DNSSEC chain of trust from the parent zone.",
+            business_impact="Strong DNS integrity protection",
+            evidence=[f"key_tag={r.key_tag}, algo={r.algorithm}" for r in dns.ds_records[:3]],
+            recommended_action="No action needed — this is a positive finding.",
+            source_field="passive_intel.dns",
+        ))
+
+    if dns.naptr_records:
+        findings.append(PrioritizedFinding(
+            id="dns_naptr_found",
+            title="NAPTR records reveal service infrastructure",
+            category="dns",
+            severity="info",
+            classification=FindingClassification.informational,
+            confidence="high",
+            owner=FindingOwner.not_actionable,
+            why_it_matters="NAPTR records reveal SIP/VoIP and other service endpoints.",
+            business_impact="Infrastructure intelligence — SIP/VoIP services exposed",
+            evidence=[f"service={r.service}, replacement={r.replacement}" for r in dns.naptr_records[:3]],
+            recommended_action="Ensure exposed services are properly secured.",
             source_field="passive_intel.dns",
         ))
 
@@ -1037,6 +1469,18 @@ def _detect_cloud_assets(result: DomainResult) -> list[CloudAsset]:
         except Exception:
             pass
 
+    # DNS-based cloud service findings.
+    if result.cloud_assets and result.cloud_assets.cloud_services:
+        for svc in result.cloud_assets.cloud_services:
+            key = f"dns:{svc.service}"
+            if key not in seen:
+                seen.add(key)
+                assets.append(CloudAsset(
+                    asset_type="database" if svc.is_database else "cloud_service",
+                    identifier=f"{svc.service} ({svc.record_value})",
+                    source="dns",
+                ))
+
     return assets
 
 
@@ -1073,6 +1517,11 @@ def _build_executive_summary(
     result: DomainResult,
     platform: str,
     scan_mode: str,
+    *,
+    overall_grade: str = "",
+    ransomware: RansomwareIndex | None = None,
+    financial: FinancialImpact | None = None,
+    compliance: list[CompliancePosture] | None = None,
 ) -> ExecutiveSummary:
     confirmed = [f for f in findings if f.classification == FindingClassification.confirmed_issue]
     critical_high = [f for f in confirmed if f.severity in ("critical", "high")]
@@ -1088,13 +1537,9 @@ def _build_executive_summary(
     else:
         risk_posture = "Low"
 
-    fair = result.fair_signals
-    if fair and fair.risk_tier == "critical":
-        risk_posture = "Critical"
-    elif fair and fair.risk_tier == "high" and risk_posture != "Critical":
-        risk_posture = "High"
-
     parts: list[str] = []
+    if overall_grade:
+        parts.append(f"Overall grade: {overall_grade}.")
     parts.append(f"{risk_posture} overall external risk posture.")
 
     if any(f.category == "secrets" for f in confirmed):
@@ -1111,6 +1556,24 @@ def _build_executive_summary(
         parts.append("Main exposure consists of standard web hygiene gaps.")
     else:
         parts.append("No evidence of leaked secrets, active compromise, or breach exposure.")
+
+    # Surface ransomware whenever it's above 'low' so a medium/high tier never
+    # sits silently next to a "Low" posture (which reads as a contradiction).
+    if ransomware and ransomware.tier != "low":
+        driver = f" — driven by {ransomware.factors[0].lower()}" if ransomware.factors else ""
+        parts.append(
+            f"Ransomware susceptibility is rated {ransomware.tier} ({ransomware.score}/100){driver}."
+        )
+
+    if financial and financial.estimated_annual_loss_high > 0:
+        lo = financial.estimated_annual_loss_low
+        hi = financial.estimated_annual_loss_high
+        if hi >= 1_000_000:
+            parts.append(f"Estimated annual loss exposure: ${lo / 1_000_000:.1f}M–${hi / 1_000_000:.1f}M.")
+        elif hi >= 10_000:
+            parts.append(f"Estimated annual loss exposure: ${round(lo / 1000)}K–${round(hi / 1000)}K.")
+        else:
+            parts.append(f"Estimated annual loss exposure: ${lo:,}–${hi:,}.")
 
     if platform:
         managed = _PLATFORM_PROFILES.get(platform, _NO_PLATFORM).managed_headers
@@ -1134,14 +1597,36 @@ def _build_executive_summary(
     es = result.dns.email_security if result.dns else None
     if es and not es.error and es.dmarc.exists and es.dmarc.policy in ("reject", "quarantine"):
         positives.append(f"DMARC enforcement active (p={es.dmarc.policy})")
-    waf_names = [t.name for t in result.technologies if t.name in (
+    cdn_names = [t.name for t in result.technologies if t.name in (
         "Cloudflare", "AWS CloudFront", "Fastly", "Akamai", "Imperva",
         "Sucuri", "F5 BIG-IP", "Azure Front Door",
     )]
-    if waf_names:
-        positives.append(f"WAF/CDN detected: {waf_names[0]}")
+    if result.waf and result.waf.waf_detected:
+        positives.append(f"WAF enabled: {result.waf.waf_provider or 'confirmed'}")
+    elif cdn_names or (result.waf and result.waf.cdn_detected):
+        name = (result.waf.cdn_provider if (result.waf and result.waf.cdn_provider)
+                else cdn_names[0])
+        positives.append(f"CDN / reverse proxy in front of origin: {name}")
+    if ransomware and ransomware.tier == "low":
+        positives.append(f"Low ransomware susceptibility ({ransomware.score}/100)")
 
-    concerns = [f.title for f in critical_high[:3]]
+    # Rank confirmed, scoring findings so the board always gets a top-risks and
+    # recommendations list — even when nothing reached high severity (after the
+    # header/CSP severity recalibration, "medium" is often the top tier present).
+    _sev_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+    ranked = sorted(
+        [f for f in confirmed if f.affects_risk_score],
+        key=lambda f: (_sev_rank.get(f.severity, 5), 0 if f.owner == FindingOwner.customer else 1),
+    )
+    # Prefer critical/high for the headline; fall back to the ranked list.
+    headline = critical_high[:3] or ranked[:3]
+    concerns = [f.title for f in headline]
+    top_risks = [f.title for f in headline]
+    recommendations = [f.recommended_action for f in ranked[:3] if f.recommended_action]
+
+    grades = _collect_grades(result)
+    if overall_grade:
+        grades["overall"] = overall_grade
 
     return ExecutiveSummary(
         risk_posture=risk_posture,
@@ -1149,6 +1634,10 @@ def _build_executive_summary(
         key_positives=positives[:3],
         key_concerns=concerns,
         scan_coverage=scan_mode,
+        overall_grade=overall_grade,
+        grades=grades,
+        top_risks=top_risks,
+        recommendations=recommendations,
     )
 
 
@@ -1161,28 +1650,34 @@ def _classify_typosquatting_findings(result: DomainResult) -> list[PrioritizedFi
     if not result.typosquatting or not result.typosquatting.registered_candidates:
         return findings
     for cand in result.typosquatting.registered_candidates[:10]:
-        if cand.similarity_score >= 0.9:
-            sev = "high"
-        elif cand.similarity_score >= 0.8:
-            sev = "medium"
-        else:
-            sev = "low"
+        # Registration alone is brand intelligence, not confirmed malicious use.
+        # Default to an informational risk_candidate that does not move the grade;
+        # escalation requires evidence of impersonation/abuse (not available here).
         findings.append(PrioritizedFinding(
             id="typosquat_domains_found",
-            title=f"Typosquat domain registered: {cand.domain}",
+            title=f"Registered lookalike domain: {cand.domain}",
             category="brand_protection",
-            severity=sev,
-            classification=FindingClassification.confirmed_issue,
+            severity="informational",
+            classification=FindingClassification.risk_candidate,
             confidence="high",
+            evidence_quality="direct",   # registration is direct evidence…
+            affects_risk_score=False,     # …but malicious use is unverified
             owner=FindingOwner.customer,
-            why_it_matters="Lookalike domains can be used for phishing, credential theft, or brand impersonation.",
-            business_impact="Phishing and brand reputation risk",
+            why_it_matters=(
+                "Registered lookalike domain identified. Ownership and malicious "
+                "use have not been confirmed."
+            ),
+            business_impact="Potential phishing/brand-impersonation surface (unconfirmed).",
             evidence=[
                 f"Domain: {cand.domain}",
                 f"Technique: {cand.technique}",
                 f"Resolves to: {', '.join(cand.a_records[:3])}",
+                "registered=true; ownership_verified=false; malicious_activity_confirmed=false",
             ],
-            recommended_action="Register this domain defensively or request takedown via the registrar.",
+            recommended_action=(
+                "Monitor. Investigate ownership and content before any takedown; "
+                "register defensively only if brand risk is confirmed."
+            ),
             source_field="typosquatting",
         ))
     return findings
@@ -1198,34 +1693,55 @@ def _classify_privacy_findings(result: DomainResult) -> list[PrioritizedFinding]
     pp = indicator_map.get("privacy_policy")
     if pp and not pp.present:
         findings.append(PrioritizedFinding(
-            id="missing_privacy_policy",
-            title="No privacy policy detected",
-            category="privacy_compliance",
-            severity="medium",
-            classification=FindingClassification.confirmed_issue,
-            confidence="medium",
+            id="privacy_policy_not_detected",
+            title="No privacy policy detected at common paths",
+            category="privacy_indicators",
+            severity="low",
+            classification=FindingClassification.potential_issue,
+            confidence="low",
+            evidence_quality="weak_inference",
+            affects_risk_score=False,
             owner=FindingOwner.customer,
-            why_it_matters="Privacy policies are required under GDPR, CCPA, and most privacy regulations.",
-            business_impact="Regulatory non-compliance risk",
-            evidence=["No /privacy or /privacy-policy page returned HTTP 200"],
-            recommended_action="Publish a privacy policy page and link to it from the website footer.",
+            why_it_matters=(
+                "No privacy policy was found at common paths. It may exist "
+                "elsewhere; manual validation is recommended. This is not a "
+                "confirmed regulatory violation."
+            ),
+            business_impact="Possible privacy-transparency gap (unconfirmed).",
+            evidence=["No /privacy or /privacy-policy page returned HTTP 200; footer link not detected"],
+            recommended_action="Confirm a privacy policy is published and linked from the footer.",
             source_field="privacy",
         ))
 
     cc = indicator_map.get("cookie_consent_tool")
     if cc and not cc.present:
+        # Absence of a recognised consent platform is NOT a confirmed regulatory
+        # violation. An external scan can't prove non-essential tracking fires
+        # before consent, so this stays a potential issue needing validation.
         findings.append(PrioritizedFinding(
-            id="missing_cookie_consent",
-            title="No cookie consent tool detected",
-            category="privacy_compliance",
-            severity="medium",
-            classification=FindingClassification.confirmed_issue,
-            confidence="medium",
+            id="consent_platform_not_detected",
+            title="No recognised consent-management platform observed",
+            category="privacy_indicators",
+            severity="informational",
+            classification=FindingClassification.potential_issue,
+            confidence="low",
+            evidence_quality="weak_inference",
+            affects_risk_score=False,
             owner=FindingOwner.customer,
-            why_it_matters="Cookie consent banners are required under GDPR and ePrivacy Directive for EU visitors.",
-            business_impact="Regulatory non-compliance risk for EU-facing sites",
-            evidence=["No consent management platform (OneTrust, Cookiebot, etc.) detected"],
-            recommended_action="Implement a cookie consent tool such as OneTrust, Cookiebot, or Osano.",
+            why_it_matters=(
+                "No recognised consent-management platform was observed. Manual "
+                "validation is required to determine whether consent is necessary "
+                "and correctly implemented."
+            ),
+            business_impact="Possible ePrivacy/GDPR consent gap (unconfirmed).",
+            evidence=[
+                "No consent platform (OneTrust, Cookiebot, Osano, etc.) fingerprinted",
+                "nonessential_tracking_before_consent=not_assessed; manual_validation_required=true",
+            ],
+            recommended_action=(
+                "Manually verify whether non-essential cookies/trackers run before "
+                "consent; implement a consent platform if required."
+            ),
             source_field="privacy",
         ))
 
@@ -1246,23 +1762,638 @@ def _classify_privacy_findings(result: DomainResult) -> list[PrioritizedFinding]
             source_field="privacy",
         ))
 
-    if result.privacy.score < 40:
+    # NOTE: the old "privacy_compliance_low" finding was circular — it restated
+    # the score as a confirmed regulatory issue. An external scan can't prove
+    # compliance, so it has been removed. The privacy indicators score is
+    # reported as an observation, not a confirmed violation.
+
+    return findings
+
+
+def _classify_cloud_findings(result: DomainResult) -> list[PrioritizedFinding]:
+    """Emit findings for exposed cloud databases and public buckets."""
+    findings: list[PrioritizedFinding] = []
+    if not result.cloud_assets:
+        return findings
+
+    for svc in result.cloud_assets.cloud_services:
+        if svc.is_database:
+            findings.append(PrioritizedFinding(
+                id="exposed_cloud_database",
+                title=f"Cloud database endpoint in DNS: {svc.service}",
+                category="cloud_infrastructure",
+                severity="high",
+                classification=FindingClassification.confirmed_issue,
+                confidence="high",
+                owner=FindingOwner.customer,
+                why_it_matters="Database endpoints resolvable via public DNS may be accessible from the internet.",
+                business_impact="Potential data breach if database accepts external connections",
+                evidence=[
+                    f"Service: {svc.service}",
+                    f"Provider: {svc.provider}",
+                    f"DNS record ({svc.record_type}): {svc.record_value}",
+                ],
+                recommended_action="Restrict database to private subnets/VPC. Remove public DNS records pointing to database endpoints.",
+                source_field="cloud_assets",
+            ))
+
+    for bucket in result.cloud_assets.findings:
+        if bucket.status == "public":
+            findings.append(PrioritizedFinding(
+                id="public_cloud_bucket",
+                title=f"Public {bucket.provider} bucket: {bucket.bucket_name}",
+                category="cloud_infrastructure",
+                severity="critical",
+                classification=FindingClassification.confirmed_issue,
+                confidence="high",
+                owner=FindingOwner.customer,
+                why_it_matters="Publicly accessible cloud storage may expose sensitive data.",
+                business_impact="Data breach via unauthenticated bucket access",
+                evidence=[f"URL: {bucket.url}", f"Status: {bucket.status}"] + bucket.evidence,
+                recommended_action="Restrict bucket access. Review and remove any sensitive data.",
+                source_field="cloud_assets",
+            ))
+
+    return findings
+
+
+def _classify_supply_chain_findings(result: DomainResult) -> list[PrioritizedFinding]:
+    """Emit findings for third-party supply chain risks."""
+    findings: list[PrioritizedFinding] = []
+    if not result.supply_chain:
+        return findings
+
+    sc = result.supply_chain
+
+    vuln_resources = [r for r in sc.resources if r.risk == "high" and r.library]
+    for r in vuln_resources:
         findings.append(PrioritizedFinding(
-            id="privacy_compliance_low",
-            title=f"Low privacy compliance score ({result.privacy.score}/100)",
-            category="privacy_compliance",
+            id="supply_chain_vulnerable_lib",
+            title=f"Vulnerable library: {r.library} {r.version}",
+            category="supply_chain",
+            severity="high",
+            classification=FindingClassification.confirmed_issue,
+            confidence="high",
+            owner=FindingOwner.customer,
+            why_it_matters="Known vulnerabilities in client-side libraries can be exploited for XSS or data theft.",
+            business_impact="Client-side code execution risk",
+            evidence=r.issues[:3],
+            recommended_action=f"Upgrade {r.library} to the latest stable version.",
+            source_field="supply_chain",
+        ))
+
+    compromised = [r for r in sc.resources if "COMPROMISED" in r.provider]
+    for r in compromised:
+        findings.append(PrioritizedFinding(
+            id="supply_chain_compromised_provider",
+            title=f"Resource from compromised provider: {r.provider}",
+            category="supply_chain",
+            severity="critical",
+            classification=FindingClassification.confirmed_issue,
+            confidence="high",
+            owner=FindingOwner.customer,
+            why_it_matters="This CDN provider has been compromised and used to serve malicious code.",
+            business_impact="Active supply chain attack vector — arbitrary JS execution on visitors",
+            evidence=[r.url],
+            recommended_action="Remove immediately. Self-host the resource or migrate to a trusted CDN.",
+            source_field="supply_chain",
+        ))
+
+    if sc.scripts_without_sri > 0:
+        no_sri = [r for r in sc.resources if r.resource_type == "script" and not r.has_sri]
+        findings.append(PrioritizedFinding(
+            id="supply_chain_no_sri",
+            title=f"{sc.scripts_without_sri} external script(s) without Subresource Integrity",
+            category="supply_chain",
             severity="medium",
             classification=FindingClassification.confirmed_issue,
-            confidence="medium",
+            confidence="high",
             owner=FindingOwner.customer,
-            why_it_matters="Low privacy compliance increases regulatory and reputational risk.",
-            business_impact="Regulatory fines and customer trust erosion",
-            evidence=[f"Privacy score: {result.privacy.score}/100, grade: {result.privacy.grade}"],
-            recommended_action="Address missing privacy indicators: privacy policy, cookie consent, GDPR/CCPA compliance pages.",
-            source_field="privacy",
+            why_it_matters="Without SRI, a compromised CDN can inject malicious code into your site.",
+            business_impact="Supply chain attack vector — CDN compromise leads to site compromise",
+            evidence=[r.url for r in no_sri[:5]],
+            recommended_action="Add integrity= and crossorigin= attributes to all external script tags.",
+            source_field="supply_chain",
         ))
 
     return findings
+
+
+# ---------------------------------------------------------------------------
+# Open port / exposed service findings
+# ---------------------------------------------------------------------------
+
+_RISKY_PORTS: dict[int, tuple[str, str]] = {
+    3306: ("MySQL", "critical"),
+    5432: ("PostgreSQL", "critical"),
+    6379: ("Redis", "critical"),
+    27017: ("MongoDB", "critical"),
+    11211: ("Memcached", "critical"),
+    9200: ("Elasticsearch", "high"),
+    9300: ("Elasticsearch", "high"),
+    5984: ("CouchDB", "high"),
+    1433: ("MSSQL", "critical"),
+    3389: ("RDP", "high"),
+    23: ("Telnet", "high"),
+    21: ("FTP", "medium"),
+    445: ("SMB", "high"),
+    139: ("NetBIOS", "high"),
+    8080: ("HTTP-Alt", "info"),
+    8443: ("HTTPS-Alt", "info"),
+}
+
+
+def _classify_port_findings(result: DomainResult) -> list[PrioritizedFinding]:
+    """Flag exposed databases and risky services from port scan results."""
+    findings: list[PrioritizedFinding] = []
+    if not result.port_scan or not result.port_scan.open_ports:
+        return findings
+
+    for port in result.port_scan.open_ports:
+        # Ports answering on shared CDN/edge infrastructure are not the
+        # customer's origin. Emit an informational observation only — never a
+        # confirmed data-breach finding or a firewall recommendation.
+        if port.network_attribution == "shared_cdn_edge" or not port.affects_risk_score:
+            findings.append(PrioritizedFinding(
+                id=f"port_shared_edge_{port.port}",
+                title=f"Port {port.port} observed on shared CDN edge ({port.service or 'unknown'})",
+                category="network",
+                severity="informational",
+                classification=FindingClassification.attack_surface_observation,
+                confidence="low",
+                evidence_quality="weak_inference",
+                affects_risk_score=False,
+                owner=FindingOwner.not_actionable,
+                why_it_matters=(
+                    "This port answers on shared CDN/edge infrastructure, not the "
+                    "customer origin. The service name is a port-number guess, not "
+                    "confirmed identification."
+                ),
+                business_impact="No confirmed customer-origin exposure.",
+                evidence=[
+                    f"IP attributed to {result.port_scan.cdn_provider or 'shared CDN'}",
+                    f"service_guess={port.service or 'unknown'}; service_confirmed=false; banner={port.banner or 'null'}",
+                    "origin_exposure_confirmed=false; affects_risk_score=false",
+                ],
+                recommended_action="No action — this is not customer-origin exposure. Do not change firewall rules based on this.",
+                source_field="port_scan",
+            ))
+            continue
+        if port.port in _RISKY_PORTS:
+            service_name, severity = _RISKY_PORTS[port.port]
+            findings.append(PrioritizedFinding(
+                id=f"port_exposed_{port.port}",
+                title=f"Exposed {service_name} service on port {port.port}",
+                category="network",
+                severity=severity,
+                classification=FindingClassification.confirmed_issue,
+                confidence="high",
+                owner=FindingOwner.customer,
+                why_it_matters=f"{service_name} (port {port.port}) is publicly reachable — database and admin services must not be internet-exposed.",
+                business_impact="Direct data breach risk — attackers can attempt authentication bypass or exploit known vulnerabilities.",
+                recommended_action=f"Restrict port {port.port} via firewall rules or security groups. Use VPN/SSH tunnels for remote access.",
+                source_field="port_scan",
+            ))
+        elif port.is_risky:
+            findings.append(PrioritizedFinding(
+                id=f"port_exposed_{port.port}",
+                title=f"Risky service on port {port.port} ({port.service or 'unknown'})",
+                category="network",
+                severity="medium",
+                classification=FindingClassification.confirmed_issue,
+                confidence="high",
+                owner=FindingOwner.customer,
+                why_it_matters=f"Port {port.port} ({port.service or 'unknown service'}) is publicly reachable and flagged as risky.",
+                business_impact="Expanded attack surface — unnecessary exposed services increase compromise risk.",
+                recommended_action=f"Review whether port {port.port} needs public exposure. Restrict access if not required.",
+                source_field="port_scan",
+            ))
+
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# Overall domain risk grade (A+ to F)
+# ---------------------------------------------------------------------------
+
+_RISK_TO_GRADE: list[tuple[int, str]] = [
+    (5, "A+"), (10, "A"), (15, "A-"),
+    (25, "B+"), (35, "B"), (40, "B-"),
+    (50, "C+"), (60, "C"), (65, "C-"),
+    (75, "D+"), (80, "D"), (85, "D-"),
+    (100, "F"),
+]
+
+
+def _compute_overall_grade(result: DomainResult, findings: list[PrioritizedFinding]) -> str:
+    """Aggregate A+ to F grade from observed component grades + confirmed findings.
+
+    Evidence-driven only — no FAIR input. The grade is derived from the SSL/TLS
+    and security-header component grades and a penalty for confirmed, scoring
+    findings. Quantitative risk modelling (FAIR) is performed downstream.
+    """
+    ssl_grade_score = _grade_to_score(result.ssl.grade if result.ssl else "")
+    headers_grade_score = _grade_to_score(
+        result.security.headers.grade if result.security and result.security.headers else ""
+    )
+
+    # Only confirmed issues that actually affect the risk score contribute a
+    # penalty. Unverified candidates, shared-CDN observations, attack-surface
+    # observations and informational findings are excluded by construction.
+    confirmed = [
+        f for f in findings
+        if f.classification == FindingClassification.confirmed_issue
+        and f.affects_risk_score
+    ]
+    crit_count = sum(1 for f in confirmed if f.severity == "critical")
+    high_count = sum(1 for f in confirmed if f.severity == "high")
+    medium_count = sum(1 for f in confirmed if f.severity == "medium")
+    low_count = sum(1 for f in confirmed if f.severity == "low")
+    finding_penalty = min(45, crit_count * 18 + high_count * 8 + medium_count * 3 + low_count * 1)
+
+    component_avg = (ssl_grade_score + headers_grade_score) / 2.0
+    component_risk = max(0, 100 - component_avg)
+
+    composite = int(round(component_risk * 0.6 + finding_penalty))
+    composite = max(0, min(100, composite))
+
+    for threshold, grade in _RISK_TO_GRADE:
+        if composite <= threshold:
+            return grade
+    return "F"
+
+
+def _grade_to_score(grade: str) -> float:
+    mapping = {
+        "A+": 100, "A": 95, "A-": 90,
+        "B+": 85, "B": 75, "B-": 70,
+        "C+": 65, "C": 55, "C-": 50,
+        "D+": 40, "D": 30, "D-": 25,
+        "F": 0,
+    }
+    return mapping.get((grade or "").strip().upper(), 50)
+
+
+def _collect_grades(result: DomainResult) -> dict[str, str]:
+    grades: dict[str, str] = {}
+    if result.ssl and result.ssl.grade:
+        grades["ssl"] = result.ssl.grade
+    if result.security and result.security.headers and result.security.headers.grade:
+        grades["headers"] = result.security.headers.grade
+    es = result.dns.email_security if result.dns else None
+    if es and not es.error and hasattr(es, "grade") and es.grade:
+        grades["email"] = es.grade
+    if result.privacy and hasattr(result.privacy, "grade") and result.privacy.grade:
+        grades["privacy"] = result.privacy.grade
+    return grades
+
+
+# ---------------------------------------------------------------------------
+# Ransomware Susceptibility Index (RSI)
+# ---------------------------------------------------------------------------
+
+def _compute_ransomware_index(result: DomainResult) -> RansomwareIndex:
+    """0-100 score predicting ransomware attack likelihood from existing signals."""
+    score = 0
+    factors: list[str] = []
+    mitigations: list[str] = []
+
+    # Exposed remote access ports (RDP 3389, SSH 22, VNC 5900, SMB 445)
+    if result.port_scan and result.port_scan.open_ports:
+        risky_ports = {3389, 445, 5900, 5901, 23}
+        exposed = [p for p in result.port_scan.open_ports if p.port in risky_ports]
+        if exposed:
+            score += 25
+            factors.append(f"Exposed remote access ports: {', '.join(str(p.port) for p in exposed)}")
+        ssh_ports = [p for p in result.port_scan.open_ports if p.port == 22]
+        if ssh_ports:
+            score += 5
+            factors.append("SSH port 22 exposed")
+
+    # Weak email authentication (phishing entry vector)
+    es = result.dns.email_security if result.dns else None
+    if es and not es.error:
+        if not es.dmarc.exists:
+            score += 15
+            factors.append("No DMARC record — phishing emails cannot be blocked")
+        elif es.dmarc.policy == "none":
+            score += 10
+            factors.append("DMARC policy is 'none' — no email enforcement")
+        else:
+            mitigations.append(f"DMARC enforcement active (p={es.dmarc.policy})")
+
+        if not es.spf.exists:
+            score += 5
+            factors.append("No SPF record")
+        else:
+            mitigations.append("SPF record configured")
+
+    # Exposed credentials / secrets
+    secrets_count = len(result.security.secrets) if result.security else 0
+    if secrets_count:
+        score += min(20, secrets_count * 10)
+        factors.append(f"{secrets_count} exposed credential(s) / secret(s)")
+
+    # Missing security headers (CSP, HSTS)
+    hdr_grade = result.security.headers.grade if result.security and result.security.headers else ""
+    if hdr_grade in ("F", "D-", "D", "D+"):
+        score += 10
+        factors.append(f"Weak security headers (grade {hdr_grade})")
+    elif hdr_grade in ("A+", "A", "A-", "B+", "B"):
+        mitigations.append(f"Strong security headers (grade {hdr_grade})")
+
+    # Deprecated TLS / weak cipher
+    ssl = result.ssl
+    if ssl:
+        if ssl.tls_version and ssl.tls_version < "TLSv1.2":
+            score += 10
+            factors.append(f"Deprecated TLS version: {ssl.tls_version}")
+        elif ssl.grade in ("A+", "A", "A-"):
+            mitigations.append(f"Strong TLS posture (grade {ssl.grade})")
+        if not ssl.cert_valid:
+            score += 5
+            factors.append("Invalid SSL certificate")
+
+    # Known CVEs with high EPSS
+    vuln = result.vulnerabilities
+    if vuln and vuln.cve_findings:
+        high_epss = [c for c in vuln.cve_findings if (c.epss_score or 0) > 0.5]
+        if high_epss:
+            score += min(25, len(high_epss) * 10)
+            factors.append(f"{len(high_epss)} CVE(s) with EPSS > 0.5 (likely exploited)")
+        kev = [c for c in vuln.cve_findings if c.in_kev]
+        if kev:
+            score += 15
+            factors.append(f"{len(kev)} CVE(s) in CISA Known Exploited Vulnerabilities list")
+
+    # Reverse-proxy / CDN presence (NOT a WAF unless a ruleset was confirmed).
+    cdn_techs = [t for t in result.technologies if "cdn" in (t.categories or [])]
+    waf_confirmed = bool(result.waf and result.waf.waf_detected)
+    cdn_present = bool(cdn_techs) or bool(result.waf and result.waf.cdn_detected)
+    if not cdn_present and not waf_confirmed:
+        score += 5
+        factors.append("No reverse-proxy/CDN or WAF protection detected")
+    else:
+        if waf_confirmed:
+            mitigations.append(f"WAF enabled: {result.waf.waf_provider or 'confirmed'}")
+        if cdn_present:
+            cdn_name = (
+                result.waf.cdn_provider if (result.waf and result.waf.cdn_provider)
+                else (cdn_techs[0].name if cdn_techs else "CDN")
+            )
+            mitigations.append(
+                f"CDN / reverse proxy: {cdn_name} (WAF ruleset not confirmed)"
+            )
+
+    # Breach history
+    if result.breaches:
+        score += min(10, len(result.breaches) * 3)
+        factors.append(f"{len(result.breaches)} previous breach(es) on record")
+
+    # Genuinely sensitive exposed paths only. A reachable login/admin PAGE is
+    # expected attack surface, not a breach vector, so it must not inflate
+    # ransomware susceptibility. Only data-exposure paths (phpmyadmin exposed
+    # DB UI, cpanel) count here.
+    if result.security and result.security.sensitive_paths:
+        admin_paths = [p for p in result.security.sensitive_paths
+                       if p.status_code == 200
+                       and (p.path or "").lower() not in _EXPECTED_LOGIN_PATHS
+                       and any(
+                           kw in (p.path or "").lower()
+                           for kw in ("phpmyadmin", "cpanel", "adminer")
+                       )]
+        if admin_paths:
+            score += 10
+            factors.append(f"{len(admin_paths)} exposed admin/data panel(s)")
+
+    # Nuclei findings
+    if vuln and vuln.nuclei and vuln.nuclei.findings:
+        crit_high = [f for f in vuln.nuclei.findings if f.severity in ("critical", "high")]
+        if crit_high:
+            score += min(15, len(crit_high) * 5)
+            factors.append(f"{len(crit_high)} critical/high Nuclei finding(s)")
+
+    score = max(0, min(100, score))
+
+    if score >= 75:
+        tier = "critical"
+    elif score >= 50:
+        tier = "high"
+    elif score >= 25:
+        tier = "medium"
+    else:
+        tier = "low"
+
+    return RansomwareIndex(score=score, tier=tier, factors=factors, mitigations=mitigations)
+
+
+# ---------------------------------------------------------------------------
+# Financial risk quantification
+# ---------------------------------------------------------------------------
+
+_INCIDENT_COST_BASE = {
+    "critical": (2_500_000, 8_000_000),
+    "high":     (500_000,   3_000_000),
+    "medium":   (100_000,   800_000),
+    "low":      (10_000,    150_000),
+}
+
+_SIZE_MULTIPLIER: dict[str, tuple[float, str]] = {
+    "micro":      (0.02, "Micro (1-10 employees)"),
+    "small":      (0.08, "Small (11-50 employees)"),
+    "medium":     (0.25, "Medium (51-250 employees)"),
+    "large":      (0.60, "Large (251-1000 employees)"),
+    "enterprise": (1.00, "Enterprise (1000+ employees)"),
+}
+
+
+def _infer_company_size(result: DomainResult) -> str:
+    """Estimate organisation size from scan signals when not provided."""
+    score = 0
+
+    sub_count = 0
+    if result.passive_intel and result.passive_intel.ct and result.passive_intel.ct.subdomains:
+        sub_count = len(result.passive_intel.ct.subdomains)
+    if sub_count > 50:
+        score += 3
+    elif sub_count > 15:
+        score += 2
+    elif sub_count > 5:
+        score += 1
+
+    tech_count = len(result.technologies) if result.technologies else 0
+    if tech_count > 20:
+        score += 2
+    elif tech_count > 8:
+        score += 1
+
+    email_count = len(result.contacts.emails) if result.contacts else 0
+    if email_count > 20:
+        score += 2
+    elif email_count > 5:
+        score += 1
+
+    if result.port_scan and result.port_scan.open_ports:
+        if len(result.port_scan.open_ports) > 10:
+            score += 2
+        elif len(result.port_scan.open_ports) > 3:
+            score += 1
+
+    if result.supply_chain and result.supply_chain.resources:
+        if len(result.supply_chain.resources) > 30:
+            score += 1
+
+    if score >= 8:
+        return "enterprise"
+    if score >= 5:
+        return "large"
+    if score >= 3:
+        return "medium"
+    if score >= 1:
+        return "small"
+    return "micro"
+
+
+def _compute_financial_impact(result: DomainResult) -> FinancialImpact:
+    """Financial exposure is not estimated in the scanner.
+
+    Quantitative risk modelling (FAIR) and loss estimation are performed
+    downstream (Xano) where validated business inputs — revenue, employee count,
+    asset criticality, record counts, downtime/recovery cost — are available. The
+    scanner only reports evidence, so this always returns ``insufficient_data``.
+    """
+    return FinancialImpact(
+        financial_impact_status="insufficient_data",
+        methodology="Performed downstream from validated business inputs.",
+        factors=[
+            "Financial estimation is performed downstream from validated business "
+            "inputs; the scanner does not produce customer-facing loss figures.",
+        ],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Compliance readiness reports
+# ---------------------------------------------------------------------------
+
+_PCI_DSS_CONTROLS: list[tuple[str, str]] = [
+    ("PCI-DSS 3.4", "Render PAN unreadable wherever stored"),
+    ("PCI-DSS 4.1", "Use strong cryptography and security protocols"),
+    ("PCI-DSS 6.2", "Protect systems from known vulnerabilities"),
+    ("PCI-DSS 6.5.5", "Prevent information leakage"),
+    ("PCI-DSS 6.5.6", "Address high-risk vulnerabilities"),
+    ("PCI-DSS 6.5.7", "Prevent cross-site scripting"),
+    ("PCI-DSS 6.5.8", "Prevent improper access control"),
+    ("PCI-DSS 6.5.10", "Prevent broken authentication and session management"),
+    ("PCI-DSS 6.5.x", "Secure development practices"),
+    ("PCI-DSS 12.10", "Maintain an incident response plan"),
+]
+
+_ISO27001_CONTROLS: list[tuple[str, str]] = [
+    ("ISO 27001 A.7.2.2", "Information security awareness and training"),
+    ("ISO 27001 A.9.4.1", "Information access restriction"),
+    ("ISO 27001 A.10.1.1", "Policy on the use of cryptographic controls"),
+    ("ISO 27001 A.12.2.1", "Controls against malware"),
+    ("ISO 27001 A.12.6.1", "Management of technical vulnerabilities"),
+    ("ISO 27001 A.13.2.1", "Information transfer policies and procedures"),
+    ("ISO 27001 A.14.1.2", "Securing application services on public networks"),
+    ("ISO 27001 A.15.1.1", "Information security policy for supplier relationships"),
+]
+
+_GDPR_CONTROLS: list[tuple[str, str]] = [
+    ("GDPR Art.32", "Security of processing"),
+    ("GDPR Art.33", "Notification of breach to supervisory authority"),
+    ("GDPR Art.34", "Communication of breach to data subject"),
+]
+
+
+# Controls that require ORGANISATIONAL evidence (procedures, training, incident
+# response, internal access, supplier policy). An external scan cannot pass or
+# fail these — they are always not_assessed.
+_ORGANISATIONAL_CONTROLS: frozenset[str] = frozenset({
+    "PCI-DSS 3.4",      # cardholder-data storage
+    "PCI-DSS 6.5.8",    # improper access control (internal)
+    "PCI-DSS 12.10",    # incident response plan
+    "ISO 27001 A.7.2.2",   # awareness & training
+    "ISO 27001 A.9.4.1",   # access restriction (internal)
+    "ISO 27001 A.12.2.1",  # malware controls
+    "ISO 27001 A.15.1.1",  # supplier-security policy
+    "GDPR Art.33",      # breach notification to authority
+    "GDPR Art.34",      # breach communication to subjects
+})
+
+
+def _compute_compliance_posture(
+    findings: list[PrioritizedFinding],
+) -> list[CompliancePosture]:
+    """Build per-framework EXTERNAL technical observations from tagged findings.
+
+    Only externally-observable controls may be pass/fail. Organisational controls
+    are always not_assessed — an external scan cannot verify procedures, training,
+    incident response, or internal access. Absence of a finding is not a pass.
+    """
+    failing_tags: set[str] = set()
+    tag_to_findings: dict[str, list[str]] = {}
+    for f in findings:
+        # Only confirmed issues fail a control; risk_candidates / observations /
+        # potential issues never fail compliance controls.
+        if f.classification != FindingClassification.confirmed_issue:
+            continue
+        for tag in f.compliance:
+            failing_tags.add(tag)
+            tag_to_findings.setdefault(tag, []).append(f.id)
+
+    postures: list[CompliancePosture] = []
+
+    for framework_name, controls_list in [
+        ("PCI-DSS 4.0", _PCI_DSS_CONTROLS),
+        ("ISO 27001:2022", _ISO27001_CONTROLS),
+        ("GDPR", _GDPR_CONTROLS),
+    ]:
+        controls: list[ComplianceControl] = []
+        passing = 0
+        failing = 0
+        not_assessed = 0
+        for control_id, control_name in controls_list:
+            if control_id in _ORGANISATIONAL_CONTROLS:
+                controls.append(ComplianceControl(
+                    control_id=control_id,
+                    control_name=control_name,
+                    status="not_assessed",
+                    findings=["Requires organisational evidence"],
+                ))
+                not_assessed += 1
+            elif control_id in failing_tags:
+                controls.append(ComplianceControl(
+                    control_id=control_id,
+                    control_name=control_name,
+                    status="fail",
+                    findings=tag_to_findings.get(control_id, []),
+                ))
+                failing += 1
+            else:
+                controls.append(ComplianceControl(
+                    control_id=control_id,
+                    control_name=control_name,
+                    status="pass",
+                ))
+                passing += 1
+
+        # Readiness reflects only the externally-observable controls.
+        observable = passing + failing
+        readiness = int(round(passing / observable * 100)) if observable else 0
+
+        postures.append(CompliancePosture(
+            framework=framework_name,
+            controls_tested=observable,
+            controls_passing=passing,
+            controls_failing=failing,
+            controls_not_tested=not_assessed,
+            readiness_score=readiness,
+            controls=controls,
+        ))
+
+    return postures
 
 
 def build_easm_report(
@@ -1272,35 +2403,47 @@ def build_easm_report(
     try:
         platform, profile = _detect_primary_platform(result)
 
+        # Classify the asset first so website/privacy/cookie checks are only
+        # applied to actual websites — never to autodiscover/mail/API/CDN assets.
+        from .asset_classifier import classify_asset
+        asset = classify_asset(result)
+
         all_findings: list[PrioritizedFinding] = []
-
-        classifiers = (
-            ("security_headers", partial(_classify_header_findings, result, platform, profile)),
-            ("cookies", partial(_classify_cookie_findings, result, platform, profile)),
-            ("ssl", partial(_classify_ssl_findings, result)),
-            ("secrets", partial(_classify_secret_findings, result)),
-            ("sensitive_paths", partial(_classify_path_findings, result)),
-            ("ioc_findings", partial(_classify_ioc_findings, result)),
-            ("email_security", partial(_classify_email_security, result)),
-            ("dns", partial(_classify_dns_findings, result)),
-            ("breaches", partial(_classify_breach_findings, result)),
-            ("robots_sitemap", partial(_classify_robots_sitemap, result)),
-            ("js_intel", partial(_classify_js_intel, result)),
-            ("typosquatting", partial(_classify_typosquatting_findings, result)),
-            ("privacy", partial(_classify_privacy_findings, result)),
-        )
-
-        for stage, classifier in classifiers:
-            try:
-                all_findings.extend(classifier())
-            except Exception:
-                logger.exception(
-                    "EASM classifier '%s' failed for %s",
-                    stage,
-                    result.target,
-                )
+        # Always-applicable evidence (transport, DNS, breach, network, brand).
+        all_findings.extend(_classify_ssl_findings(result))
+        all_findings.extend(_classify_secret_findings(result))
+        all_findings.extend(_classify_ioc_findings(result))
+        all_findings.extend(_classify_email_security(result))
+        all_findings.extend(_classify_dns_findings(result))
+        all_findings.extend(_classify_breach_findings(result))
+        all_findings.extend(_classify_js_intel(result))
+        all_findings.extend(_classify_typosquatting_findings(result))
+        all_findings.extend(_classify_cloud_findings(result))
+        all_findings.extend(_classify_supply_chain_findings(result))
+        all_findings.extend(_classify_port_findings(result))
+        # Website-only checks — gated by asset classification.
+        if asset.website_checks_applicable:
+            all_findings.extend(_classify_header_findings(result, platform, profile))
+            all_findings.extend(_classify_path_findings(result))
+            all_findings.extend(_classify_robots_sitemap(result))
+        if asset.cookie_checks_applicable:
+            all_findings.extend(_classify_cookie_findings(result, platform, profile))
+        if asset.privacy_checks_applicable:
+            all_findings.extend(_classify_privacy_findings(result))
 
         sorted_findings = _sort_findings(all_findings)
+
+        # Normalise affects_risk_score: only a confirmed issue at low/medium/high/
+        # critical severity actually moves the grade. Informational severity and
+        # non-confirmed classifications never contribute, so the per-finding flag
+        # must agree with excluded_inputs (no "affects_risk_score: true" on an
+        # informational or candidate finding).
+        for f in sorted_findings:
+            scores = (
+                f.classification == FindingClassification.confirmed_issue
+                and f.severity in ("critical", "high", "medium", "low")
+            )
+            f.affects_risk_score = f.affects_risk_score and scores
 
         # Apply compliance framework tags
         for finding in sorted_findings:
@@ -1316,16 +2459,101 @@ def build_easm_report(
         asset_context = _infer_asset_context(result, platform, profile)
         cloud_assets = _detect_cloud_assets(result)
         recon_artifacts = _extract_recon_artifacts(result)
-        executive = _build_executive_summary(sorted_findings, result, platform, scan_mode)
+
+        # Compute new enterprise features
+        overall_grade = _compute_overall_grade(result, sorted_findings)
+        ransomware = _compute_ransomware_index(result)
+        financial = _compute_financial_impact(result)
+        compliance = _compute_compliance_posture(sorted_findings)
+
+        executive = _build_executive_summary(
+            sorted_findings, result, platform, scan_mode,
+            overall_grade=overall_grade,
+            ransomware=ransomware,
+            financial=financial,
+            compliance=compliance,
+        )
 
         confirmed = sum(1 for f in sorted_findings if f.classification == FindingClassification.confirmed_issue)
         plat_beh = sum(1 for f in sorted_findings if f.classification == FindingClassification.platform_behavior)
         info_ct = sum(1 for f in sorted_findings if f.classification == FindingClassification.informational)
 
+        # Scoring traceability — which findings moved the grade vs which were
+        # excluded, so risk tier, grade and narrative stay consistent.
+        score_inputs = [
+            f"{f.id} ({f.severity}, {f.classification.value})"
+            for f in sorted_findings
+            if f.classification == FindingClassification.confirmed_issue and f.affects_risk_score
+        ]
+        excluded_inputs = [
+            f"{f.id}: excluded ({f.classification.value}, evidence={f.evidence_quality})"
+            for f in sorted_findings
+            if not (f.classification == FindingClassification.confirmed_issue and f.affects_risk_score)
+        ]
+        _tier_map = [(25, "critical"), (50, "high"), (70, "moderate"), (100, "low")]
+        _g = _grade_to_score(overall_grade)
+        risk_tier = next((t for thr, t in _tier_map if _g <= thr), "low")
+        scan_confidence = executive.grades.get("confidence", "") or (
+            "medium" if scan_mode == "full" else "low"
+        )
+
+        # Plain-English posture per assessed category, from component grades.
+        _grade_label = {
+            "A+": "Strong", "A": "Strong", "A-": "Strong",
+            "B+": "Good", "B": "Good", "B-": "Good",
+            "C+": "Adequate", "C": "Adequate", "C-": "Adequate",
+            "D+": "Needs attention", "D": "Needs attention", "D-": "Needs attention",
+            "F": "Weak",
+        }
+        _cat_label = {"ssl": "TLS / Certificate", "headers": "Web security headers",
+                      "email": "Email authentication", "privacy": "Privacy indicators"}
+        posture_summary = {
+            _cat_label.get(k, k): _grade_label.get(v, "Not assessed")
+            for k, v in executive.grades.items()
+            if k in _cat_label and v
+        }
+
+        # Severity breakdown of confirmed, scoring findings.
+        _scoring = [
+            f for f in sorted_findings
+            if f.classification == FindingClassification.confirmed_issue and f.affects_risk_score
+        ]
+        severity_breakdown = {
+            sev: sum(1 for f in _scoring if f.severity == sev)
+            for sev in ("critical", "high", "medium", "low")
+        }
+
+        # Ranked customer action plan — customer-owned confirmed issues first,
+        # most severe first, then any other scoring finding.
+        _sev_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+        _ranked = sorted(
+            _scoring,
+            key=lambda f: (
+                0 if f.owner == FindingOwner.customer else 1,
+                _sev_rank.get(f.severity, 4),
+            ),
+        )
+        remediation_priorities = [
+            RemediationItem(
+                rank=i + 1,
+                title=f.title,
+                category=f.category,
+                severity=f.severity,
+                confidence=f.confidence,
+                action=f.recommended_action,
+                affects_grade=f.affects_risk_score,
+            )
+            for i, f in enumerate(_ranked[:5])
+        ]
+
         return EASMReport(
             generated_at=datetime.now(timezone.utc).isoformat(),
             scan_mode=scan_mode,
+            overall_grade=overall_grade,
             executive_summary=executive,
+            ransomware_susceptibility=ransomware,
+            financial_impact=financial,
+            compliance_posture=compliance,
             asset_context=asset_context,
             cloud_assets=cloud_assets,
             recon_artifacts=recon_artifacts,
@@ -1334,15 +2562,35 @@ def build_easm_report(
             confirmed_issues=confirmed,
             platform_behaviors=plat_beh,
             informational_count=info_ct,
+            severity_breakdown=severity_breakdown,
+            posture_summary=posture_summary,
+            remediation_priorities=remediation_priorities,
+            risk_tier=risk_tier,
+            scan_confidence=scan_confidence,
+            score_inputs=score_inputs,
+            excluded_inputs=excluded_inputs,
             compliance_summary=framework_counts,
             platform_detected=platform,
+            asset_classification=asset,
         )
     except Exception as exc:
-        logger.exception("EASM report generation failed for %s: %s", result.target, exc)
+        logger.warning("EASM report generation failed for %s: %s", result.target, exc, exc_info=True)
         return EASMReport(
             generated_at=datetime.now(timezone.utc).isoformat(),
             scan_mode=scan_mode,
         )
 
 
-__all__ = ["build_easm_report"]
+__all__ = [
+    "build_easm_report",
+    "grade_to_score",
+    "sort_findings",
+    "compute_compliance_posture",
+    "RISK_TO_GRADE",
+]
+
+# Public aliases for cross-module reuse (board_report.py)
+grade_to_score = _grade_to_score
+sort_findings = _sort_findings
+compute_compliance_posture = _compute_compliance_posture
+RISK_TO_GRADE = _RISK_TO_GRADE

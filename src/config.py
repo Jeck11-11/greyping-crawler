@@ -10,7 +10,7 @@ CRAWL_TIMEOUT = int(os.getenv("CRAWL_TIMEOUT", "20"))
 SSL_TIMEOUT = int(os.getenv("SSL_TIMEOUT", "10"))
 PATH_SCAN_TIMEOUT = int(os.getenv("PATH_SCAN_TIMEOUT", "10"))
 PORT_SCAN_TIMEOUT = int(os.getenv("PORT_SCAN_TIMEOUT", "3"))
-PORT_SCAN_CONCURRENCY = int(os.getenv("PORT_SCAN_CONCURRENCY", "20"))
+PORT_SCAN_CONCURRENCY = int(os.getenv("PORT_SCAN_CONCURRENCY", "50"))
 JS_MINE_TIMEOUT = int(os.getenv("JS_MINE_TIMEOUT", "30"))
 PASSIVE_TIMEOUT = int(os.getenv("PASSIVE_TIMEOUT", "15"))
 BREACH_TIMEOUT = int(os.getenv("BREACH_TIMEOUT", "15"))
@@ -51,14 +51,15 @@ SCREENSHOT_HEIGHT = int(os.getenv("SCREENSHOT_HEIGHT", "720"))
 # Xano webhook (nuclei results callback)
 XANO_WEBHOOK_URL = os.getenv("XANO_WEBHOOK_URL", "")
 NUCLEI_WEBHOOK_TIMEOUT = int(os.getenv("NUCLEI_WEBHOOK_TIMEOUT", "30"))
+XANO_BOARD_WEBHOOK_URL = os.getenv("XANO_BOARD_WEBHOOK_URL", "") or XANO_WEBHOOK_URL
+XANO_SCAN_WEBHOOK_URL = os.getenv("XANO_SCAN_WEBHOOK_URL", "") or XANO_WEBHOOK_URL
+BOARD_JOBS_MAX = int(os.getenv("BOARD_JOBS_MAX", "50"))
+SCAN_JOBS_MAX = int(os.getenv("SCAN_JOBS_MAX", "50"))
 
 # ProjectDiscovery tools sidecar
 PD_TOOLS_API_URL = os.getenv("PD_TOOLS_API_URL", "")
 HTTPX_TIMEOUT = int(os.getenv("HTTPX_TIMEOUT", "60"))
 KATANA_TIMEOUT = int(os.getenv("KATANA_TIMEOUT", "120"))
-NAABU_TIMEOUT = int(os.getenv("NAABU_TIMEOUT", "120"))
-NAABU_RATE = int(os.getenv("NAABU_RATE", "1000"))
-NAABU_PORT_RANGE = os.getenv("NAABU_PORT_RANGE", "top-250")
 
 # User-Agent strings
 UA_HONEST = os.getenv("UA_HONEST", "GreypingCrawler/1.0")

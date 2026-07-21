@@ -136,4 +136,9 @@ def analyze_privacy_compliance(
         grade=_score_to_grade(score),
         indicators=indicators,
         consent_tool=consent_tool_name,
+        consent_platform="detected" if consent_tool_name else "not_detected",
+        # An external scan does not observe cookie/consent ordering, so this
+        # stays not_assessed and manual validation is always flagged.
+        nonessential_tracking_before_consent="not_assessed",
+        manual_validation_required=True,
     )

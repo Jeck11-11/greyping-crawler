@@ -90,10 +90,32 @@ _INFO_PATHS = {
     "/.well-known/dnt-policy.txt",
 }
 
-# Status codes that indicate the path exists and is accessible.
-# 301/302 are excluded — redirects (common on Wix, CDNs, etc.) do NOT
-# mean the sensitive file is exposed.
-_INTERESTING_CODES = {200, 403}
+# Minimum response body size for a non-info path to count as "really exposed".
+# Real .env / backup / config files are never near-empty; a 0-byte or tiny 200
+# is a soft-404 / placeholder, not an exposed file.
+_MIN_BODY_BYTES = 20
+
+# Improbable paths used to detect catch-all servers (SPAs, wildcard responders)
+# that return 200 for everything. If these "exist", status-code probing is
+# meaningless and we skip the scan rather than emit false positives.
+_SOFT_404_PROBES = (
+    "/greyping-soft404-probe-7f3a9b2c1d.html",
+    "/this-path-should-not-exist-x9q8w7e6.txt",
+)
+
+
+async def _is_catch_all(client: httpx.AsyncClient, base_url: str) -> bool:
+    """Detect a server that returns 200 for paths that should not exist."""
+    for probe in _SOFT_404_PROBES:
+        try:
+            resp = await client.get(
+                urljoin(base_url, probe), headers={"User-Agent": UA_HONEST},
+            )
+        except Exception:
+            return False
+        if resp.status_code != 200:
+            return False
+    return True
 
 
 async def scan_sensitive_paths(
@@ -104,7 +126,9 @@ async def scan_sensitive_paths(
 ) -> list[SensitivePathFinding]:
     """Probe *base_url* for known sensitive paths.
 
-    Returns findings for paths that appear to exist (2xx/3xx/403).
+    Only a 200 with real content counts as exposed. 403/redirects are NOT
+    treated as existence proof (WAFs/CDNs return 403 for everything), and
+    catch-all servers are detected and skipped entirely.
     """
     sem = asyncio.Semaphore(concurrency)
 
@@ -120,24 +144,25 @@ async def scan_sensitive_paths(
                 if code == 405:
                     resp = await client.get(url, headers={"User-Agent": UA_HONEST})
                     code = resp.status_code
-                length = int(resp.headers.get("content-length", 0))
+                length = int(resp.headers.get("content-length", 0) or 0)
             except Exception:
                 return None
 
-            if code not in _INTERESTING_CODES:
+            # Only a 200 confirms the path is actually served. A 403 from a
+            # WAF/CDN is its default response for countless paths and does NOT
+            # mean the file exists.
+            if code != 200:
                 return None
 
-            if path in _INFO_PATHS and code == 403:
-                return None
+            # Info/policy pages: existence on 200 is a positive signal.
+            if path in _INFO_PATHS:
+                return SensitivePathFinding(
+                    path=path, url=url, status_code=code,
+                    content_length=length, risk=risk, severity=severity,
+                )
 
-            if path in _INFO_PATHS and code != 200:
-                return None
-
-            if code == 200 and length > 0 and length < 20 and path not in _INFO_PATHS:
-                return None
-
-            # Directory listing detection for directory paths
-            if code == 200 and path.endswith("/") and path not in _INFO_PATHS:
+            # Directory listing detection for directory paths.
+            if path.endswith("/"):
                 try:
                     get_resp = await client.get(url, headers={"User-Agent": UA_HONEST})
                     body = get_resp.text[:2000]
@@ -145,11 +170,29 @@ async def scan_sensitive_paths(
                         return None
                     risk = "Directory listing enabled — exposes file/folder names."
                     severity = "high"
+                    length = len(get_resp.content)
                 except Exception:
                     return None
+                return SensitivePathFinding(
+                    path=path, url=url, status_code=code,
+                    content_length=length, risk=risk, severity=severity,
+                )
+
+            # Regular file path: confirm it actually returns content. HEAD
+            # content-length is unreliable, so GET and measure the real body.
+            try:
+                get_resp = await client.get(url, headers={"User-Agent": UA_HONEST})
+                if get_resp.status_code != 200:
+                    return None
+                length = len(get_resp.content)
+            except Exception:
+                return None
+
+            if length < _MIN_BODY_BYTES:
+                return None
 
             # GraphQL introspection probe
-            if path == "/graphql" and code == 200:
+            if path == "/graphql":
                 try:
                     gql_resp = await client.post(
                         url,
@@ -168,7 +211,7 @@ async def scan_sensitive_paths(
                 status_code=code,
                 content_length=length,
                 risk=risk,
-                severity=severity if code != 403 else "medium",
+                severity=severity,
             )
 
     async with httpx.AsyncClient(
@@ -176,6 +219,13 @@ async def scan_sensitive_paths(
         follow_redirects=False,
         verify=False,
     ) as client:
+        if await _is_catch_all(client, base_url):
+            logger.info(
+                "Path scan skipped for %s: server returns 200 for nonexistent "
+                "paths (catch-all / SPA) — status-code probing unreliable.",
+                base_url,
+            )
+            return []
         tasks = [_check(client, path, risk, sev) for path, risk, sev in _SENSITIVE_PATHS]
         raw = await asyncio.gather(*tasks)
     return [r for r in raw if r is not None]

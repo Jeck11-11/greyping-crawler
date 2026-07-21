@@ -194,11 +194,21 @@ def _check_email_spoofing(result: DomainResult) -> AttackPath | None:
     if not result.emails:
         return None
 
+    # Align severity/likelihood with the finding layer: a published p=none
+    # (monitoring, SPF still applies) is weaker exposure than no DMARC at all,
+    # and neither is a *confirmed* spoof — it's a possible/likely path.
+    dmarc_missing = not email_sec.dmarc.exists
+    severity = "high" if dmarc_missing else "medium"
+    likelihood = "likely" if dmarc_missing else "possible"
+
     return AttackPath(
-        title="Email Spoofing and Phishing via Missing DMARC Enforcement",
-        severity="high",
+        title=(
+            "Email Spoofing via Missing DMARC" if dmarc_missing
+            else "Email Spoofing via Unenforced DMARC (p=none)"
+        ),
+        severity=severity,
         impact="phishing",
-        likelihood="confirmed",
+        likelihood=likelihood,
         remediation="Configure DMARC with policy=reject and ensure SPF and DKIM are properly set up.",
         steps=[
             AttackStep(
@@ -340,6 +350,34 @@ def _check_typosquat_brand_impersonation(result: DomainResult) -> AttackPath | N
     )
 
 
+def _check_exposed_cloud_database(result: DomainResult) -> AttackPath | None:
+    """DNS-resolvable cloud database → potential data breach."""
+    if not result.cloud_assets or not result.cloud_assets.cloud_services:
+        return None
+    db_endpoints = [s for s in result.cloud_assets.cloud_services if s.is_database]
+    if not db_endpoints:
+        return None
+    first = db_endpoints[0]
+    return AttackPath(
+        title="Internet-Exposed Cloud Database Endpoint",
+        severity="high",
+        impact="data_breach",
+        remediation="Move database to a private subnet/VPC and remove public DNS records.",
+        likelihood="potential",
+        steps=[
+            AttackStep(
+                finding_type="CloudServiceFinding",
+                description=f"DNS {first.record_type} record points to {first.service}: {first.record_value}",
+                fingerprint=first.fingerprint,
+            ),
+            AttackStep(
+                finding_type="impact",
+                description="Attacker resolves database hostname and attempts direct connection with default or leaked credentials",
+            ),
+        ],
+    )
+
+
 _CHAIN_RULES: list[Callable[[DomainResult], AttackPath | None]] = [
     _check_aws_key_to_s3,
     _check_env_db_compromise,
@@ -351,6 +389,7 @@ _CHAIN_RULES: list[Callable[[DomainResult], AttackPath | None]] = [
     _check_sourcemap_reverse_eng,
     _check_session_hijacking,
     _check_typosquat_brand_impersonation,
+    _check_exposed_cloud_database,
 ]
 
 

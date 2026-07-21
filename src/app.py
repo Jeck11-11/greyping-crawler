@@ -35,7 +35,6 @@ from .crawler import crawl_domain, fetch_rendered_cookies
 from .cve_lookup import enrich_cves_with_epss_kev, lookup_cves
 from .attack_paths import analyze_attack_paths
 from .easm_report import build_easm_report
-from .fair_signals import compute_fair_signals
 from .favicon import fetch_favicon
 from .cloud_assets import discover_cloud_assets
 from .port_scanner import scan_ports
@@ -43,12 +42,29 @@ from .screenshot import take_screenshot
 from .c99_client import check_ip_reputation, check_url_reputation, detect_waf, find_subdomains, validate_email
 from .postprocess import fill_not_found
 from .middleware import APIKeyMiddleware, RateLimitMiddleware
+from .module_status import nuclei_module_status
 from .js_miner import mine_javascript
-from .extractors import extract_contacts, extract_links, extract_page_metadata
+from .extractors import (
+    classify_social_url,
+    extract_contacts,
+    extract_links,
+    extract_page_metadata,
+    normalize_phone_e164,
+    region_for_tld,
+)
 from .ioc_scanner import scan_ioc
 from .privacy_scanner import analyze_privacy_compliance
 from .typosquatting import check_typosquatting
 from .models import (
+    AggregateRequest,
+    AsyncScanAck,
+    AsyncScanJobStatus,
+    AsyncScanRow,
+    BoardJobStatus,
+    BoardReport,
+    BoardReportResponse,
+    BoardScanAck,
+    BoardScanRequest,
     CloudAssetResult,
     ContactsGroup,
     CTResult,
@@ -91,6 +107,8 @@ from .models import (
     WaybackResult,
 )
 from .passive_intel import (
+    _clean_hostname,
+    enumerate_spf,
     query_ct_logs,
     query_dns,
     query_email_security,
@@ -160,6 +178,22 @@ _normalise_target = normalise_target
 _fetch_landing_page = fetch_landing_page
 
 
+def _screenshot_succeeded(ss: ScreenshotResult) -> bool:
+    """A screenshot only counts as taken when real image data was captured.
+
+    A Playwright-unavailable / navigation-failed result is an *attempt*, not a
+    success — empty base64, zero dimensions, zero bytes, or any error all mean
+    no image was produced.
+    """
+    return bool(
+        ss.error is None
+        and ss.image_base64
+        and ss.size_bytes > 0
+        and ss.width > 0
+        and ss.height > 0
+    )
+
+
 async def _scan_single_target(
     target: str,
     request: ScanRequest,
@@ -195,13 +229,20 @@ async def _scan_single_target(
         return []
     rendered_cookies_task = fetch_rendered_cookies(target, timeout=request.timeout) if request.render_js else _no_cookies()
 
+    async def _httpx_probe_task():
+        if not PD_TOOLS_API_URL:
+            return None
+        from .httpx_client import run_httpx_probe
+        return await run_httpx_probe([target], timeout=request.timeout)
+
     (crawl_result, ssl_result, landing_result, paths_result,
      dns_result, ct_result, rdap_result, wayback_result,
      favicon_result,
      port_scan_result, cloud_assets_result, c99_subs_result,
      waf_raw_result,
      robots_sitemap_result, typosquat_result,
-     rendered_cookies_result) = await asyncio.gather(
+     rendered_cookies_result,
+     httpx_probe_result) = await asyncio.gather(
         crawl_task, ssl_task, landing_task, paths_task,
         dns_task, ct_task, rdap_task, wayback_task,
         favicon_task,
@@ -209,6 +250,7 @@ async def _scan_single_target(
         waf_task,
         robots_task, typosquat_task,
         rendered_cookies_task,
+        _httpx_probe_task(),
         return_exceptions=True,
     )
 
@@ -225,7 +267,6 @@ async def _scan_single_target(
             error=str(crawl_result),
         )
         failed.risk_assessment = RiskAssessmentGroup(
-            fair_signals=compute_fair_signals(failed, scan_mode="full"),
             easm_report=build_easm_report(failed, scan_mode="full"),
         )
         fill_not_found(failed)
@@ -276,24 +317,28 @@ async def _scan_single_target(
     except Exception as exc:
         logger.warning("Tech fingerprint failed for %s: %s", target, exc)
 
-    # Supplement tech detection with PD httpx probe when available.
-    if PD_TOOLS_API_URL:
-        try:
-            from .httpx_client import run_httpx_probe
-            from .models import TechFinding
-            httpx_probes = await run_httpx_probe([target], timeout=request.timeout)
-            if httpx_probes:
-                existing_names = {t.name.lower() for t in tech_findings}
-                for tech_name in httpx_probes[0].technologies:
-                    if tech_name.lower() not in existing_names:
-                        tech_findings.append(TechFinding(
-                            name=tech_name,
-                            categories=[],
-                            confidence="medium",
-                            evidence=["httpx-probe"],
-                        ))
-        except Exception as exc:
-            logger.debug("httpx tech supplement failed for %s: %s", target, exc)
+    # Supply chain risk analysis (same landing HTML, zero requests).
+    from .supply_chain import analyze_supply_chain
+    supply_chain_result = None
+    try:
+        supply_chain_result = analyze_supply_chain(landing_html, target)
+    except Exception as exc:
+        logger.warning("Supply chain analysis failed for %s: %s", target, exc)
+
+    # Merge httpx probe results (ran in Phase 1 gather).
+    if isinstance(httpx_probe_result, Exception):
+        logger.debug("httpx tech supplement failed for %s: %s", target, httpx_probe_result)
+    elif httpx_probe_result:
+        from .models import TechFinding
+        existing_names = {t.name.lower() for t in tech_findings}
+        for tech_name in httpx_probe_result[0].technologies:
+            if tech_name.lower() not in existing_names:
+                tech_findings.append(TechFinding(
+                    name=tech_name,
+                    categories=[],
+                    confidence="medium",
+                    evidence=["httpx-probe"],
+                ))
 
     # Privacy compliance analysis (uses paths + tech + landing HTML)
     privacy_result: PrivacyComplianceResult | None = None
@@ -306,70 +351,35 @@ async def _scan_single_target(
         logger.warning("Privacy analysis failed for %s: %s", target, exc)
         privacy_result = PrivacyComplianceResult(domain=domain, error=str(exc))
 
-    # JS mining + CVE lookup run in parallel (independent of each other)
-    cve_findings: list = []
-    js_coro = mine_javascript(target, landing_html, timeout=request.timeout)
-    cve_coro = lookup_cves(tech_findings, timeout=request.timeout) if tech_findings else None
-    if cve_coro:
-        js_raw, cve_raw = await asyncio.gather(js_coro, cve_coro, return_exceptions=True)
-    else:
-        js_raw = await asyncio.gather(js_coro, return_exceptions=True)
-        js_raw = js_raw[0]
-        cve_raw = []
-    if isinstance(js_raw, Exception):
-        logger.warning("JS mining failed for %s: %s", target, js_raw)
-    else:
-        js_intel_result = js_raw
-    if isinstance(cve_raw, Exception):
-        logger.warning("CVE lookup failed for %s: %s", target, cve_raw)
-    elif isinstance(cve_raw, list):
-        cve_findings = cve_raw
-
-    # Enrich CVEs with EPSS exploit scores and CISA KEV status
-    if cve_findings:
-        try:
-            await enrich_cves_with_epss_kev(cve_findings)
-        except Exception as exc:
-            logger.warning("EPSS/KEV enrichment failed for %s: %s", target, exc)
-
-
-    # Process favicon result
+    # Process Phase 1 exception results (sync).
     if isinstance(favicon_result, Exception):
         logger.warning("Favicon fetch failed for %s: %s", target, favicon_result)
         favicon_result = None
 
-    # Process port scan result
     if isinstance(port_scan_result, Exception):
         logger.warning("Port scan failed for %s: %s", target, port_scan_result)
         port_scan_result = PortScanResult(target=domain, error=str(port_scan_result))
 
-    # Process cloud assets result
     if isinstance(cloud_assets_result, Exception):
         logger.warning("Cloud asset scan failed for %s: %s", target, cloud_assets_result)
         cloud_assets_result = CloudAssetResult(domain=domain, error=str(cloud_assets_result))
 
-    # Process typosquatting result
     if isinstance(typosquat_result, Exception):
         logger.warning("Typosquatting scan failed for %s: %s", target, typosquat_result)
         typosquat_result = TyposquattingResult(domain=domain, error=str(typosquat_result))
 
-    # Subdomain takeover scan (uses CT-discovered subdomains)
-    # Subdomain takeover is a separate scan — use /recon/takeover directly.
     takeover_result = None
 
-    # Process sensitive paths
     if isinstance(paths_result, Exception):
         logger.warning("Path scan failed for %s: %s", target, paths_result)
         paths_result = []
 
-    # Unpack robots/sitemap from parallel gather
     robots_result, sitemap_result = None, None
     if isinstance(robots_sitemap_result, tuple):
         robots_result, sitemap_result = robots_sitemap_result
     elif isinstance(robots_sitemap_result, Exception):
         logger.warning("robots/sitemap parse failed for %s: %s", target, robots_sitemap_result)
 
-    # Process passive intel results
     def _passive_result(x, kind):
         if isinstance(x, Exception):
             msg = str(x) or x.__class__.__name__
@@ -382,40 +392,93 @@ async def _scan_single_target(
     rdap_result = _passive_result(rdap_result, RDAPResult)
     wayback_result = _passive_result(wayback_result, WaybackResult)
 
-    # Merge C99 subdomains into CT result (even if CT failed)
+    # DNS-based cloud service + database endpoint detection.
+    if not dns_result.error:
+        from .cloud_assets import detect_cloud_services_from_dns, detect_exposed_databases_from_dns
+        cloud_svcs = detect_cloud_services_from_dns(
+            cname_records=dns_result.cname_records,
+            mx_records=dns_result.mx_records,
+            txt_records=dns_result.txt_records,
+        )
+        db_findings = detect_exposed_databases_from_dns(
+            cname_records=dns_result.cname_records,
+        )
+        cloud_assets_result.cloud_services = cloud_svcs + db_findings
+
     c99_subs = c99_subs_result if isinstance(c99_subs_result, list) else []
-    if c99_subs and ct_result:
-        merged = set(ct_result.subdomains or [])
+    if ct_result:
+        # Single choke point for subdomains from BOTH sources (crt.sh + C99):
+        # validate every hostname so markdown-wrapped / malformed values never
+        # reach the output (e.g. "[www.x.com](https://www.x.com)"). Runs even when
+        # C99 returned nothing, so crt.sh-only results are cleaned too. Note the
+        # walrus keeps the CLEANED value, not the original.
+        merged = {c for h in (ct_result.subdomains or []) if (c := _clean_hostname(h))}
+        details: list[SubdomainEntry] = []
         for entry in c99_subs:
-            merged.add(entry["subdomain"])
+            host = _clean_hostname(entry.get("subdomain", ""))
+            if not host:
+                continue
+            merged.add(host)
+            details.append(SubdomainEntry(
+                subdomain=host,
+                ip=entry.get("ip"),
+                cloudflare=entry.get("cloudflare"),
+            ))
         ct_result.subdomains = sorted(merged)
-        ct_result.subdomain_details = [
-            SubdomainEntry(
-                subdomain=e["subdomain"],
-                ip=e.get("ip"),
-                cloudflare=e.get("cloudflare"),
-            )
-            for e in c99_subs
-        ]
-        if ct_result.error:
+        if details:
+            ct_result.subdomain_details = details
+        if c99_subs and ct_result.error:
             ct_result.error = None
 
-    # Email security + IP enrichment (depend on DNS data, run concurrently)
+    # Prepare inputs for Phase 2.
     mx_records = dns_result.mx_records if not dns_result.error else []
     a_records = dns_result.a_records if not dns_result.error else []
     a_ips = [r.address for r in a_records] if a_records else []
+    primary_ip = a_ips[0] if a_ips else ""
 
-    email_sec_raw, ip_enrich_raw = await asyncio.gather(
-        asyncio.wait_for(
-            query_email_security(domain, mx_records, timeout=request.timeout),
-            timeout=request.timeout,
-        ),
-        asyncio.wait_for(
-            query_ip_enrichment(domain, a_ips, timeout=request.timeout),
-            timeout=request.timeout,
-        ),
+    # Phase 2: JS mining, CVE lookup, email security, IP enrichment,
+    # and reputation checks all run concurrently.
+    async def _noop():
+        return None
+
+    js_coro = mine_javascript(target, landing_html, timeout=request.timeout)
+    cve_coro = lookup_cves(tech_findings, timeout=request.timeout) if tech_findings else _noop()
+    email_sec_coro = asyncio.wait_for(
+        query_email_security(domain, mx_records, timeout=request.timeout),
+        timeout=request.timeout,
+    )
+    ip_enrich_coro = asyncio.wait_for(
+        query_ip_enrichment(domain, a_ips, timeout=request.timeout),
+        timeout=request.timeout,
+    )
+    ip_rep_coro = check_ip_reputation(primary_ip) if primary_ip else _noop()
+    url_rep_coro = check_url_reputation(target)
+
+    (js_raw, cve_raw, email_sec_raw, ip_enrich_raw,
+     ip_raw, url_raw) = await asyncio.gather(
+        js_coro, cve_coro, email_sec_coro, ip_enrich_coro,
+        ip_rep_coro, url_rep_coro,
         return_exceptions=True,
     )
+
+    # Unpack JS mining + CVE results.
+    cve_findings: list = []
+    if isinstance(js_raw, Exception):
+        logger.warning("JS mining failed for %s: %s", target, js_raw)
+    else:
+        js_intel_result = js_raw
+    if isinstance(cve_raw, Exception):
+        logger.warning("CVE lookup failed for %s: %s", target, cve_raw)
+    elif isinstance(cve_raw, list):
+        cve_findings = cve_raw
+
+    if cve_findings:
+        try:
+            await enrich_cves_with_epss_kev(cve_findings)
+        except Exception as exc:
+            logger.warning("EPSS/KEV enrichment failed for %s: %s", target, exc)
+
+    # Unpack email security + IP enrichment.
     email_sec = (
         email_sec_raw if not isinstance(email_sec_raw, Exception)
         else EmailSecurityResult(domain=domain, error=str(email_sec_raw))
@@ -425,6 +488,14 @@ async def _scan_single_target(
         else IPEnrichmentResult(domain=domain, error=str(ip_enrich_raw))
     )
 
+    # SPF deep enumeration — runs after email_sec is available.
+    if email_sec.spf.exists:
+        try:
+            spf_intel = await enumerate_spf(domain, email_sec.spf, timeout=request.timeout)
+            email_sec.spf.intel = spf_intel
+        except Exception as exc:
+            logger.warning("SPF enumeration failed for %s: %s", domain, exc)
+
     dns_group = DNSGroup(
         records=dns_result, email_security=email_sec, ip_enrichment=ip_enrich,
     )
@@ -432,30 +503,26 @@ async def _scan_single_target(
         ct=ct_result, rdap=rdap_result, wayback=wayback_result,
     )
 
-    # C99 reputation checks (IP + URL, run concurrently)
+    # Unpack reputation results.
     ip_rep_result: IPReputationResult | None = None
     url_rep_result: URLReputationResult | None = None
-    try:
-        primary_ip = a_ips[0] if a_ips else ""
-        ip_rep_coro = check_ip_reputation(primary_ip) if primary_ip else asyncio.sleep(0)
-        url_rep_coro = check_url_reputation(target)
-        ip_raw, url_raw = await asyncio.gather(ip_rep_coro, url_rep_coro, return_exceptions=True)
-
-        if primary_ip and isinstance(ip_raw, dict):
-            ip_rep_result = IPReputationResult(
-                ip=primary_ip,
-                malicious=ip_raw.get("malicious", False),
-                detections=ip_raw.get("details", []) if isinstance(ip_raw.get("details"), list) else [],
-            )
-        if isinstance(url_raw, dict):
-            url_rep_result = URLReputationResult(
-                url=target,
-                blacklisted=url_raw.get("blacklisted", False),
-                detections=url_raw.get("detections", []),
-                sources_checked=url_raw.get("sources_checked", 0),
-            )
-    except Exception as exc:
-        logger.warning("C99 reputation checks failed for %s: %s", target, exc)
+    if primary_ip and isinstance(ip_raw, dict):
+        ip_rep_result = IPReputationResult(
+            ip=primary_ip,
+            malicious=ip_raw.get("malicious", False),
+            detections=ip_raw.get("details", []) if isinstance(ip_raw.get("details"), list) else [],
+        )
+    elif isinstance(ip_raw, Exception):
+        logger.warning("IP reputation check failed for %s: %s", target, ip_raw)
+    if isinstance(url_raw, dict):
+        url_rep_result = URLReputationResult(
+            url=target,
+            blacklisted=url_raw.get("blacklisted", False),
+            detections=url_raw.get("detections", []),
+            sources_checked=url_raw.get("sources_checked", 0),
+        )
+    elif isinstance(url_raw, Exception):
+        logger.warning("URL reputation check failed for %s: %s", target, url_raw)
 
     # C99 WAF detection
     waf_result: WAFResult | None = None
@@ -465,6 +532,38 @@ async def _scan_single_target(
             detected=waf_raw_result.get("detected", False),
             firewall=waf_raw_result.get("firewall"),
         )
+        # A vendor that is primarily a CDN (Cloudflare/Akamai/Fastly/etc.) being
+        # present proves proxying, not that a WAF ruleset is enabled. Record the
+        # CDN separately and leave WAF "not_assessed" unless the detector named a
+        # dedicated WAF product.
+        _fw = (waf_result.firewall or "").lower()
+        _cdn_vendors = {"cloudflare", "akamai", "fastly", "imperva", "incapsula",
+                        "cloudfront", "amazon", "azure front door", "google"}
+        if waf_result.detected and any(v in _fw for v in _cdn_vendors):
+            waf_result.cdn_detected = True
+            waf_result.cdn_provider = waf_result.firewall or ""
+            waf_result.reverse_proxy_detected = True
+            waf_result.waf_detected = None
+            waf_result.waf_detection_status = "not_assessed"
+        elif waf_result.detected and waf_result.firewall:
+            waf_result.waf_detected = True
+            waf_result.waf_provider = waf_result.firewall
+            waf_result.waf_detection_status = "detected"
+
+        # Even when the WAF detector returns nothing, the resolved IP's ASN may
+        # prove a CDN/reverse-proxy is fronting the site. Record that as CDN —
+        # never as a WAF (which stays not_assessed without a ruleset signal).
+        if not waf_result.cdn_detected:
+            _cdn_hosts = {h.lower() for h in (ip_enrich.hosting_providers or [])}
+            _cdn_match = next(
+                (h for h in _cdn_hosts if any(v in h for v in _cdn_vendors)), ""
+            )
+            if _cdn_match:
+                waf_result.cdn_detected = True
+                waf_result.cdn_provider = _cdn_match.title()
+                waf_result.reverse_proxy_detected = True
+                if waf_result.waf_detection_status == "not_assessed":
+                    waf_result.waf_detected = None
         if waf_result.detected and waf_result.firewall:
             existing_names = {t.name.lower() for t in tech_findings}
             if waf_result.firewall.lower() not in existing_names:
@@ -478,8 +577,13 @@ async def _scan_single_target(
 
     # Aggregate contacts, links, and secrets across all pages,
     # tracking which page URL each finding came from.
+    _tld = domain.rsplit(".", 1)[-1] if "." in domain else ""
+    _region_cc, _region_country = region_for_tld(_tld)
+
     email_sources: dict[str, list[str]] = {}
-    phone_sources: dict[str, list[str]] = {}
+    # Keyed by normalized E.164 value so formatting variants of the same number
+    # collapse into one finding.
+    phone_sources: dict[str, dict] = {}
     social_sources: dict[str, list[str]] = {}
     internal_links: set[str] = set()
     ext_link_sources: dict[str, dict] = {}   # url -> {anchor_text, found_on}
@@ -492,7 +596,14 @@ async def _scan_single_target(
         for email in page.contacts.emails:
             email_sources.setdefault(email, []).append(page_url)
         for phone in page.contacts.phone_numbers:
-            phone_sources.setdefault(phone, []).append(page_url)
+            norm = normalize_phone_e164(phone, _region_cc, _region_country)
+            key = norm["normalized_value"] or phone
+            entry = phone_sources.setdefault(
+                key,
+                {"raw": norm["raw_value"], "normalized": norm["normalized_value"],
+                 "country": norm["country"], "confidence": norm["confidence"], "found_on": []},
+            )
+            entry["found_on"].append(page_url)
         for social in page.contacts.social_profiles:
             social_sources.setdefault(social, []).append(page_url)
         for link in page.links:
@@ -522,13 +633,31 @@ async def _scan_single_target(
         for e, urls in sorted(email_sources.items())
     ]
     phone_findings = [
-        PhoneFinding(phone=p, found_on=sorted(set(urls)))
-        for p, urls in sorted(phone_sources.items())
+        PhoneFinding(
+            phone=key,
+            raw_value=d["raw"],
+            normalized_value=d["normalized"],
+            country=d["country"],
+            confidence=d["confidence"],
+            found_on=sorted(set(d["found_on"])),
+        )
+        for key, d in sorted(phone_sources.items())
     ]
     social_findings = [
-        SocialFinding(url=s, platform=detect_platform(s), found_on=sorted(set(urls)))
+        SocialFinding(
+            url=s,
+            platform=detect_platform(s),
+            link_type=classify_social_url(s),
+            found_on=sorted(set(urls)),
+        )
         for s, urls in sorted(social_sources.items())
     ]
+    # Only organisation-owned profiles count as social profiles; share/tracking
+    # buttons are reported separately and excluded from the profile total.
+    organisation_social = [f for f in social_findings if f.link_type == "organisation_profile"]
+    social_share_links = [f for f in social_findings if f.link_type in ("share_link", "tracking_link")]
+    # Confident phone numbers only (bare national fragments are low-confidence).
+    confident_phones = [f for f in phone_findings if f.confidence == "high"]
     ext_link_findings = []
     for u, d in sorted(ext_link_sources.items()):
         unique_pages = sorted(set(d["found_on"]))
@@ -598,12 +727,17 @@ async def _scan_single_target(
             ss_tasks = [take_screenshot(u) for u in screenshot_urls]
             ss_results = await asyncio.gather(*ss_tasks, return_exceptions=True)
             for ss in ss_results:
-                if isinstance(ss, ScreenshotResult) and not ss.error:
-                    screenshots.append(ss)
-                elif isinstance(ss, ScreenshotResult):
+                # Keep every ScreenshotResult (success or failure) in the list so
+                # the payload records the attempt; success is measured separately
+                # via _screenshot_succeeded — a failed/empty capture is not "taken".
+                if isinstance(ss, ScreenshotResult):
                     screenshots.append(ss)
         except Exception as exc:
             logger.warning("Screenshots failed for %s: %s", target, exc)
+
+    screenshot_attempts = len(screenshots)
+    screenshots_taken = sum(1 for ss in screenshots if _screenshot_succeeded(ss))
+    screenshot_failures = screenshot_attempts - screenshots_taken
 
     finished = datetime.now(timezone.utc).isoformat()
 
@@ -616,8 +750,10 @@ async def _scan_single_target(
     domain_summary = DomainSummary(
         pages_scanned=len(pages),
         emails_found=len(email_findings),
-        phone_numbers_found=len(phone_findings),
-        social_profiles_found=len(social_findings),
+        phone_numbers_found=len(confident_phones),
+        social_profiles_found=len(organisation_social),
+        organisation_social_profiles=len(organisation_social),
+        social_share_links=len(social_share_links),
         internal_links_found=len(internal_links),
         external_links_found=len(ext_link_findings),
         secrets_found=len(all_secrets),
@@ -642,12 +778,25 @@ async def _scan_single_target(
         emails_validated=len(email_validations),
         open_ports=len(port_scan_result.open_ports) if port_scan_result else 0,
         risky_ports=sum(1 for p in (port_scan_result.open_ports if port_scan_result else []) if p.is_risky),
-        cloud_buckets_found=len(cloud_assets_result.findings) if cloud_assets_result else 0,
-        screenshots_taken=len(screenshots),
+        cloud_buckets_found=(
+            cloud_assets_result.publicly_exposed_buckets
+            + cloud_assets_result.confirmed_owned_buckets
+        ) if cloud_assets_result else 0,
+        cloud_services_found=len(cloud_assets_result.cloud_services) if cloud_assets_result else 0,
+        exposed_databases_found=sum(
+            1 for s in (cloud_assets_result.cloud_services if cloud_assets_result else []) if s.is_database
+        ),
+        screenshot_attempts=screenshot_attempts,
+        screenshots_taken=screenshots_taken,
+        screenshot_failures=screenshot_failures,
         typosquat_candidates=len(typosquat_result.registered_candidates) if typosquat_result else 0,
         waf_detected=waf_result.firewall if waf_result and waf_result.detected else "",
         privacy_score=privacy_result.score if privacy_result else 0,
         consent_tool=privacy_result.consent_tool if privacy_result else "",
+        spf_senders_found=len(email_sec.spf.intel.senders) if email_sec.spf.intel else 0,
+        spf_services_found=len(email_sec.spf.intel.services_detected) if email_sec.spf.intel else 0,
+        vulnerable_libraries=supply_chain_result.vulnerable_libraries if supply_chain_result else 0,
+        scripts_without_sri=supply_chain_result.scripts_without_sri if supply_chain_result else 0,
     )
 
     # Build page summary from the raw pages list
@@ -690,6 +839,7 @@ async def _scan_single_target(
         technologies=tech_findings,
         breaches=breaches,
         js_intel=js_intel_result,
+        supply_chain=supply_chain_result,
         port_scan=port_scan_result,
         cloud_assets=cloud_assets_result,
         passive_intel=passive_slim,
@@ -711,13 +861,15 @@ async def _scan_single_target(
             "domain": domain,
             "render_js": request.render_js,
             "max_depth": request.max_depth,
+            **({"company_size": request.company_size.value} if request.company_size else {}),
         },
     )
     result.attack_paths = analyze_attack_paths(result)
-    result.risk_assessment = RiskAssessmentGroup(
-        fair_signals=compute_fair_signals(result, scan_mode="full"),
-        easm_report=build_easm_report(result, scan_mode="full"),
-    )
+    result.risk_assessment = RiskAssessmentGroup()
+    result.risk_assessment.easm_report = build_easm_report(result, scan_mode="full")
+    if result.risk_assessment.easm_report:
+        result.summary.overall_grade = result.risk_assessment.easm_report.overall_grade
+        result.summary.ransomware_susceptibility = result.risk_assessment.easm_report.ransomware_susceptibility.score
     fill_not_found(result)
     return result
 
@@ -780,8 +932,15 @@ async def scan(request: ScanRequest) -> ScanResponse:
         nuclei_status = "pending"
         asyncio.create_task(nuclei_background_scan(scan_id, domain_results))
 
+    scan_profile = getattr(request, "scan_profile", "") or "passive_easm"
+    nuclei_mod = nuclei_module_status(nuclei_status, scan_profile)
     for dr in domain_results:
         dr.metadata["nuclei_status"] = nuclei_status
+        dr.metadata["scan_profile"] = scan_profile
+        dr.metadata["active_vulnerability_scanning_included"] = (
+            nuclei_mod.included_in_scan_profile
+        )
+        dr.metadata["nuclei_module"] = nuclei_mod.model_dump(mode="json")
 
     return ScanResponse(
         scan_id=scan_id,
@@ -792,6 +951,329 @@ async def scan(request: ScanRequest) -> ScanResponse:
         total_targets=len(targets),
         results=domain_results,
     )
+
+
+# ---------------------------------------------------------------------------
+# Board scan — async job: discover subdomains, full-scan each, aggregate
+# ---------------------------------------------------------------------------
+
+_BOARD_JOBS: dict[str, BoardJobStatus] = {}
+
+
+def _evict_board_jobs() -> None:
+    from .config import BOARD_JOBS_MAX
+    while len(_BOARD_JOBS) > BOARD_JOBS_MAX:
+        oldest = next(iter(_BOARD_JOBS))
+        del _BOARD_JOBS[oldest]
+
+
+@app.post("/scan/board", status_code=202, response_model=BoardScanAck)
+async def board_scan(request: BoardScanRequest) -> BoardScanAck:
+    """Start an async board scan. Returns immediately with a scan_id to poll."""
+    scan_id = uuid.uuid4().hex
+    started = datetime.now(timezone.utc).isoformat()
+    domain = request.root_domain.strip().lower().lstrip("www.")
+
+    job = BoardJobStatus(scan_id=scan_id, status="pending", root_domain=domain, started_at=started)
+    _BOARD_JOBS[scan_id] = job
+    _evict_board_jobs()
+
+    asyncio.create_task(_run_board_job(scan_id, request))
+
+    logger.info("Board scan queued for %s (scan_id=%s)", domain, scan_id)
+
+    return BoardScanAck(
+        scan_id=scan_id,
+        status="pending",
+        root_domain=domain,
+        started_at=started,
+        poll_url=f"/scan/board/{scan_id}",
+        message=f"Board scan started for {domain}. Poll GET /scan/board/{scan_id} for progress.",
+    )
+
+
+@app.get("/scan/board/{scan_id}", response_model=BoardJobStatus)
+async def board_scan_status(scan_id: str) -> BoardJobStatus:
+    """Poll a running or completed board scan by scan_id."""
+    job = _BOARD_JOBS.get(scan_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Board scan {scan_id} not found.")
+    return job
+
+
+async def _run_board_job(scan_id: str, request: BoardScanRequest) -> None:
+    """Background worker: discover subdomains, scan each, aggregate, webhook."""
+    from .board_report import build_board_report
+    from .nuclei_webhook import post_board_webhook
+    from .subdomain_takeover import enumerate_subdomains
+
+    job = _BOARD_JOBS[scan_id]
+    domain = job.root_domain
+
+    try:
+        job.status = "running"
+
+        ct_result = await query_ct_logs(domain, timeout=request.timeout)
+        ct_subs = ct_result.subdomains if ct_result and not ct_result.error else []
+
+        enum_result = await enumerate_subdomains(
+            domain, known_subdomains=ct_subs, timeout=request.timeout,
+        )
+        live_subs: list[str] = enum_result.get("live_subdomains", [])
+
+        all_targets = [f"https://{domain}"]
+        for sub in live_subs:
+            if sub != domain:
+                all_targets.append(f"https://{sub}")
+
+        if request.max_subdomains > 0:
+            all_targets = all_targets[:1 + request.max_subdomains]
+
+        job.subdomains_discovered = len(live_subs)
+        job.targets_total = len(all_targets)
+
+        logger.info(
+            "Board scan %s: %d subdomains discovered, scanning %d targets",
+            scan_id, job.subdomains_discovered, len(all_targets),
+        )
+
+        scan_req = ScanRequest(
+            targets=["placeholder"],
+            render_js=request.render_js,
+            follow_redirects=request.follow_redirects,
+            max_depth=request.max_depth,
+            check_breaches=request.check_breaches,
+            timeout=request.timeout,
+            company_size=request.company_size,
+        )
+
+        sem = asyncio.Semaphore(SCAN_CONCURRENCY)
+
+        async def _bounded(target: str) -> DomainResult | None:
+            async with sem:
+                try:
+                    result = await _scan_single_target(target, scan_req)
+                    job.targets_completed += 1
+                    logger.info(
+                        "Board scan %s: %d/%d completed (%s)",
+                        scan_id, job.targets_completed, job.targets_total, target,
+                    )
+                    return result
+                except Exception as exc:
+                    job.targets_completed += 1
+                    logger.warning("Board scan %s: target %s failed: %s", scan_id, target, exc)
+                    return None
+
+        raw_results = await asyncio.gather(*(_bounded(t) for t in all_targets))
+        domain_results: list[DomainResult] = [r for r in raw_results if r is not None]
+
+        board_report = build_board_report(
+            domain, domain_results, subdomains_discovered=job.subdomains_discovered,
+        )
+
+        finished = datetime.now(timezone.utc).isoformat()
+
+        errors = [r for r in domain_results if r.error]
+        if not domain_results:
+            status = "failed"
+        elif errors:
+            status = "partial"
+        else:
+            status = "completed"
+
+        job.status = status
+        job.finished_at = finished
+        job.board_report = board_report
+        job.results = domain_results
+
+        logger.info(
+            "Board scan %s finished: %s, %d targets scanned, estate grade %s",
+            scan_id, status, len(domain_results), board_report.estate_grade,
+        )
+
+        await post_board_webhook(scan_id, domain, status, board_report, domain_results)
+
+    except Exception as exc:
+        logger.exception("Board scan %s crashed: %s", scan_id, exc)
+        job.status = "failed"
+        job.finished_at = datetime.now(timezone.utc).isoformat()
+        job.error = str(exc)
+
+
+# ---------------------------------------------------------------------------
+# Async batch scan — scan a known list of targets in the background,
+# webhook each result as it completes (no request timeout, nothing lost)
+# ---------------------------------------------------------------------------
+
+_SCAN_JOBS: dict[str, AsyncScanJobStatus] = {}
+
+
+def _evict_scan_jobs() -> None:
+    from .config import SCAN_JOBS_MAX
+    while len(_SCAN_JOBS) > SCAN_JOBS_MAX:
+        oldest = next(iter(_SCAN_JOBS))
+        del _SCAN_JOBS[oldest]
+
+
+@app.post("/scan/async", status_code=202, response_model=AsyncScanAck)
+async def scan_async(request: ScanRequest) -> AsyncScanAck:
+    """Start a background scan of many targets. Returns immediately with a scan_id.
+
+    Each target's full result is POSTed to XANO_SCAN_WEBHOOK_URL as it finishes,
+    so a 200+ host estate streams back over time instead of timing out a single
+    synchronous request. Poll GET /scan/async/{scan_id} for progress.
+    """
+    targets = [validate_target(t) for t in request.targets]
+    scan_id = uuid.uuid4().hex
+    started = datetime.now(timezone.utc).isoformat()
+
+    job = AsyncScanJobStatus(
+        scan_id=scan_id,
+        status="pending",
+        started_at=started,
+        targets_total=len(targets),
+        rows=[AsyncScanRow(target=t) for t in targets],
+    )
+    _SCAN_JOBS[scan_id] = job
+    _evict_scan_jobs()
+
+    asyncio.create_task(_run_async_scan_job(scan_id, targets, request))
+
+    logger.info("Async scan queued: %d targets (scan_id=%s)", len(targets), scan_id)
+
+    return AsyncScanAck(
+        scan_id=scan_id,
+        status="pending",
+        targets_total=len(targets),
+        poll_url=f"/scan/async/{scan_id}",
+        message=(
+            f"Scan started for {len(targets)} target(s). Results are POSTed to the "
+            f"scan webhook as they complete. Poll GET /scan/async/{scan_id} for progress."
+        ),
+    )
+
+
+@app.get("/scan/async/{scan_id}", response_model=AsyncScanJobStatus)
+async def scan_async_status(scan_id: str) -> AsyncScanJobStatus:
+    """Poll a running or completed async batch scan by scan_id."""
+    job = _SCAN_JOBS.get(scan_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Async scan {scan_id} not found.")
+    return job
+
+
+async def _run_async_scan_job(
+    scan_id: str,
+    targets: list[str],
+    request: ScanRequest,
+) -> None:
+    """Background worker: scan each target concurrently, webhook each result."""
+    from .nuclei_webhook import post_scan_complete_webhook, post_scan_result_webhook
+
+    job = _SCAN_JOBS[scan_id]
+    row_by_target = {row.target: row for row in job.rows}
+
+    try:
+        job.status = "running"
+        sem = asyncio.Semaphore(SCAN_CONCURRENCY)
+        total = len(targets)
+
+        async def _bounded(idx: int, target: str) -> None:
+            async with sem:
+                row = row_by_target.get(target)
+                try:
+                    result = await _scan_single_target(target, request)
+                    if result.error:
+                        job.targets_failed += 1
+                        if row:
+                            row.status = "failed"
+                    else:
+                        job.targets_completed += 1
+                        if row:
+                            row.status = "completed"
+                            easm = result.easm_report
+                            row.grade = easm.overall_grade if easm else ""
+                except Exception as exc:
+                    job.targets_failed += 1
+                    if row:
+                        row.status = "failed"
+                    logger.warning("Async scan %s: target %s failed: %s", scan_id, target, exc)
+                    return
+
+                try:
+                    delivered = await post_scan_result_webhook(
+                        scan_id, result, index=idx, total=total,
+                    )
+                    if delivered:
+                        job.delivered += 1
+                except Exception as exc:
+                    logger.warning(
+                        "Async scan %s: webhook for %s failed: %s", scan_id, target, exc,
+                    )
+
+        await asyncio.gather(*(_bounded(i, t) for i, t in enumerate(targets)))
+
+        job.status = "completed"
+        job.finished_at = datetime.now(timezone.utc).isoformat()
+
+        logger.info(
+            "Async scan %s finished: %d completed, %d failed, %d delivered",
+            scan_id, job.targets_completed, job.targets_failed, job.delivered,
+        )
+
+        await post_scan_complete_webhook(
+            scan_id,
+            targets_total=total,
+            targets_completed=job.targets_completed,
+            targets_failed=job.targets_failed,
+        )
+
+    except Exception as exc:
+        logger.exception("Async scan %s crashed: %s", scan_id, exc)
+        job.status = "failed"
+        job.finished_at = datetime.now(timezone.utc).isoformat()
+        job.error = str(exc)
+
+
+# ---------------------------------------------------------------------------
+# Aggregate endpoint — accepts stored EASM data, returns board report
+# ---------------------------------------------------------------------------
+
+@app.post("/report/aggregate", response_model=BoardReport)
+async def aggregate_report(request: AggregateRequest) -> BoardReport:
+    """Aggregate pre-scanned EASM data into a board report.
+
+    Accepts stored EASM report data from Xano (no re-scanning) and runs the
+    board report aggregation: deduplication, grading, financial/ransomware
+    aggregation, compliance posture.  Returns instantly.
+    """
+    from .board_report import build_board_report
+    from .models import DomainResult, EASMReport, RiskAssessmentGroup
+
+    domain_results: list[DomainResult] = []
+    for sub in request.subdomains:
+        easm = EASMReport(
+            overall_grade=sub.overall_grade,
+            prioritized_findings=sub.prioritized_findings,
+            financial_impact=sub.financial_impact,
+            ransomware_susceptibility=sub.ransomware_susceptibility,
+            executive_summary=sub.executive_summary,
+            confirmed_issues=sub.confirmed_issues,
+            total_findings=sub.total_findings,
+            compliance_summary=sub.compliance_summary,
+        )
+        dr = DomainResult(
+            target=sub.target,
+            risk_assessment=RiskAssessmentGroup(easm_report=easm),
+        )
+        domain_results.append(dr)
+
+    board = build_board_report(
+        request.root_domain,
+        domain_results,
+        subdomains_discovered=len(request.subdomains),
+    )
+    return board
 
 
 @app.post("/scan/quick")
@@ -807,7 +1289,7 @@ async def quick_scan(request: ScanRequest) -> ScanResponse:
 # Light-touch scan — exactly one GET per target (WAF-friendly)
 # ---------------------------------------------------------------------------
 
-async def _lighttouch_single_target(target: str, timeout: int) -> DomainResult:
+async def _lighttouch_single_target(target: str, timeout: int, *, company_size: str | None = None) -> DomainResult:
     """Single-GET scan with a browser UA. No path probe, crawl, JS mine, or breach."""
     domain = _extract_domain(target)
     started = datetime.now(timezone.utc).isoformat()
@@ -860,6 +1342,13 @@ async def _lighttouch_single_target(target: str, timeout: int) -> DomainResult:
     except Exception as exc:
         ip_enrich = IPEnrichmentResult(domain=domain, error=str(exc))
 
+    if email_sec.spf.exists:
+        try:
+            spf_intel = await enumerate_spf(domain, email_sec.spf, timeout=timeout)
+            email_sec.spf.intel = spf_intel
+        except Exception as exc:
+            logger.warning("SPF enumeration failed for %s: %s", domain, exc)
+
     lt_dns_group = DNSGroup(
         records=dns_result, email_security=email_sec, ip_enrichment=ip_enrich,
     )
@@ -898,6 +1387,12 @@ async def _lighttouch_single_target(target: str, timeout: int) -> DomainResult:
         meta=meta,
     )
 
+    lt_supply_chain = None
+    try:
+        lt_supply_chain = analyze_supply_chain(html, target)
+    except Exception as exc:
+        logger.warning("Supply chain analysis failed for %s: %s", target, exc)
+
     headers_result = analyze_headers(resp_headers)
     cookie_findings = analyze_cookies(resp_cookies)
 
@@ -922,14 +1417,29 @@ async def _lighttouch_single_target(target: str, timeout: int) -> DomainResult:
     email_findings = [
         EmailFinding(email=e, found_on=[target]) for e in sorted(set(contacts.emails))
     ]
+    _lt_tld = domain.rsplit(".", 1)[-1] if "." in domain else ""
+    _lt_cc, _lt_country = region_for_tld(_lt_tld)
+    _lt_phones: dict[str, dict] = {}
+    for p in contacts.phone_numbers:
+        n = normalize_phone_e164(p, _lt_cc, _lt_country)
+        _lt_phones.setdefault(n["normalized_value"] or p, n)
     phone_findings = [
-        PhoneFinding(phone=p, found_on=[target])
-        for p in sorted(set(contacts.phone_numbers))
+        PhoneFinding(
+            phone=key, raw_value=n["raw_value"], normalized_value=n["normalized_value"],
+            country=n["country"], confidence=n["confidence"], found_on=[target],
+        )
+        for key, n in sorted(_lt_phones.items())
     ]
     social_findings = [
-        SocialFinding(url=s, platform=detect_platform(s), found_on=[target])
+        SocialFinding(
+            url=s, platform=detect_platform(s), link_type=classify_social_url(s),
+            found_on=[target],
+        )
         for s in sorted(set(contacts.social_profiles))
     ]
+    organisation_social = [f for f in social_findings if f.link_type == "organisation_profile"]
+    social_share_links = [f for f in social_findings if f.link_type in ("share_link", "tracking_link")]
+    confident_phones = [f for f in phone_findings if f.confidence == "high"]
 
     page = PageResult(
         url=target,
@@ -948,8 +1458,10 @@ async def _lighttouch_single_target(target: str, timeout: int) -> DomainResult:
     summary = DomainSummary(
         pages_scanned=1 if html else 0,
         emails_found=len(email_findings),
-        phone_numbers_found=len(phone_findings),
-        social_profiles_found=len(social_findings),
+        phone_numbers_found=len(confident_phones),
+        social_profiles_found=len(organisation_social),
+        organisation_social_profiles=len(organisation_social),
+        social_share_links=len(social_share_links),
         internal_links_found=len(internal_links),
         external_links_found=len(ext_link_findings),
         secrets_found=len(secrets),
@@ -961,6 +1473,8 @@ async def _lighttouch_single_target(target: str, timeout: int) -> DomainResult:
         ioc_findings=len(iocs),
         technologies_found=len(tech_findings),
         js_endpoints_found=0,
+        vulnerable_libraries=lt_supply_chain.vulnerable_libraries if lt_supply_chain else 0,
+        scripts_without_sri=lt_supply_chain.scripts_without_sri if lt_supply_chain else 0,
     )
 
     from urllib.parse import urlparse as _urlparse
@@ -993,15 +1507,21 @@ async def _lighttouch_single_target(target: str, timeout: int) -> DomainResult:
             routes=_lt_routes,
         ),
         technologies=tech_findings,
+        supply_chain=lt_supply_chain,
         passive_intel=lt_passive_slim,
-        metadata={"domain": domain, "mode": "lighttouch"},
+        metadata={
+            "domain": domain,
+            "mode": "lighttouch",
+            **({"company_size": company_size} if company_size else {}),
+        },
         error=None if html else "landing page fetch failed",
     )
     result.attack_paths = analyze_attack_paths(result)
-    result.risk_assessment = RiskAssessmentGroup(
-        fair_signals=compute_fair_signals(result, scan_mode="lighttouch"),
-        easm_report=build_easm_report(result, scan_mode="lighttouch"),
-    )
+    result.risk_assessment = RiskAssessmentGroup()
+    result.risk_assessment.easm_report = build_easm_report(result, scan_mode="lighttouch")
+    if result.risk_assessment.easm_report:
+        result.summary.overall_grade = result.risk_assessment.easm_report.overall_grade
+        result.summary.ransomware_susceptibility = result.risk_assessment.easm_report.ransomware_susceptibility.score
     fill_not_found(result)
     return result
 
@@ -1026,7 +1546,10 @@ async def lighttouch_scan(request: LightTouchRequest) -> ScanResponse:
 
     async def _bounded_lt(t: str) -> DomainResult:
         async with sem:
-            return await _lighttouch_single_target(t, request.timeout)
+            return await _lighttouch_single_target(
+                t, request.timeout,
+                company_size=request.company_size.value if request.company_size else None,
+            )
 
     domain_results = await asyncio.gather(
         *(_bounded_lt(t) for t in targets)
@@ -1079,7 +1602,7 @@ class PassiveRequest(ReconRequest):
 
 
 async def _passive_single_target(
-    target: str, emails: list[str], timeout: int,
+    target: str, emails: list[str], timeout: int, *, company_size: str | None = None,
 ) -> DomainResult:
     domain = _extract_domain(target)
     started = datetime.now(timezone.utc).isoformat()
@@ -1136,6 +1659,13 @@ async def _passive_single_target(
     except Exception as exc:
         ip_enrich = IPEnrichmentResult(domain=domain, error=str(exc))
 
+    if email_sec.spf.exists:
+        try:
+            spf_intel = await enumerate_spf(domain, email_sec.spf, timeout=timeout)
+            email_sec.spf.intel = spf_intel
+        except Exception as exc:
+            logger.warning("SPF enumeration failed for %s: %s", domain, exc)
+
     p_dns_group = DNSGroup(
         records=dns, email_security=email_sec, ip_enrichment=ip_enrich,
     )
@@ -1166,14 +1696,19 @@ async def _passive_single_target(
         dns=p_dns_group,
         breaches=breaches,
         passive_intel=p_passive_slim,
-        metadata={"domain": domain, "mode": "passive"},
+        metadata={
+            "domain": domain,
+            "mode": "passive",
+            **({"company_size": company_size} if company_size else {}),
+        },
         error=passive_error,
     )
     result.attack_paths = analyze_attack_paths(result)
-    result.risk_assessment = RiskAssessmentGroup(
-        fair_signals=compute_fair_signals(result, scan_mode="passive"),
-        easm_report=build_easm_report(result, scan_mode="passive"),
-    )
+    result.risk_assessment = RiskAssessmentGroup()
+    result.risk_assessment.easm_report = build_easm_report(result, scan_mode="passive")
+    if result.risk_assessment.easm_report:
+        result.summary.overall_grade = result.risk_assessment.easm_report.overall_grade
+        result.summary.ransomware_susceptibility = result.risk_assessment.easm_report.ransomware_susceptibility.score
     fill_not_found(result)
     return result
 
@@ -1194,7 +1729,10 @@ async def passive_scan(request: PassiveRequest) -> ScanResponse:
 
     async def _bounded_passive(t: str) -> DomainResult:
         async with sem:
-            return await _passive_single_target(t, list(request.emails or []), request.timeout)
+            return await _passive_single_target(
+                t, list(request.emails or []), request.timeout,
+                company_size=request.company_size.value if request.company_size else None,
+            )
 
     domain_results = await asyncio.gather(*(
         _bounded_passive(t) for t in targets

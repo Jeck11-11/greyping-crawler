@@ -62,7 +62,7 @@ def parse_robots_txt(content: str) -> RobotsTxtResult:
 def parse_sitemap_xml(content: str) -> SitemapResult:
     """Extract URLs from a sitemap or sitemap index XML document."""
     if not content.strip():
-        return SitemapResult(found=False)
+        return SitemapResult(found=False, sitemap_parse_status="empty")
 
     urls: list[str] = []
     nested: list[str] = []
@@ -70,12 +70,17 @@ def parse_sitemap_xml(content: str) -> SitemapResult:
     try:
         root = ET.fromstring(content)
     except ET.ParseError:
-        return SitemapResult(found=True)
+        # A whitespace-only / near-empty body is an empty sitemap, not a parse
+        # failure. Only non-trivial unparseable content is a real failure.
+        status = "empty" if len(content.strip()) < 10 else "failed"
+        return SitemapResult(found=True, sitemap_parse_status=status)
 
     ns = ""
     tag = root.tag
     if tag.startswith("{"):
         ns = tag.split("}")[0] + "}"
+
+    root_is_index = tag.replace(ns, "") == "sitemapindex"
 
     for loc in root.iter(f"{ns}loc"):
         text = (loc.text or "").strip()
@@ -93,11 +98,26 @@ def parse_sitemap_xml(content: str) -> SitemapResult:
         if len(urls) >= _MAX_SITEMAP_URLS:
             break
 
+    # An index (or any doc that only yielded nested sitemap references) has more
+    # to fetch — report it as partial rather than implying zero URLs exist. Only
+    # a leaf urlset that produced page URLs is "complete".
+    sitemap_indexes_found = 1 if (root_is_index or nested) else 0
+    if urls:
+        parse_status = "complete"
+    elif nested or root_is_index:
+        parse_status = "partial"
+    else:
+        parse_status = "empty"
+
     return SitemapResult(
         found=True,
         url_count=len(urls),
         urls=urls[:_MAX_SITEMAP_URLS],
         nested_sitemaps=nested,
+        sitemap_indexes_found=sitemap_indexes_found,
+        nested_sitemaps_found=len(nested),
+        sitemap_urls_extracted=len(urls),
+        sitemap_parse_status=parse_status,
     )
 
 

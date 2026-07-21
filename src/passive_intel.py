@@ -31,20 +31,33 @@ from .models import (
     ARecord,
     AAAARecord,
     ASNInfo,
+    BIMIResult,
     CAARecord,
     CNAMERecord,
     CTResult,
     DKIMResult,
     DMARCResult,
     DNSResult,
+    DSRecord,
     EmailSecurityResult,
+    HINFORecord,
     IPEnrichmentResult,
+    LOCRecord,
+    MTASTSResult,
     MXRecordFull,
+    NAPTRRecord,
     NSRecord,
     RDAPResult,
+    RPRecord,
     SOARecord,
+    SPFIncludeNode,
+    SPFIntelResult,
+    SPFMechanism,
     SPFResult,
+    SPFSenderInfo,
     SRVRecord,
+    SSHFPRecord,
+    TLSARecord,
     TXTRecord,
     WaybackResult,
 )
@@ -68,6 +81,48 @@ async def _bounded_executor(fn, *args):
 # ---------------------------------------------------------------------------
 # DNS
 # ---------------------------------------------------------------------------
+
+# Common two-level public suffixes so we don't treat "co.uk" as the org domain.
+_TWO_LEVEL_TLDS = frozenset({
+    "co.uk", "org.uk", "gov.uk", "ac.uk", "co.nz", "co.za", "com.au", "net.au",
+    "org.au", "co.jp", "com.br", "co.in", "co.kr", "com.mx", "com.sg",
+})
+
+
+_MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
+_VALID_HOSTNAME_RE = re.compile(r"^[a-z0-9]([a-z0-9\-]{0,62}\.)+[a-z]{2,63}$")
+
+
+def _clean_hostname(raw: str) -> str:
+    """Strip markdown-link wrapping and validate a hostname; '' if not valid.
+
+    crt.sh / third-party feeds occasionally return a value like
+    ``[www.example.com](https://www.example.com)`` — unwrap it, drop wildcard/
+    scheme/whitespace noise, and reject anything that isn't a plain hostname.
+    """
+    if not raw:
+        return ""
+    host = _MARKDOWN_LINK_RE.sub(r"\1", raw).strip().lower()
+    host = host.removeprefix("https://").removeprefix("http://")
+    host = host.lstrip("*.").rstrip(".").split("/")[0]
+    if not _VALID_HOSTNAME_RE.match(host):
+        return ""
+    return host
+
+
+def _organizational_domain(hostname: str) -> str:
+    """Best-effort registrable (organizational) domain from a hostname.
+
+    e.g. autodiscover.dnait.ie -> dnait.ie; foo.example.co.uk -> example.co.uk.
+    """
+    parts = (hostname or "").lower().strip(".").split(".")
+    if len(parts) <= 2:
+        return ".".join(parts)
+    last_two = ".".join(parts[-2:])
+    if last_two in _TWO_LEVEL_TLDS and len(parts) >= 3:
+        return ".".join(parts[-3:])
+    return last_two
+
 
 def _dns_resolve(domain: str, rdtype: str) -> list[Any]:
     """Blocking helper — resolves one record type via dnspython.
@@ -156,8 +211,145 @@ def _check_dnssec(domain: str) -> bool | None:
         return None
 
 
+_TLSA_PORTS = [
+    (25, "tcp"),
+    (443, "tcp"),
+    (993, "tcp"),
+    (995, "tcp"),
+]
+
+
+def _resolve_tlsa(domain: str) -> list[TLSARecord]:
+    records: list[TLSARecord] = []
+    for port, proto in _TLSA_PORTS:
+        try:
+            answers = dns.resolver.resolve(f"_{port}._{proto}.{domain}", "TLSA", lifetime=DNS_LIFETIME)
+            ttl = answers.rrset.ttl if hasattr(answers, "rrset") else 0
+            for rr in answers:
+                records.append(TLSARecord(
+                    usage=rr.usage,
+                    selector=rr.selector,
+                    matching_type=rr.mtype,
+                    certificate_data=rr.cert.hex(),
+                    port=port,
+                    protocol=proto,
+                    ttl=ttl,
+                ))
+        except Exception:
+            continue
+    return records
+
+
+def _resolve_sshfp(domain: str) -> list[SSHFPRecord]:
+    try:
+        answers = dns.resolver.resolve(domain, "SSHFP", lifetime=DNS_LIFETIME)
+        ttl = answers.rrset.ttl if hasattr(answers, "rrset") else 0
+        return [
+            SSHFPRecord(
+                algorithm=rr.algorithm,
+                fingerprint_type=rr.fp_type,
+                fingerprint=rr.fingerprint.hex(),
+                ttl=ttl,
+            )
+            for rr in answers
+        ]
+    except Exception:
+        return []
+
+
+def _resolve_ds(domain: str) -> list[DSRecord]:
+    try:
+        answers = dns.resolver.resolve(domain, "DS", lifetime=DNS_LIFETIME)
+        ttl = answers.rrset.ttl if hasattr(answers, "rrset") else 0
+        return [
+            DSRecord(
+                key_tag=rr.key_tag,
+                algorithm=rr.algorithm,
+                digest_type=rr.digest_type,
+                digest=rr.digest.hex(),
+                ttl=ttl,
+            )
+            for rr in answers
+        ]
+    except Exception:
+        return []
+
+
+def _resolve_naptr(domain: str) -> list[NAPTRRecord]:
+    try:
+        answers = dns.resolver.resolve(domain, "NAPTR", lifetime=DNS_LIFETIME)
+        ttl = answers.rrset.ttl if hasattr(answers, "rrset") else 0
+        return [
+            NAPTRRecord(
+                order=rr.order,
+                preference=rr.preference,
+                flags=rr.flags.decode("ascii", errors="replace") if isinstance(rr.flags, bytes) else str(rr.flags),
+                service=rr.service.decode("ascii", errors="replace") if isinstance(rr.service, bytes) else str(rr.service),
+                regexp=rr.regexp.decode("utf-8", errors="replace") if isinstance(rr.regexp, bytes) else str(rr.regexp),
+                replacement=str(rr.replacement).rstrip("."),
+                ttl=ttl,
+            )
+            for rr in answers
+        ]
+    except Exception:
+        return []
+
+
+def _resolve_loc(domain: str) -> list[LOCRecord]:
+    try:
+        answers = dns.resolver.resolve(domain, "LOC", lifetime=DNS_LIFETIME)
+        ttl = answers.rrset.ttl if hasattr(answers, "rrset") else 0
+        return [
+            LOCRecord(
+                latitude=rr.float_latitude,
+                longitude=rr.float_longitude,
+                altitude=(rr.altitude / 100.0) - 100000.0,
+                size=rr.size / 100.0,
+                horizontal_precision=rr.horizontal_precision / 100.0,
+                vertical_precision=rr.vertical_precision / 100.0,
+                ttl=ttl,
+            )
+            for rr in answers
+        ]
+    except Exception:
+        return []
+
+
+def _resolve_rp(domain: str) -> list[RPRecord]:
+    try:
+        answers = dns.resolver.resolve(domain, "RP", lifetime=DNS_LIFETIME)
+        ttl = answers.rrset.ttl if hasattr(answers, "rrset") else 0
+        return [
+            RPRecord(
+                mbox=str(rr.mbox).rstrip(".").replace(".", "@", 1),
+                txt_domain=str(rr.txt).rstrip("."),
+                ttl=ttl,
+            )
+            for rr in answers
+        ]
+    except Exception:
+        return []
+
+
+def _resolve_hinfo(domain: str) -> list[HINFORecord]:
+    try:
+        answers = dns.resolver.resolve(domain, "HINFO", lifetime=DNS_LIFETIME)
+        ttl = answers.rrset.ttl if hasattr(answers, "rrset") else 0
+        return [
+            HINFORecord(
+                cpu=rr.cpu.decode("utf-8", errors="replace") if isinstance(rr.cpu, bytes) else str(rr.cpu),
+                os=rr.os.decode("utf-8", errors="replace") if isinstance(rr.os, bytes) else str(rr.os),
+                ttl=ttl,
+            )
+            for rr in answers
+        ]
+    except Exception:
+        return []
+
+
 async def query_dns(domain: str, *, timeout: int = PASSIVE_TIMEOUT) -> DNSResult:
-    """Resolve A, AAAA, MX, NS, TXT, CNAME, SOA, SRV, CAA, PTR, and DNSSEC.
+    """Resolve A, AAAA, MX, NS, TXT, CNAME, SOA, SRV, CAA, PTR, DNSSEC,
+    TLSA, SSHFP, DS, NAPTR, LOC, RP, and HINFO.
 
     A/AAAA use the system resolver (stdlib socket) for maximum compat.
     All other types use dnspython.
@@ -194,14 +386,25 @@ async def query_dns(domain: str, *, timeout: int = PASSIVE_TIMEOUT) -> DNSResult
         srv_task = loop.run_in_executor(None, _resolve_srv, domain)
         caa_task = loop.run_in_executor(None, _resolve_caa, domain)
         dnssec_task = loop.run_in_executor(None, _check_dnssec, domain)
+        tlsa_task = loop.run_in_executor(None, _resolve_tlsa, domain)
+        sshfp_task = loop.run_in_executor(None, _resolve_sshfp, domain)
+        ds_task = loop.run_in_executor(None, _resolve_ds, domain)
+        naptr_task = loop.run_in_executor(None, _resolve_naptr, domain)
+        loc_task = loop.run_in_executor(None, _resolve_loc, domain)
+        rp_task = loop.run_in_executor(None, _resolve_rp, domain)
+        hinfo_task = loop.run_in_executor(None, _resolve_hinfo, domain)
 
         (
             a_records, aaaa_records, mx_raw, ns_raw, txt_raw, cname_raw,
             soa_record, srv_records, caa_records, dnssec,
+            tlsa_records, sshfp_records, ds_records, naptr_records,
+            loc_records, rp_records, hinfo_records,
         ) = await asyncio.wait_for(
             asyncio.gather(
                 a_task, aaaa_task, mx_task, ns_task, txt_task, cname_task,
                 soa_task, srv_task, caa_task, dnssec_task,
+                tlsa_task, sshfp_task, ds_task, naptr_task,
+                loc_task, rp_task, hinfo_task,
             ),
             timeout=timeout,
         )
@@ -277,6 +480,13 @@ async def query_dns(domain: str, *, timeout: int = PASSIVE_TIMEOUT) -> DNSResult
             caa_records=caa_records,
             ptr_records=[r for r in ptr_results if isinstance(r, str) and r],
             dnssec=dnssec,
+            tlsa_records=tlsa_records,
+            sshfp_records=sshfp_records,
+            ds_records=ds_records,
+            naptr_records=naptr_records,
+            loc_records=loc_records,
+            rp_records=rp_records,
+            hinfo_records=hinfo_records,
         )
     except asyncio.TimeoutError:
         return DNSResult(domain=domain, error="DNS resolution timed out")
@@ -314,10 +524,10 @@ async def query_ct_logs(domain: str, *, timeout: int = PASSIVE_TIMEOUT) -> CTRes
         for entry in data or []:
             name_value = entry.get("name_value") or ""
             for host in name_value.splitlines():
-                host = host.strip().lower().lstrip("*.")
+                host = _clean_hostname(host)
                 if host and host.endswith(domain.lower()):
                     subdomains.add(host)
-            cn = (entry.get("common_name") or "").strip().lower().lstrip("*.")
+            cn = _clean_hostname(entry.get("common_name") or "")
             if cn and cn.endswith(domain.lower()):
                 subdomains.add(cn)
             issuer = (entry.get("issuer_name") or "").strip()
@@ -479,11 +689,8 @@ _MX_PROVIDERS: list[tuple[str, str]] = [
 
 def _parse_spf(txt_records: list[str]) -> SPFResult:
     """Extract SPF from the domain's TXT records and parse key fields."""
-    raw = None
-    for txt in txt_records:
-        if txt.lower().startswith("v=spf1"):
-            raw = txt
-            break
+    spf_records = [txt for txt in txt_records if txt.lower().startswith("v=spf1")]
+    raw = spf_records[0] if spf_records else None
     if not raw:
         return SPFResult(
             exists=False,
@@ -498,6 +705,11 @@ def _parse_spf(txt_records: list[str]) -> SPFResult:
         all_qual = m.group(0)
 
     issues: list[str] = []
+    if len(spf_records) > 1:
+        issues.append(
+            f"Multiple SPF records found ({len(spf_records)}) — RFC 7208 requires exactly one; "
+            "receiving servers may return permerror"
+        )
     if all_qual == "+all":
         issues.append("SPF uses +all (pass) — allows any sender, effectively no protection")
     elif all_qual == "?all":
@@ -512,6 +724,329 @@ def _parse_spf(txt_records: list[str]) -> SPFResult:
         includes=includes,
         issues=issues,
     )
+
+
+# ---------------------------------------------------------------------------
+# SPF deep enumeration — mechanism parsing, include tree, IP enrichment
+# ---------------------------------------------------------------------------
+
+_SPF_INCLUDE_SERVICE_MAP: dict[str, str] = {
+    "_spf.google.com": "Google Workspace",
+    "_netblocks.google.com": "Google Workspace",
+    "_netblocks2.google.com": "Google Workspace",
+    "_netblocks3.google.com": "Google Workspace",
+    "spf.protection.outlook.com": "Microsoft 365",
+    "spf.messagelabs.com": "Broadcom Email Security",
+    "spf.mandrillapp.com": "Mailchimp Transactional",
+    "servers.mcsv.net": "Mailchimp",
+    "mail.zendesk.com": "Zendesk",
+    "sendgrid.net": "SendGrid",
+    "amazonses.com": "Amazon SES",
+    "spf.mtasv.net": "Postmark",
+    "mktomail.com": "Marketo",
+    "spf.sendinblue.com": "Brevo",
+    "stspg-customer.com": "StatusPage",
+    "spf.freshdesk.com": "Freshdesk",
+    "spf1.hubspot.com": "HubSpot",
+    "helpscoutemail.com": "Help Scout",
+    "mxlogin.com": "Intermedia",
+    "pphosted.com": "Proofpoint",
+    "firebasemail.com": "Firebase",
+    "mailgun.org": "Mailgun",
+    "zoho.com": "Zoho Mail",
+    "outbound.mailhop.org": "DynECT",
+    "aspmx.googlemail.com": "Google Workspace",
+    "mailsenders.netsuite.com": "NetSuite",
+    "spf.constantcontact.com": "Constant Contact",
+    "em.sailthru.com": "Sailthru",
+    "cust-spf.exacttarget.com": "Salesforce Marketing Cloud",
+    "spf.campaignmonitor.com": "Campaign Monitor",
+    "mimecast.com": "Mimecast",
+}
+
+_SPF_MECHANISM_RE = re.compile(
+    r"^([+\-~?])?"
+    r"(ip4|ip6|all|include|redirect|exists|ptr|mx|a)"
+    r"(?:[=:/](\S+))?$",
+    re.I,
+)
+
+
+def _parse_spf_mechanisms(raw: str) -> list[SPFMechanism]:
+    """Parse all mechanisms from a raw SPF record."""
+    mechanisms: list[SPFMechanism] = []
+    tokens = raw.split()
+    for token in tokens:
+        if token.lower().startswith("v=spf1"):
+            continue
+        m = _SPF_MECHANISM_RE.match(token)
+        if m:
+            qual = m.group(1) or "+"
+            mech = m.group(2).lower()
+            val = m.group(3) or ""
+            if mech == "redirect":
+                qual = ""
+            mechanisms.append(SPFMechanism(qualifier=qual, mechanism=mech, value=val))
+    return mechanisms
+
+
+def _map_include_to_service(domain: str) -> str:
+    """Map an SPF include domain to a known third-party service."""
+    domain_lower = domain.lower().rstrip(".")
+    for pattern, service in _SPF_INCLUDE_SERVICE_MAP.items():
+        if pattern in domain_lower:
+            return service
+    return ""
+
+
+def _resolve_spf_record(domain: str) -> str | None:
+    """Blocking: resolve a single SPF TXT record for *domain*."""
+    try:
+        answers = dns.resolver.resolve(domain, "TXT", lifetime=DNS_LIFETIME)
+        for rr in answers:
+            txt = b"".join(rr.strings).decode("utf-8", errors="replace")
+            if txt.lower().startswith("v=spf1"):
+                return txt
+    except Exception:
+        pass
+    return None
+
+
+def _walk_spf_tree(
+    domain: str, depth: int, max_depth: int, visited: set[str],
+) -> tuple[SPFIncludeNode, int]:
+    """Recursively resolve SPF includes. Returns (node, dns_lookups_consumed)."""
+    domain = domain.lower().rstrip(".")
+    if domain in visited or depth > max_depth:
+        return SPFIncludeNode(domain=domain, error="max depth or cycle"), 0
+    visited.add(domain)
+
+    raw = _resolve_spf_record(domain)
+    if not raw:
+        return SPFIncludeNode(domain=domain, error="no SPF record found"), 1
+
+    node = SPFIncludeNode(
+        domain=domain,
+        raw_record=raw,
+        service=_map_include_to_service(domain),
+    )
+
+    lookups = 1
+    mechanisms = _parse_spf_mechanisms(raw)
+    for mech in mechanisms:
+        if mech.mechanism == "ip4" and mech.value:
+            node.ip4_ranges.append(mech.value)
+        elif mech.mechanism == "ip6" and mech.value:
+            node.ip6_ranges.append(mech.value)
+        elif mech.mechanism in ("include", "redirect") and mech.value:
+            child, child_lookups = _walk_spf_tree(
+                mech.value, depth + 1, max_depth, visited,
+            )
+            node.children.append(child)
+            lookups += child_lookups
+        elif mech.mechanism in ("a", "mx"):
+            lookups += 1
+
+    return node, lookups
+
+
+def _collect_ranges(node: SPFIncludeNode) -> tuple[list[str], list[str]]:
+    """Flatten all ip4/ip6 ranges from an include tree."""
+    ip4: list[str] = list(node.ip4_ranges)
+    ip6: list[str] = list(node.ip6_ranges)
+    for child in node.children:
+        c4, c6 = _collect_ranges(child)
+        ip4.extend(c4)
+        ip6.extend(c6)
+    return ip4, ip6
+
+
+def _collect_services(node: SPFIncludeNode) -> list[str]:
+    """Collect all mapped service names from an include tree."""
+    services: list[str] = []
+    if node.service:
+        services.append(node.service)
+    for child in node.children:
+        services.extend(_collect_services(child))
+    return services
+
+
+def _ip_from_cidr(cidr: str) -> str | None:
+    """Extract a single representative IP from a CIDR or bare IP."""
+    ip = cidr.split("/")[0]
+    parts = ip.split(".")
+    if len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
+        return ip
+    return None
+
+
+async def enumerate_spf(
+    domain: str,
+    spf_result: SPFResult,
+    *,
+    timeout: int = PASSIVE_TIMEOUT,
+) -> SPFIntelResult:
+    """Deep SPF enumeration: parse mechanisms, resolve include tree, enrich IPs.
+
+    All queries are passive DNS lookups — zero traffic to the target.
+    """
+    if not spf_result.exists or not spf_result.raw:
+        return SPFIntelResult(domain=domain)
+
+    try:
+        mechanisms = _parse_spf_mechanisms(spf_result.raw)
+
+        root_ip4: list[str] = []
+        root_ip6: list[str] = []
+        include_domains: list[str] = []
+        redirect_domain: str | None = None
+        root_lookups = 0
+
+        for mech in mechanisms:
+            if mech.mechanism == "ip4" and mech.value:
+                root_ip4.append(mech.value)
+            elif mech.mechanism == "ip6" and mech.value:
+                root_ip6.append(mech.value)
+            elif mech.mechanism == "include" and mech.value:
+                include_domains.append(mech.value)
+            elif mech.mechanism == "redirect" and mech.value:
+                redirect_domain = mech.value
+            elif mech.mechanism in ("a", "mx"):
+                root_lookups += 1
+
+        # Resolve include tree in executor (blocking DNS).
+        visited: set[str] = {domain.lower().rstrip(".")}
+        include_tree: list[SPFIncludeNode] = []
+        total_lookups = root_lookups
+
+        all_targets = include_domains + ([redirect_domain] if redirect_domain else [])
+
+        async def _resolve_one(inc_domain: str) -> tuple[SPFIncludeNode, int]:
+            return await _bounded_executor(
+                _walk_spf_tree, inc_domain, 1, 10, visited,
+            )
+
+        if all_targets:
+            results = await asyncio.wait_for(
+                asyncio.gather(*[_resolve_one(d) for d in all_targets], return_exceptions=True),
+                timeout=timeout,
+            )
+            for r in results:
+                if isinstance(r, Exception):
+                    logger.debug("SPF include resolution failed: %s", r)
+                    continue
+                node, lookups = r
+                include_tree.append(node)
+                total_lookups += lookups
+
+        # Collect all ranges from root + include tree.
+        all_ip4 = list(root_ip4)
+        all_ip6 = list(root_ip6)
+        for node in include_tree:
+            c4, c6 = _collect_ranges(node)
+            all_ip4.extend(c4)
+            all_ip6.extend(c6)
+
+        # Collect services.
+        services: list[str] = []
+        for inc in include_domains:
+            svc = _map_include_to_service(inc)
+            if svc and svc not in services:
+                services.append(svc)
+        for node in include_tree:
+            for svc in _collect_services(node):
+                if svc and svc not in services:
+                    services.append(svc)
+
+        # Extract unique IPs for enrichment (take first IP from each CIDR).
+        unique_ips: list[str] = []
+        seen_ips: set[str] = set()
+        ip_sources: dict[str, str] = {}
+        for cidr in all_ip4:
+            ip = _ip_from_cidr(cidr)
+            if ip and ip not in seen_ips:
+                seen_ips.add(ip)
+                unique_ips.append(ip)
+                ip_sources[ip] = f"ip4:{cidr}"
+
+        # Enrich IPs via Cymru (reuse existing functions).
+        senders: list[SPFSenderInfo] = []
+        if unique_ips:
+            try:
+                origin_tasks = [
+                    _bounded_executor(_cymru_origin_lookup, ip)
+                    for ip in unique_ips
+                ]
+                origin_raws = await asyncio.wait_for(
+                    asyncio.gather(*origin_tasks, return_exceptions=True),
+                    timeout=timeout,
+                )
+
+                ip_parsed: dict[str, tuple[int | None, str, str, str]] = {}
+                unique_asns: set[int] = set()
+                for ip, raw in zip(unique_ips, origin_raws):
+                    if isinstance(raw, Exception) or not raw:
+                        ip_parsed[ip] = (None, "", "", "")
+                    else:
+                        parsed = _parse_cymru_origin(raw)
+                        ip_parsed[ip] = parsed
+                        if parsed[0]:
+                            unique_asns.add(parsed[0])
+
+                asn_name_tasks = [
+                    _bounded_executor(_cymru_asn_lookup, asn)
+                    for asn in unique_asns
+                ]
+                asn_name_raws = await asyncio.wait_for(
+                    asyncio.gather(*asn_name_tasks, return_exceptions=True),
+                    timeout=timeout,
+                )
+                asn_name_map: dict[int, str] = {}
+                for asn, raw in zip(unique_asns, asn_name_raws):
+                    if not isinstance(raw, Exception) and raw:
+                        asn_name_map[asn] = _parse_cymru_asn_name(raw)
+
+                for ip in unique_ips:
+                    asn, prefix, cc, registry = ip_parsed.get(ip, (None, "", "", ""))
+                    asn_name = asn_name_map.get(asn, "") if asn else ""
+                    provider = _infer_provider(asn_name) if asn_name else ""
+                    senders.append(SPFSenderInfo(
+                        ip=ip,
+                        source=ip_sources.get(ip, ""),
+                        asn=asn,
+                        asn_name=asn_name,
+                        prefix=prefix,
+                        country_code=cc,
+                        provider=provider,
+                    ))
+            except Exception as exc:
+                logger.debug("SPF IP enrichment failed: %s", exc)
+
+        exceeds = total_lookups > 10
+        if exceeds:
+            spf_result.issues.append(
+                f"SPF exceeds 10-lookup limit ({total_lookups} lookups) — "
+                "receiving servers may return permerror"
+            )
+
+        intel = SPFIntelResult(
+            domain=domain,
+            mechanisms=mechanisms,
+            include_tree=include_tree,
+            ip4_ranges=all_ip4,
+            ip6_ranges=all_ip6,
+            senders=senders,
+            services_detected=services,
+            dns_lookup_count=total_lookups,
+            exceeds_lookup_limit=exceeds,
+        )
+        return intel
+
+    except asyncio.TimeoutError:
+        return SPFIntelResult(domain=domain, error="SPF enumeration timed out")
+    except Exception as exc:
+        logger.warning("SPF enumeration failed for %s: %s", domain, exc)
+        return SPFIntelResult(domain=domain, error=str(exc))
 
 
 def _parse_dmarc(txt_records: list[str]) -> DMARCResult:
@@ -583,6 +1118,55 @@ def _check_dkim(domain: str) -> DKIMResult:
     )
 
 
+def _check_mta_sts(domain: str) -> MTASTSResult:
+    try:
+        answers = dns.resolver.resolve(f"_mta-sts.{domain}", "TXT", lifetime=DNS_LIFETIME)
+        for rr in answers:
+            txt = b"".join(rr.strings).decode("utf-8", errors="replace")
+            if txt.lower().startswith("v=stsv1"):
+                version = ""
+                sts_id = ""
+                for part in txt.split(";"):
+                    part = part.strip()
+                    if part.lower().startswith("v="):
+                        version = part.split("=", 1)[1].strip()
+                    elif part.lower().startswith("id="):
+                        sts_id = part.split("=", 1)[1].strip()
+                return MTASTSResult(raw=txt, exists=True, version=version, sts_id=sts_id)
+    except Exception:
+        pass
+    return MTASTSResult(exists=False, issues=["No MTA-STS TXT record found"])
+
+
+def _check_bimi(domain: str) -> BIMIResult:
+    try:
+        answers = dns.resolver.resolve(f"default._bimi.{domain}", "TXT", lifetime=DNS_LIFETIME)
+        for rr in answers:
+            txt = b"".join(rr.strings).decode("utf-8", errors="replace")
+            if txt.lower().startswith("v=bimi1"):
+                version = ""
+                logo_url = ""
+                authority_url = ""
+                for part in txt.split(";"):
+                    part = part.strip()
+                    if part.lower().startswith("v="):
+                        version = part.split("=", 1)[1].strip()
+                    elif part.lower().startswith("l="):
+                        logo_url = part.split("=", 1)[1].strip()
+                    elif part.lower().startswith("a="):
+                        authority_url = part.split("=", 1)[1].strip()
+                issues: list[str] = []
+                if not logo_url:
+                    issues.append("BIMI record has no logo URL (l= tag)")
+                return BIMIResult(
+                    raw=txt, exists=True, version=version,
+                    logo_url=logo_url, authority_url=authority_url, issues=issues,
+                )
+    except Exception:
+        pass
+    return BIMIResult(exists=False, issues=["No BIMI record found"])
+
+
 def _detect_mail_providers(mx_records: list[MXRecord]) -> list[str]:
     """Map MX hostnames to friendly provider names."""
     providers: set[str] = set()
@@ -597,6 +1181,7 @@ def _detect_mail_providers(mx_records: list[MXRecord]) -> list[str]:
 
 def _grade_email_security(
     spf: SPFResult, dmarc: DMARCResult, dkim: DKIMResult,
+    mta_sts: MTASTSResult | None = None, bimi: BIMIResult | None = None,
 ) -> str:
     """Assign an A-F grade to overall email security posture."""
     score = 0
@@ -624,6 +1209,14 @@ def _grade_email_security(
     # DKIM contribution (0-30)
     if dkim.selectors_found:
         score += 30
+
+    # MTA-STS bonus (0-10)
+    if mta_sts and mta_sts.exists:
+        score += 10
+
+    # BIMI bonus (0-5)
+    if bimi and bimi.exists and bimi.logo_url:
+        score += 5
 
     if score >= 90:
         return "A"
@@ -655,9 +1248,11 @@ async def query_email_security(
         )
         # DKIM selector probing (multiple DNS queries, heavier).
         dkim_task = _bounded_executor(_check_dkim, domain)
+        mta_sts_task = _bounded_executor(_check_mta_sts, domain)
+        bimi_task = _bounded_executor(_check_bimi, domain)
 
-        domain_txts_raw, dmarc_txts_raw, dkim = await asyncio.wait_for(
-            asyncio.gather(txt_task, dmarc_task, dkim_task),
+        domain_txts_raw, dmarc_txts_raw, dkim, mta_sts, bimi = await asyncio.wait_for(
+            asyncio.gather(txt_task, dmarc_task, dkim_task, mta_sts_task, bimi_task),
             timeout=timeout,
         )
 
@@ -672,16 +1267,60 @@ async def query_email_security(
 
         spf = _parse_spf(domain_txts)
         dmarc = _parse_dmarc(dmarc_txts)
+
+        # If this host has no own DMARC, DMARC is inherited from the
+        # organizational domain (sp= if present, else p=). A subdomain without
+        # its own _dmarc is NOT "vulnerable to spoofing" when a parent policy
+        # applies — that would grade every web subdomain F independently.
+        parent = _organizational_domain(domain)
+        is_org = parent == domain
+        if not dmarc.exists and parent and parent != domain:
+            try:
+                parent_dmarc_raw = await asyncio.wait_for(
+                    loop.run_in_executor(None, _dns_resolve, f"_dmarc.{parent}", "TXT"),
+                    timeout=timeout,
+                )
+                parent_txts = [
+                    b"".join(r.strings).decode("utf-8", errors="replace")
+                    for r in parent_dmarc_raw
+                ]
+                parent_dmarc = _parse_dmarc(parent_txts)
+                if parent_dmarc.exists:
+                    effective = parent_dmarc.subdomain_policy or parent_dmarc.policy
+                    dmarc = DMARCResult(
+                        raw=parent_dmarc.raw,
+                        exists=True,
+                        policy=effective,
+                        subdomain_policy=parent_dmarc.subdomain_policy,
+                        pct=parent_dmarc.pct,
+                        rua=parent_dmarc.rua,
+                        inherited_from_parent=True,
+                        parent_domain=parent,
+                        issues=[f"Inherited from organizational domain {parent} (sp/p={effective})."],
+                    )
+            except Exception:
+                pass
+
+        receives_mail = bool(mx_records)
+        # Core email-security applies to the org domain or any host that sends/
+        # receives mail; ordinary non-mail web subdomains are not_applicable.
+        applicable = is_org or receives_mail
         providers = _detect_mail_providers(mx_records or [])
-        grade = _grade_email_security(spf, dmarc, dkim)
+        grade = _grade_email_security(spf, dmarc, dkim, mta_sts, bimi)
 
         return EmailSecurityResult(
             domain=domain,
             spf=spf,
             dmarc=dmarc,
             dkim=dkim,
+            mta_sts=mta_sts,
+            bimi=bimi,
             mail_providers=providers,
             grade=grade,
+            is_organizational_domain=is_org,
+            receives_mail=receives_mail,
+            applicable=applicable,
+            email_security_status="assessed" if applicable else "not_applicable",
         )
     except asyncio.TimeoutError:
         return EmailSecurityResult(

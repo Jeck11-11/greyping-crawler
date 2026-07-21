@@ -232,8 +232,6 @@ class NucleiAPIHandler(BaseHTTPRequestHandler):
             self._handle_probe()
         elif path == "/crawl":
             self._handle_crawl()
-        elif path == "/portscan":
-            self._handle_portscan()
         else:
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
@@ -401,69 +399,6 @@ class NucleiAPIHandler(BaseHTTPRequestHandler):
             },
         )
 
-    # ------------------------------------------------------------------
-    # /portscan — naabu
-    # ------------------------------------------------------------------
-
-    def _handle_portscan(self) -> None:
-        parsed = self._parse_request()
-        if parsed is None:
-            return
-
-        targets = parsed["targets"]
-        extra_args = parsed["extra_args"]
-        timeout_seconds = parsed["timeout"]
-        payload = parsed["payload"]
-
-        _ensure_dirs()
-        targets_file = _write_targets_file(targets)
-
-        port_range = str(payload.get("ports", "top-250"))
-        rate = str(payload.get("rate", 1000))
-
-        command = [
-            "naabu",
-            "-list", str(targets_file),
-            "-json",
-            "-silent",
-            "-rate", rate,
-            "-scan-type", "connect",
-        ]
-        if port_range.startswith("top-"):
-            command.extend(["-top-ports", port_range.removeprefix("top-")])
-        else:
-            command.extend(["-port", port_range])
-        if extra_args:
-            command.extend(shlex.split(extra_args))
-
-        print(f"[portscan] targets={targets} ports={port_range} rate={rate} timeout={timeout_seconds}s", flush=True)
-
-        completed = self._run_tool("naabu", command, timeout_seconds)
-        if completed is None:
-            return
-
-        raw_results = _parse_jsonl(completed.stdout or "")
-
-        ports = []
-        for obj in raw_results:
-            ports.append({
-                "host": obj.get("host", ""),
-                "ip": obj.get("ip", ""),
-                "port": obj.get("port"),
-                "protocol": obj.get("protocol", "tcp"),
-            })
-
-        print(f"[portscan] completed exit_code={completed.returncode} ports={len(ports)}", flush=True)
-
-        self._send_json(
-            HTTPStatus.OK,
-            {
-                "target": targets[0] if len(targets) == 1 else targets,
-                "ports": ports,
-                "count": len(ports),
-                "exit_code": completed.returncode,
-            },
-        )
 
 
 def main() -> None:

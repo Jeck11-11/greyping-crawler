@@ -327,6 +327,48 @@ class TestPathClassification:
 
 
 # ---------------------------------------------------------------------------
+# SSL classification
+# ---------------------------------------------------------------------------
+
+class TestSSLClassification:
+    def test_unreachable_host_not_labelled_invalid_cert(self):
+        """A failed TLS connection is 'unreachable', not a critical invalid cert."""
+        result = DomainResult(
+            target="https://vpn.example.com",
+            ssl=SSLCertResult(
+                cert_valid=False,
+                issues=["TLS connection failed: [Errno 101] Network unreachable"],
+            ),
+        )
+        report = build_easm_report(result, scan_mode="full")
+        ssl_findings = [f for f in report.prioritized_findings if f.category == "ssl"]
+        ids = {f.id for f in ssl_findings}
+        assert "ssl_unreachable" in ids
+        assert "ssl_invalid" not in ids
+        unreachable = next(f for f in ssl_findings if f.id == "ssl_unreachable")
+        assert unreachable.severity == "info"
+        assert unreachable.classification == FindingClassification.informational
+
+    def test_genuinely_invalid_cert_still_critical(self):
+        """A self-signed / failed-validation cert is still a critical issue."""
+        result = DomainResult(
+            target="https://example.com",
+            ssl=SSLCertResult(
+                cert_valid=False,
+                grade="F",
+                issues=["Certificate appears to be self-signed."],
+            ),
+        )
+        report = build_easm_report(result, scan_mode="full")
+        ssl_findings = [f for f in report.prioritized_findings if f.category == "ssl"]
+        ids = {f.id for f in ssl_findings}
+        assert "ssl_invalid" in ids
+        assert "ssl_unreachable" not in ids
+        invalid = next(f for f in ssl_findings if f.id == "ssl_invalid")
+        assert invalid.severity == "critical"
+
+
+# ---------------------------------------------------------------------------
 # Report counts
 # ---------------------------------------------------------------------------
 

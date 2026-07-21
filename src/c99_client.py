@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any
 
 import httpx
+
+_MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +56,7 @@ async def find_subdomains(domain: str, *, timeout: int = C99_TIMEOUT) -> list[di
             sub = str(entry)
             ip = ""
             cf = None
+        sub = _MARKDOWN_LINK_RE.sub(r"\1", sub)
         sub = sub.strip().lower().rstrip(".")
         if sub:
             if isinstance(cf, str):

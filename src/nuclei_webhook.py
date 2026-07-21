@@ -7,10 +7,14 @@ import logging
 
 import httpx
 
-from .config import NUCLEI_WEBHOOK_TIMEOUT, XANO_WEBHOOK_URL
+from .config import (
+    NUCLEI_WEBHOOK_TIMEOUT,
+    XANO_BOARD_WEBHOOK_URL,
+    XANO_SCAN_WEBHOOK_URL,
+    XANO_WEBHOOK_URL,
+)
 from .easm_report import build_easm_report
-from .fair_signals import compute_fair_signals
-from .models import DomainResult, RiskAssessmentGroup
+from .models import BoardReport, DomainResult, RiskAssessmentGroup
 from .nuclei_client import run_nuclei_scan
 
 logger = logging.getLogger(__name__)
@@ -19,9 +23,9 @@ _MAX_RETRIES = 3
 _BACKOFF_BASE = 2  # seconds
 
 
-async def _post_webhook(payload: dict) -> bool:
-    """POST payload to XANO_WEBHOOK_URL with retry + exponential backoff."""
-    url = XANO_WEBHOOK_URL
+async def _post_webhook(payload: dict, *, url: str = "") -> bool:
+    """POST payload to a webhook URL with retry + exponential backoff."""
+    url = url or XANO_WEBHOOK_URL
     if not url:
         return False
 
@@ -50,7 +54,7 @@ async def _post_webhook(payload: dict) -> bool:
             )
             await asyncio.sleep(wait)
 
-    logger.error("Webhook POST exhausted %d retries for %s", _MAX_RETRIES, payload.get("target", "?"))
+    logger.error("Webhook POST exhausted %d retries for %s", _MAX_RETRIES, url)
     return False
 
 
@@ -58,7 +62,7 @@ async def nuclei_background_scan(
     scan_id: str,
     domain_results: list[DomainResult],
 ) -> None:
-    """Run nuclei for each target, re-compute FAIR, POST full result to Xano."""
+    """Run nuclei for each target, rebuild the EASM report, POST result to Xano."""
     for idx, result in enumerate(domain_results):
         try:
             nuclei = await run_nuclei_scan([result.target])
@@ -66,7 +70,6 @@ async def nuclei_background_scan(
             if result.vulnerabilities:
                 result.vulnerabilities.nuclei = nuclei
             result.risk_assessment = RiskAssessmentGroup(
-                fair_signals=compute_fair_signals(result, scan_mode="full"),
                 easm_report=build_easm_report(result, scan_mode="full"),
             )
 
@@ -82,3 +85,66 @@ async def nuclei_background_scan(
 
         if idx < len(domain_results) - 1:
             await asyncio.sleep(1)
+
+
+async def post_scan_result_webhook(
+    scan_id: str,
+    result: DomainResult,
+    *,
+    index: int = 0,
+    total: int = 0,
+) -> bool:
+    """POST a single completed subdomain scan result to Xano (incremental).
+
+    Called once per target as it finishes, so Xano stores results
+    progressively over a long-running batch rather than all at once.
+    """
+    status = "error" if result.error else "completed"
+    payload = {
+        "event": "scan_result",
+        "scan_id": scan_id,
+        "target": result.target,
+        "status": status,
+        "index": index,
+        "total": total,
+        "result": result.model_dump(mode="json"),
+    }
+    return await _post_webhook(payload, url=XANO_SCAN_WEBHOOK_URL)
+
+
+async def post_scan_complete_webhook(
+    scan_id: str,
+    *,
+    targets_total: int,
+    targets_completed: int,
+    targets_failed: int,
+) -> bool:
+    """POST a final 'batch finished' marker to Xano once all targets are done."""
+    payload = {
+        "event": "scan_complete",
+        "scan_id": scan_id,
+        "status": "completed",
+        "targets_total": targets_total,
+        "targets_completed": targets_completed,
+        "targets_failed": targets_failed,
+    }
+    return await _post_webhook(payload, url=XANO_SCAN_WEBHOOK_URL)
+
+
+async def post_board_webhook(
+    scan_id: str,
+    root_domain: str,
+    status: str,
+    board_report: BoardReport,
+    results: list[DomainResult],
+) -> bool:
+    """POST completed board report to Xano."""
+    payload = {
+        "event": "board_report",
+        "scan_id": scan_id,
+        "root_domain": root_domain,
+        "status": status,
+        "board_report": board_report.model_dump(mode="json"),
+        "results": [r.model_dump(mode="json") for r in results],
+    }
+    return await _post_webhook(payload, url=XANO_BOARD_WEBHOOK_URL)

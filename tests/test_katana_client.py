@@ -38,7 +38,7 @@ class TestKatanaToPageResults:
             endpoints=[
                 KatanaEndpoint(
                     url="https://example.com",
-                    body="<html><body>Contact us: admin@example.com, sales@example.com</body></html>",
+                    body="<html><body>Contact us: admin@acme.com, sales@acme.com</body></html>",
                 ),
             ],
         )

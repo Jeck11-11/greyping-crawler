@@ -41,13 +41,23 @@ _SOCIAL_DOMAINS = {
     "mastodon.social",
 }
 
-# Skip common false-positive emails
+# Skip common false-positive / placeholder emails
 _EMAIL_BLOCKLIST = {
     "example@example.com",
     "user@example.com",
     "name@domain.com",
     "email@example.com",
 }
+# Placeholder domains — any address on these is a template/example, not real.
+_EMAIL_PLACEHOLDER_DOMAINS = {
+    "example.com", "example.org", "example.net", "domain.com",
+    "yourdomain.com", "yoursite.com", "email.com", "test.com",
+}
+
+
+def _is_placeholder_email(addr: str) -> bool:
+    dom = addr.rsplit("@", 1)[-1] if "@" in addr else ""
+    return addr in _EMAIL_BLOCKLIST or dom in _EMAIL_PLACEHOLDER_DOMAINS
 
 
 def _digit_count(s: str) -> int:
@@ -82,6 +92,114 @@ def _normalise_phone(raw: str) -> str | None:
     return stripped
 
 
+# TLD → international dialling code (used to canonicalise national numbers when
+# the domain gives us a default region). Small, extensible map — unknown TLDs
+# fall through to best-effort.
+_TLD_TO_CC = {
+    "ie": ("353", "IE"), "uk": ("44", "GB"), "gb": ("44", "GB"),
+    "us": ("1", "US"), "ca": ("1", "CA"), "au": ("61", "AU"),
+    "de": ("49", "DE"), "fr": ("33", "FR"), "es": ("34", "ES"),
+    "it": ("39", "IT"), "nl": ("31", "NL"), "be": ("32", "BE"),
+    "pt": ("351", "PT"), "se": ("46", "SE"), "no": ("47", "NO"),
+    "dk": ("45", "DK"), "fi": ("358", "FI"), "pl": ("48", "PL"),
+    "nz": ("64", "NZ"), "za": ("27", "ZA"), "in": ("91", "IN"),
+}
+
+
+def region_for_tld(tld: str) -> tuple[str, str]:
+    """Return (dialling_code, ISO_country) for a TLD, or ('', '') if unknown."""
+    return _TLD_TO_CC.get((tld or "").lower().lstrip("."), ("", ""))
+
+
+def normalize_phone_e164(raw: str, default_cc: str = "", default_country: str = "") -> dict:
+    """Best-effort E.164 normalisation without a phone library.
+
+    Returns {raw_value, normalized_value, country, confidence}. `confidence` is
+    'high' when a country code is explicit (+, 00) or supplied via the domain
+    region; 'low' for a bare national number we can't anchor to a country (these
+    should not be counted as confident unique numbers).
+    """
+    cleaned = _normalise_phone(raw)
+    if not cleaned:
+        return {"raw_value": raw, "normalized_value": None, "country": "", "confidence": "low"}
+
+    has_cc = cleaned.startswith("+") or cleaned.strip().startswith("00")
+    digits = re.sub(r"\D", "", cleaned)
+    if cleaned.strip().startswith("00"):
+        digits = digits[2:]
+
+    if has_cc:
+        return {
+            "raw_value": raw,
+            "normalized_value": "+" + digits,
+            "country": default_country,  # explicit-CC country needs a CC table; best-effort
+            "confidence": "high",
+        }
+
+    if default_cc:
+        # The number may already carry the country code without a '+'
+        # (e.g. "353 1 6510 300"). Detect that before prepending it again.
+        if digits.startswith(default_cc) and len(digits) > len(default_cc) + 4:
+            return {
+                "raw_value": raw,
+                "normalized_value": "+" + digits,
+                "country": default_country,
+                "confidence": "high",
+            }
+        national = digits[1:] if digits.startswith("0") else digits
+        return {
+            "raw_value": raw,
+            "normalized_value": "+" + default_cc + national,
+            "country": default_country,
+            "confidence": "high",
+        }
+
+    # No country context — canonicalise formatting only; treat as low confidence
+    # so bare/partial national fragments don't inflate the unique-number count.
+    return {
+        "raw_value": raw,
+        "normalized_value": "+" + digits if len(digits) >= 10 else None,
+        "country": "",
+        "confidence": "low",
+    }
+
+
+# Path/query fragments that mark a social URL as a share/tracking endpoint
+# rather than an organisation-owned profile.
+_SHARE_PATH_MARKERS = (
+    "/sharer", "/share", "/intent", "/dialog", "/shareArticle", "/submit",
+    "/pin/create", "/offsite", "/tweet", "/share_channel",
+)
+_SHARE_QUERY_MARKERS = ("u=", "url=", "text=", "mini=", "title=")
+_TRACKING_HOSTS = {"t.co", "lnkd.in", "fb.me"}
+
+
+def classify_social_url(url: str) -> str:
+    """Classify a social URL: organisation_profile / share_link / tracking_link /
+    embedded_widget / unknown. Share/intent endpoints are NOT owned profiles."""
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return "unknown"
+    host = (parsed.hostname or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    path = (parsed.path or "").lower()
+    query = (parsed.query or "").lower()
+
+    if host in _TRACKING_HOSTS:
+        return "tracking_link"
+    if any(m.lower() in path for m in _SHARE_PATH_MARKERS):
+        return "share_link"
+    if any(q in query for q in _SHARE_QUERY_MARKERS):
+        return "share_link"
+    if "/embed" in path or "/plugins/" in path or "/widgets/" in path:
+        return "embedded_widget"
+    if path in ("", "/"):
+        return "unknown"
+    return "organisation_profile"
+
+
 def extract_contacts(soup: BeautifulSoup, raw_html: str) -> ContactInfo:
     """Extract emails, phone numbers, and social-media profile URLs."""
     text = soup.get_text(separator=" ", strip=True)
@@ -90,14 +208,14 @@ def extract_contacts(soup: BeautifulSoup, raw_html: str) -> ContactInfo:
     emails: set[str] = set()
     for m in _EMAIL_RE.finditer(text):
         email = m.group(0).lower()
-        if email not in _EMAIL_BLOCKLIST:
+        if not _is_placeholder_email(email):
             emails.add(email)
     # Also check mailto: links
     for a_tag in soup.find_all("a", href=True):
         href: str = a_tag["href"]
         if href.startswith("mailto:"):
             addr = href.removeprefix("mailto:").split("?")[0].strip().lower()
-            if addr and addr not in _EMAIL_BLOCKLIST:
+            if addr and not _is_placeholder_email(addr):
                 emails.add(addr)
 
     # --- Phone numbers ---
