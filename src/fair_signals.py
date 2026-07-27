@@ -1,0 +1,1163 @@
+"""FAIR (Factor Analysis of Information Risk) signal builder.
+
+Takes a ``DomainResult`` already populated by the scanner and maps the
+evidence onto the four FAIR factors (Threat Event Frequency, Vulnerability,
+Control Strength, Loss Magnitude). Derives Loss Event Frequency and an
+overall risk score from those factors so a downstream system (e.g. Xano)
+can construct a consistent risk profile.
+
+Every score is 0-100.
+
+    Risk               = Loss Event Frequency × Loss Magnitude
+    Loss Event Freq.   = Threat Event Frequency × Vulnerability
+    Vulnerability      = Threat Capability vs. Resistance Strength
+
+Control Strength acts as an attenuator on Loss Event Frequency — strong
+defences reduce (but never fully eliminate) the probability a threat
+engagement becomes a loss event.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+from datetime import datetime, timezone
+from typing import Any
+from urllib.parse import urlparse as _urlparse
+
+from .models import (
+    DomainResult,
+    FAIRFactor,
+    FAIRSignal,
+    FAIRSignals,
+)
+
+logger = logging.getLogger(__name__)
+
+
+# Grades produced by security_headers and ssl_checker → normalised score.
+_GRADE_TO_SCORE: dict[str, int] = {
+    "A+": 100, "A": 95, "A-": 90,
+    "B+": 85, "B": 75, "B-": 70,
+    "C+": 65, "C": 55, "C-": 50,
+    "D+": 40, "D": 30, "D-": 25,
+    "F": 0,
+}
+
+_SEVERITY_TO_SCORE: dict[str, int] = {
+    "critical": 100,
+    "high": 75,
+    "medium": 50,
+    "low": 25,
+    "info": 10,
+}
+
+# Tech categories that meaningfully raise Threat Event Frequency.
+_HIGH_TARGET_CATEGORIES: frozenset[str] = frozenset(
+    {"cms", "ecommerce", "webmail", "vpn", "remote_access", "database"}
+)
+
+# Tech names/categories that indicate a WAF / CDN sitting in front of the
+# target — directly boosts Control Strength.
+_WAF_CDN_NAMES: frozenset[str] = frozenset(
+    {
+        "Cloudflare", "AWS CloudFront", "Fastly", "Akamai",
+        "Imperva", "Sucuri", "F5 BIG-IP", "Azure Front Door",
+    }
+)
+_WAF_CDN_CATEGORIES: frozenset[str] = frozenset({"cdn", "waf"})
+
+_SENSITIVE_ROBOTS_PATTERNS: tuple[str, ...] = (
+    "/admin", "/api", "/backup", "/config", "/debug", "/internal",
+    "/staging", "/test", "/deploy", "/dashboard", "/private",
+    "/secret", "/db", "/phpmyadmin", "/wp-admin", "/cgi-bin",
+    "/server-status", "/.env", "/.git",
+)
+
+_WEAK_CIPHERS: tuple[str, ...] = ("RC4", "DES", "3DES", "MD5", "NULL", "EXPORT")
+
+_HAS_VERSION = re.compile(r"\d+[\.\d]+")
+
+_SENSITIVE_DATA_WEIGHTS: dict[str, int] = {
+    "Passwords": 25, "Plaintext Passwords": 25,
+    "Credit cards": 25, "Bank account numbers": 25, "Payment histories": 25,
+    "Government issued IDs": 20, "Passport numbers": 20, "Dates of birth": 20,
+    "Social security numbers": 20,
+    "Health records": 20,
+    "Security questions and answers": 15,
+    "Private messages": 10, "Chat logs": 10,
+}
+
+
+def _grade_score(grade: str) -> int:
+    """Map a letter grade (A+..F) onto 0-100. Unknown grades → 50."""
+    if not grade:
+        return 50
+    return _GRADE_TO_SCORE.get(grade.strip().upper(), 50)
+
+
+def _severity_score(severity: str) -> int:
+    """Map a severity string onto 0-100. Unknown → 50."""
+    return _SEVERITY_TO_SCORE.get((severity or "").lower(), 50)
+
+
+def _aggregate_findings_score(items: list, attr: str = "severity") -> int:
+    """Score a list of findings by the worst severity, amplified by count.
+
+    Worst severity is scaled to 80% so a single critical finding does not
+    immediately saturate at 100.  Additional findings add up to 25 bonus
+    points, leaving room for count to matter at every severity level.
+    """
+    if not items:
+        return 0
+    severities = [_severity_score(getattr(i, attr, "")) for i in items]
+    worst = max(severities)
+    count_bonus = min(25, 5 * (len(items) - 1))
+    return min(100, int(worst * 0.8) + count_bonus + 5)
+
+
+def _factor_from_signals(signals: list[FAIRSignal], notes: str = "") -> FAIRFactor:
+    """Weighted-average the signals into a single factor score."""
+    if not signals:
+        return FAIRFactor(score=0, signals=[], notes=notes or "No evidence available.")
+    total_weight = sum(s.weight for s in signals) or 1.0
+    weighted = sum(s.score * s.weight for s in signals)
+    return FAIRFactor(
+        score=int(round(weighted / total_weight)),
+        signals=signals,
+        notes=notes,
+    )
+
+
+def _neutral(factor: FAIRFactor) -> int:
+    """For derivation, a factor with no signals is treated as neutral (50).
+
+    This prevents a passive scan (which has no Control Strength evidence)
+    from collapsing overall_risk to zero.
+    """
+    return factor.score if factor.signals else 50
+
+
+def _confidence_for_mode(mode: str) -> str:
+    return {
+        "passive": "low",
+        "lighttouch": "medium",
+        "standard": "high",
+        "full": "high",
+    }.get(mode, "low")
+
+
+# ---------------------------------------------------------------------------
+# Factor builders
+# ---------------------------------------------------------------------------
+
+def _build_threat_event_frequency(result: DomainResult) -> FAIRFactor:
+    """TEF: how often a threat actor is likely to engage with this target."""
+    signals: list[FAIRSignal] = []
+
+    passive = result.passive_intel
+
+    # Subdomain / CT exposure — more public surface = more TEF.
+    subdomain_count = (
+        len(passive.ct.subdomains) if passive and passive.ct else 0
+    )
+    if subdomain_count:
+        # 1 sub → 10, 5 → 50, 10+ → 100 (capped).
+        score = min(100, subdomain_count * 10)
+        signals.append(FAIRSignal(
+            name="attack_surface_breadth",
+            score=score,
+            weight=1.2,
+            evidence=[f"{subdomain_count} subdomains seen in CT logs"],
+        ))
+
+    # Wayback history — long public history = more time attackers had to
+    # notice, and indicates an established public footprint.
+    wb_count = (
+        passive.wayback.snapshot_count if passive and passive.wayback else 0
+    )
+    if wb_count:
+        # 1 snapshot → 5, 50 → 50, 200+ → 100.
+        score = min(100, wb_count // 2)
+        signals.append(FAIRSignal(
+            name="public_exposure_history",
+            score=score,
+            weight=0.6,
+            evidence=[f"{wb_count} archive.org snapshots recorded"],
+        ))
+
+    # High-target tech stacks.
+    target_tech = [
+        t for t in result.technologies
+        if any(c in _HIGH_TARGET_CATEGORIES for c in t.categories)
+    ]
+    if target_tech:
+        signals.append(FAIRSignal(
+            name="high_target_tech_stack",
+            score=min(100, 60 + 10 * len(target_tech)),
+            weight=1.0,
+            evidence=[f"{t.name} ({'/'.join(t.categories)})" for t in target_tech[:5]],
+        ))
+
+    # API endpoints leaked via JS bundles.
+    api_count = (
+        len(result.js_intel.api_endpoints) if result.js_intel else 0
+    )
+    if api_count:
+        signals.append(FAIRSignal(
+            name="api_endpoint_exposure",
+            score=min(100, api_count * 8),
+            weight=0.8,
+            evidence=[f"{api_count} API endpoints discovered in JS bundles"],
+        ))
+
+    # Contact attack surface — more emails visible = more phishing targets.
+    email_count = len(result.emails)
+    if email_count:
+        signals.append(FAIRSignal(
+            name="contact_attack_surface",
+            score=min(100, email_count * 15),
+            weight=0.5,
+            evidence=[f"{email_count} email addresses harvested"],
+        ))
+
+    # Internal network hostnames leaked via JS bundles.
+    if result.js_intel and result.js_intel.internal_hosts:
+        hosts = result.js_intel.internal_hosts
+        signals.append(FAIRSignal(
+            name="internal_network_leak",
+            score=min(100, len(hosts) * 20),
+            weight=1.0,
+            evidence=hosts[:5],
+        ))
+
+    # Robots.txt disallow rules revealing sensitive paths.
+    if result.robots_txt and result.robots_txt.disallow_rules:
+        sensitive = [
+            r for r in result.robots_txt.disallow_rules
+            if any(r.lower().startswith(p) for p in _SENSITIVE_ROBOTS_PATTERNS)
+        ]
+        if sensitive:
+            signals.append(FAIRSignal(
+                name="robots_recon_value",
+                score=min(100, len(sensitive) * 20),
+                weight=0.5,
+                evidence=sensitive[:5],
+            ))
+
+    # Sourcemaps exposing application source code.
+    if result.js_intel:
+        smaps = result.js_intel.sourcemaps_found
+        recovered = result.js_intel.recovered_source_files
+        if smaps:
+            from .easm_report import count_first_party_sources
+
+            first_party, _vendor = count_first_party_sources(recovered)
+            if first_party:
+                sc = min(100, 50 + first_party * 10)
+            elif recovered:
+                sc = 25
+            else:
+                sc = 40
+            signals.append(FAIRSignal(
+                name="sourcemap_exposure",
+                score=sc,
+                weight=0.9,
+                evidence=[
+                    f"{len(smaps)} sourcemap(s) found",
+                    f"{first_party} first-party / {len(recovered)} total source file(s)",
+                ],
+            ))
+
+    return _factor_from_signals(
+        signals,
+        notes="Higher TEF means threat actors are more likely to engage this target.",
+    )
+
+
+def _build_vulnerability(result: DomainResult) -> FAIRFactor:
+    """Vulnerability: likelihood a threat engagement becomes a loss event."""
+    signals: list[FAIRSignal] = []
+
+    # Exposed secrets — direct, high-signal vulnerability.
+    if result.secrets:
+        signals.append(FAIRSignal(
+            name="exposed_secrets",
+            score=_aggregate_findings_score(result.secrets),
+            weight=1.5,
+            evidence=[
+                f"{s.secret_type} ({s.severity}) in {s.location}"
+                for s in result.secrets[:5]
+            ],
+        ))
+
+    # Sensitive paths reachable on the target.
+    if result.sensitive_paths:
+        signals.append(FAIRSignal(
+            name="sensitive_paths_exposed",
+            score=_aggregate_findings_score(result.sensitive_paths),
+            weight=1.3,
+            evidence=[
+                f"{p.path} → {p.status_code} ({p.severity})"
+                for p in result.sensitive_paths[:5]
+            ],
+        ))
+
+    # IoCs detected on the site.
+    if result.ioc_findings:
+        signals.append(FAIRSignal(
+            name="ioc_presence",
+            score=_aggregate_findings_score(result.ioc_findings),
+            weight=1.4,
+            evidence=[
+                f"{i.ioc_type} ({i.severity})" for i in result.ioc_findings[:5]
+            ],
+        ))
+
+    # SSL issues. Only emit if check_ssl actually ran (grade set) OR
+    # there are concrete issues on record — the default SSLCertResult has
+    # cert_valid=True and an empty grade, which shouldn't register as
+    # "TLS weakness".
+    ssl = result.ssl_certificate
+    if ssl and (ssl.issues or (ssl.grade and not ssl.cert_valid)):
+        inv = 100 - _grade_score(ssl.grade)
+        if not ssl.cert_valid:
+            inv = max(inv, 80)
+        evidence = ssl.issues[:3] if ssl.issues else ["TLS cert invalid"]
+        if ssl.cipher and not ssl.pfs:
+            inv = max(inv, 40)
+            evidence.append(f"No PFS: {ssl.cipher}")
+        if ssl.key_type and ssl.key_size:
+            if (ssl.key_type == "RSA" and ssl.key_size < 2048) or (ssl.key_type == "EC" and ssl.key_size < 256):
+                inv = max(inv, 60)
+                evidence.append(f"Weak key: {ssl.key_type} {ssl.key_size}-bit")
+        signals.append(FAIRSignal(
+            name="tls_weaknesses",
+            score=inv,
+            weight=0.9,
+            evidence=evidence,
+        ))
+
+    # Missing or weak security headers (invert the grade).
+    headers = result.security_headers
+    weak_or_missing = [h for h in headers.findings if h.status in ("missing", "weak")]
+    if weak_or_missing:
+        inv = 100 - _grade_score(headers.grade)
+        signals.append(FAIRSignal(
+            name="missing_security_headers",
+            score=inv,
+            weight=1.0,
+            evidence=[f"{h.header} ({h.severity}, {h.status})" for h in weak_or_missing[:5]],
+        ))
+
+    # Cookies with security issues.
+    bad_cookies = [c for c in result.cookies if c.issues]
+    if bad_cookies:
+        signals.append(FAIRSignal(
+            name="insecure_cookies",
+            score=min(100, 40 + 10 * len(bad_cookies)),
+            weight=0.7,
+            evidence=[f"{c.name}: {', '.join(c.issues)}" for c in bad_cookies[:3]],
+        ))
+
+    # Email authentication gaps — missing SPF/DMARC is a phishing vector.
+    email_sec = (
+        result.dns.email_security
+        if result.dns else None
+    )
+    if email_sec and not email_sec.error:
+        issues: list[str] = []
+        score = 0
+        if not email_sec.spf.exists:
+            issues.append("No SPF record")
+            score += 40
+        elif email_sec.spf.all_qualifier in ("+all", "?all"):
+            issues.append(f"SPF uses {email_sec.spf.all_qualifier} (weak)")
+            score += 25
+        if not email_sec.dmarc.exists:
+            issues.append("No DMARC record — domain spoofing is trivial")
+            score += 40
+        elif email_sec.dmarc.policy == "none":
+            issues.append("DMARC p=none — monitoring only, no enforcement")
+            score += 20
+        if not email_sec.dkim.selectors_found:
+            issues.append("No DKIM selectors found")
+            score += 20
+        if issues:
+            signals.append(FAIRSignal(
+                name="email_auth_missing",
+                score=min(100, score),
+                weight=1.2,
+                evidence=issues,
+            ))
+
+        # SPF lookup limit exceeded — causes permerror, breaks email auth.
+        if email_sec.spf.intel and email_sec.spf.intel.exceeds_lookup_limit:
+            signals.append(FAIRSignal(
+                name="spf_lookup_limit_exceeded",
+                score=65,
+                weight=1.0,
+                evidence=[
+                    f"SPF chain requires {email_sec.spf.intel.dns_lookup_count} DNS lookups (RFC limit: 10)",
+                ],
+            ))
+
+        # MTA-STS missing — email vulnerable to TLS downgrade.
+        if not email_sec.mta_sts.exists and (email_sec.spf.exists or email_sec.dmarc.exists):
+            signals.append(FAIRSignal(
+                name="mta_sts_missing",
+                score=30,
+                weight=0.5,
+                evidence=["No MTA-STS policy — inbound email vulnerable to TLS downgrade"],
+            ))
+
+    # Nuclei vulnerability findings.
+    nuclei_findings = (
+        result.nuclei.findings if result.nuclei and result.nuclei.findings else []
+    )
+    if nuclei_findings:
+        worst = max(_severity_score(f.severity) for f in nuclei_findings)
+        score = min(100, worst + 5 * (len(nuclei_findings) - 1))
+        signals.append(FAIRSignal(
+            name="nuclei_vulnerabilities",
+            score=score,
+            weight=1.4,
+            evidence=[
+                f"{f.name} ({f.severity})" for f in nuclei_findings[:5]
+            ],
+        ))
+
+    # CVE findings from detected technology versions.
+    # KEV-listed and high-EPSS CVEs get elevated weight.
+    if result.cve_findings:
+        worst = max(_severity_score(f.severity) for f in result.cve_findings)
+        score = min(100, worst + 10 * (len(result.cve_findings) - 1))
+        kev_count = sum(1 for f in result.cve_findings if f.in_kev)
+        high_epss = sum(1 for f in result.cve_findings if (f.epss_score or 0) > 0.5)
+        if kev_count:
+            score = min(100, score + 15)
+        weight = 1.5
+        if kev_count:
+            weight = 2.0
+        elif high_epss:
+            weight = 1.7
+        evidence = [
+            f"{len(result.cve_findings)} CVE(s) correlated from detected tech",
+        ]
+        if kev_count:
+            evidence.append(f"{kev_count} in CISA KEV (actively exploited)")
+        if high_epss:
+            evidence.append(f"{high_epss} with EPSS > 50%")
+        evidence.extend(
+            f"{f.cve_id} ({f.severity})" for f in result.cve_findings[:5]
+        )
+        signals.append(FAIRSignal(
+            name="known_cves",
+            score=score,
+            weight=weight,
+            evidence=evidence,
+        ))
+
+    # Subdomain takeover findings.
+    takeover = result.subdomain_takeover
+    if takeover and takeover.findings:
+        critical = [f for f in takeover.findings if f.severity == "critical"]
+        score = 100 if critical else 75
+        signals.append(FAIRSignal(
+            name="subdomain_takeover_risk",
+            score=score,
+            weight=1.5,
+            evidence=[
+                f"{f.subdomain} → {f.vulnerable_service} ({f.status})"
+                for f in takeover.findings[:5]
+            ],
+        ))
+
+    # IP reputation — malicious IP is a strong signal.
+    ip_rep = result.ip_reputation
+    if ip_rep and ip_rep.malicious:
+        signals.append(FAIRSignal(
+            name="ip_reputation_malicious",
+            score=90,
+            weight=1.3,
+            evidence=ip_rep.detections[:5] or [f"IP {ip_rep.ip} flagged as malicious"],
+        ))
+
+    # Exposed services — risky ports open to the internet.
+    if result.port_scan and result.port_scan.open_ports:
+        risky = [p for p in result.port_scan.open_ports if p.is_risky]
+        if risky:
+            score = min(100, 50 + 10 * len(risky))
+            signals.append(FAIRSignal(
+                name="exposed_services",
+                score=score,
+                weight=1.3,
+                evidence=[
+                    f"Port {p.port}/{p.service} open" + (f" — banner: {p.banner[:60]}" if p.banner else "")
+                    for p in risky[:5]
+                ],
+            ))
+
+    # URL/domain reputation — blacklisted domain.
+    url_rep = result.url_reputation
+    if url_rep and url_rep.blacklisted:
+        signals.append(FAIRSignal(
+            name="url_blacklisted",
+            score=85,
+            weight=1.3,
+            evidence=url_rep.detections[:5] or [f"{url_rep.url} is blacklisted"],
+        ))
+
+    # Exposed cloud storage buckets.
+    if result.cloud_assets and result.cloud_assets.findings:
+        public_buckets = [
+            f for f in result.cloud_assets.findings if f.status == "public"
+        ]
+        if public_buckets:
+            score = min(100, 70 + 10 * len(public_buckets))
+            signals.append(FAIRSignal(
+                name="exposed_cloud_storage",
+                score=score,
+                weight=1.4,
+                evidence=[
+                    f"{b.provider}: {b.bucket_name} ({b.status})"
+                    for b in public_buckets[:5]
+                ],
+            ))
+
+    # Exposed cloud database endpoints in DNS.
+    if result.cloud_assets and result.cloud_assets.cloud_services:
+        db_endpoints = [s for s in result.cloud_assets.cloud_services if s.is_database]
+        if db_endpoints:
+            score = min(100, 70 + 15 * len(db_endpoints))
+            signals.append(FAIRSignal(
+                name="exposed_cloud_database",
+                score=score,
+                weight=1.5,
+                evidence=[
+                    f"{db.service}: {db.record_value}" for db in db_endpoints[:5]
+                ],
+            ))
+
+    # Weak TLS protocol or cipher suite.
+    if ssl and ssl.tls_version:
+        ver = ssl.tls_version.upper()
+        cipher_upper = ssl.cipher.upper() if ssl.cipher else ""
+        tls_score = 0
+        if "1.0" in ver:
+            tls_score = 90
+        elif "1.1" in ver:
+            tls_score = 70
+        elif cipher_upper and any(w in cipher_upper for w in _WEAK_CIPHERS):
+            tls_score = 40
+        if ssl.cipher_bits and ssl.cipher_bits < 128:
+            tls_score = max(tls_score, 50)
+        if tls_score:
+            evidence = [f"TLS version: {ssl.tls_version}", f"Cipher: {ssl.cipher}"]
+            if ssl.cipher_bits:
+                evidence.append(f"Cipher bits: {ssl.cipher_bits}")
+            if not ssl.pfs:
+                evidence.append("No PFS (forward secrecy)")
+            signals.append(FAIRSignal(
+                name="weak_tls_protocol",
+                score=tls_score,
+                weight=0.8,
+                evidence=evidence,
+            ))
+
+    # Certificate nearing expiry (days_left=0 means not checked).
+    if ssl and ssl.grade and ssl.days_left != 0 and ssl.days_left <= 60:
+        days = ssl.days_left
+        if days < 0:
+            exp_score, exp_msg = 90, "Certificate expired"
+        elif days <= 7:
+            exp_score, exp_msg = 75, f"{days} days until expiry"
+        elif days <= 30:
+            exp_score, exp_msg = 50, f"{days} days until expiry"
+        else:
+            exp_score, exp_msg = 25, f"{days} days until expiry"
+        signals.append(FAIRSignal(
+            name="cert_expiry_risk",
+            score=exp_score,
+            weight=0.6,
+            evidence=[exp_msg],
+        ))
+
+    # CORS misconfiguration (expanded)
+    cors_findings = [
+        h for h in headers.findings
+        if h.header.startswith("Access-Control-") and h.status in ("misconfigured", "weak")
+    ]
+    if cors_findings:
+        cors_score = 80
+        if any(h.value == "null" for h in cors_findings):
+            cors_score = 90
+        signals.append(FAIRSignal(
+            name="cors_misconfiguration",
+            score=cors_score,
+            weight=1.2,
+            evidence=[f"{h.header}: {h.value}" for h in cors_findings[:5]],
+        ))
+
+    # Supply chain risk — vulnerable libraries and missing SRI.
+    if result.supply_chain:
+        sc = result.supply_chain
+        sc_score = 0
+        sc_evidence: list[str] = []
+        if sc.vulnerable_libraries:
+            sc_score += min(80, 40 + sc.vulnerable_libraries * 20)
+            sc_evidence.append(f"{sc.vulnerable_libraries} vulnerable library version(s)")
+        compromised = [r for r in sc.resources if "COMPROMISED" in r.provider]
+        if compromised:
+            sc_score = 100
+            sc_evidence.append(f"Compromised provider: {compromised[0].provider}")
+        if sc.scripts_without_sri:
+            sc_score += min(30, sc.scripts_without_sri * 5)
+            sc_evidence.append(f"{sc.scripts_without_sri} external scripts without SRI")
+        if sc_score:
+            signals.append(FAIRSignal(
+                name="supply_chain_risk",
+                score=min(100, sc_score),
+                weight=1.2,
+                evidence=sc_evidence,
+            ))
+
+    # Open ports (non-risky but numerous = larger attack surface)
+    if result.port_scan and result.port_scan.open_ports:
+        total_open = len(result.port_scan.open_ports)
+        if total_open >= 5:
+            signals.append(FAIRSignal(
+                name="large_port_surface",
+                score=min(100, total_open * 10),
+                weight=0.6,
+                evidence=[f"{total_open} open ports detected"],
+            ))
+
+    # Directory listing exposed
+    dir_listing = [p for p in (result.sensitive_paths or []) if "directory listing" in (p.risk or "").lower()]
+    if dir_listing:
+        signals.append(FAIRSignal(
+            name="directory_listing_exposed",
+            score=70,
+            weight=1.1,
+            evidence=[f"{p.path} → directory listing enabled" for p in dir_listing[:3]],
+        ))
+
+    # GraphQL introspection enabled
+    graphql_paths = [p for p in (result.sensitive_paths or []) if p.path == "/graphql" and p.status_code == 200]
+    if graphql_paths:
+        risk_text = (graphql_paths[0].risk or "").lower()
+        is_introspection = "introspection" in risk_text
+        signals.append(FAIRSignal(
+            name="graphql_exposed",
+            score=85 if is_introspection else 50,
+            weight=1.2 if is_introspection else 0.8,
+            evidence=["GraphQL introspection enabled — full API schema queryable" if is_introspection
+                       else "GraphQL endpoint accessible"],
+        ))
+
+    # Server/X-Powered-By information leakage with version numbers.
+    if headers and (headers.server or headers.powered_by):
+        parts: list[str] = []
+        has_version = False
+        if headers.server:
+            parts.append(f"Server: {headers.server}")
+            if _HAS_VERSION.search(headers.server):
+                has_version = True
+        if headers.powered_by:
+            parts.append(f"X-Powered-By: {headers.powered_by}")
+            if _HAS_VERSION.search(headers.powered_by):
+                has_version = True
+        info_score = 0
+        if has_version and len(parts) == 2:
+            info_score = 60
+        elif has_version:
+            info_score = 40
+        elif parts:
+            info_score = 20
+        if info_score:
+            signals.append(FAIRSignal(
+                name="server_info_leak",
+                score=info_score,
+                weight=0.4,
+                evidence=parts,
+            ))
+
+    # Typosquatting / brand impersonation exposure.
+    if result.typosquatting and result.typosquatting.registered_candidates:
+        count = len(result.typosquatting.registered_candidates)
+        typo_score = min(100, 40 + count * 10)
+        signals.append(FAIRSignal(
+            name="typosquatting_exposure",
+            score=typo_score,
+            weight=1.3,
+            evidence=[
+                f"{count} lookalike domain(s) registered",
+                *[c.domain for c in result.typosquatting.registered_candidates[:5]],
+            ],
+        ))
+
+    if result.attack_paths and result.attack_paths.paths:
+        critical_chains = sum(1 for p in result.attack_paths.paths if p.severity == "critical")
+        high_chains = sum(1 for p in result.attack_paths.paths if p.severity == "high")
+        score = min(100, 70 + critical_chains * 15 + high_chains * 5)
+        signals.append(FAIRSignal(
+            name="attack_path_chains",
+            score=score,
+            weight=2.0,
+            evidence=[
+                f"{len(result.attack_paths.paths)} exploit chain(s) identified",
+                *[f"[{p.severity}] {p.title}" for p in result.attack_paths.paths[:3]],
+            ],
+        ))
+
+    return _factor_from_signals(
+        signals,
+        notes="Higher Vulnerability means a threat engagement is more likely to succeed.",
+    )
+
+
+def _build_control_strength(result: DomainResult) -> FAIRFactor:
+    """Control Strength: quality of defences observed.
+
+    Higher is better (more defences seen). Acts as an attenuator on Loss
+    Event Frequency in the derivation step.
+    """
+    signals: list[FAIRSignal] = []
+
+    # WAF / CDN in front of the target.
+    waf_names = [
+        t.name for t in result.technologies
+        if t.name in _WAF_CDN_NAMES
+        or any(c in _WAF_CDN_CATEGORIES for c in t.categories)
+    ]
+    if waf_names:
+        signals.append(FAIRSignal(
+            name="waf_or_cdn_detected",
+            score=85,
+            weight=1.4,
+            evidence=[f"{n} fronting the target" for n in waf_names[:3]],
+        ))
+
+    # Security headers — straight grade. Require a grade OR findings,
+    # since the default SecurityHeadersResult has both empty.
+    headers = result.security_headers
+    if headers and (headers.grade or headers.findings):
+        signals.append(FAIRSignal(
+            name="security_headers_posture",
+            score=_grade_score(headers.grade),
+            weight=1.2,
+            evidence=[f"grade={headers.grade or 'unknown'}, score={headers.score}"],
+        ))
+
+    # TLS posture — only when check_ssl has produced a grade. The default
+    # SSLCertResult has cert_valid=True and no grade, which shouldn't count
+    # as positive evidence of a defence.
+    ssl = result.ssl_certificate
+    if ssl and ssl.grade:
+        score = _grade_score(ssl.grade)
+        if not ssl.cert_valid:
+            score = min(score, 20)
+        signals.append(FAIRSignal(
+            name="tls_posture",
+            score=score,
+            weight=1.1,
+            evidence=[f"grade={ssl.grade}, valid={ssl.cert_valid}"],
+        ))
+
+    # Cookie hardening — ratio of cookies that are clean.
+    if result.cookies:
+        clean = sum(1 for c in result.cookies if not c.issues)
+        ratio = clean / len(result.cookies)
+        signals.append(FAIRSignal(
+            name="cookie_hardening",
+            score=int(round(ratio * 100)),
+            weight=0.6,
+            evidence=[f"{clean}/{len(result.cookies)} cookies have no issues"],
+        ))
+
+    # Email authentication posture — SPF + DMARC + DKIM = strong phishing defence.
+    email_sec = (
+        result.dns.email_security
+        if result.dns else None
+    )
+    if email_sec and not email_sec.error and email_sec.grade:
+        signals.append(FAIRSignal(
+            name="email_security_posture",
+            score=_grade_score(email_sec.grade),
+            weight=1.0,
+            evidence=[
+                f"email security grade={email_sec.grade}",
+                f"SPF={'yes' if email_sec.spf.exists else 'no'}",
+                f"DMARC={email_sec.dmarc.policy or 'missing'}",
+                f"DKIM={len(email_sec.dkim.selectors_found)} selector(s) found",
+                f"MTA-STS={'yes' if email_sec.mta_sts.exists else 'no'}",
+                f"BIMI={'yes' if email_sec.bimi.exists else 'no'}",
+            ],
+        ))
+
+    # Hosting posture — major cloud/CDN = managed security controls in place.
+    ip_enrich = (
+        result.dns.ip_enrichment
+        if result.dns else None
+    )
+    if ip_enrich and not ip_enrich.error and ip_enrich.records:
+        if ip_enrich.hosting_providers:
+            signals.append(FAIRSignal(
+                name="hosting_posture",
+                score=75,
+                weight=0.8,
+                evidence=[
+                    f"Hosted on {', '.join(ip_enrich.hosting_providers[:3])}",
+                    f"Countries: {', '.join(ip_enrich.countries[:3]) or 'unknown'}",
+                ],
+            ))
+        else:
+            asn_names = [r.asn_name for r in ip_enrich.records if r.asn_name][:3]
+            signals.append(FAIRSignal(
+                name="hosting_posture",
+                score=45,
+                weight=0.8,
+                evidence=asn_names or ["Unknown hosting provider"],
+            ))
+
+    # DNSSEC — protects against DNS cache poisoning.
+    dns = result.dns.records if result.dns else None
+    if dns and dns.dnssec is not None:
+        signals.append(FAIRSignal(
+            name="dnssec_enabled",
+            score=80 if dns.dnssec else 15,
+            weight=0.7,
+            evidence=["DNSSEC enabled" if dns.dnssec else "DNSSEC not enabled"],
+        ))
+
+    # DS + DNSKEY = complete DNSSEC chain of trust.
+    if dns and not dns.error and dns.ds_records and dns.dnssec:
+        signals.append(FAIRSignal(
+            name="dnssec_full_chain",
+            score=90,
+            weight=0.5,
+            evidence=[f"DNSSEC + {len(dns.ds_records)} DS record(s) = complete chain of trust"],
+        ))
+
+    # CAA records — restrict which CAs can issue certificates.
+    if dns and not dns.error:
+        if dns.caa_records:
+            signals.append(FAIRSignal(
+                name="caa_policy",
+                score=75,
+                weight=0.5,
+                evidence=[f"{len(dns.caa_records)} CAA record(s) restrict cert issuance"],
+            ))
+        else:
+            signals.append(FAIRSignal(
+                name="caa_policy",
+                score=20,
+                weight=0.5,
+                evidence=["No CAA records — any CA can issue certificates"],
+            ))
+
+    # Domain maturity from RDAP registration date.
+    rdap = result.passive_intel.rdap if result.passive_intel else None
+    # rdap stays on passive_intel (not moved to dns group)
+    if rdap and rdap.created and not rdap.error:
+        try:
+            created = datetime.fromisoformat(rdap.created.replace("Z", "+00:00"))
+            age_days = (datetime.now(timezone.utc) - created).days
+            age_years = age_days / 365.25
+            if age_years > 5:
+                mat_score = 70
+            elif age_years > 2:
+                mat_score = 55
+            elif age_years > 1:
+                mat_score = 35
+            else:
+                mat_score = 15
+            signals.append(FAIRSignal(
+                name="domain_maturity",
+                score=mat_score,
+                weight=0.4,
+                evidence=[f"Registered {rdap.created[:10]}, ~{age_years:.1f} years old"],
+            ))
+        except (ValueError, TypeError):
+            pass
+
+    # Port hygiene — no risky ports open = good security posture.
+    if result.port_scan and result.port_scan.open_ports:
+        risky = [p for p in result.port_scan.open_ports if p.is_risky]
+        if not risky:
+            signals.append(FAIRSignal(
+                name="port_hygiene",
+                score=80,
+                weight=0.5,
+                evidence=[f"{len(result.port_scan.open_ports)} open ports, none risky"],
+            ))
+        else:
+            signals.append(FAIRSignal(
+                name="port_hygiene",
+                score=max(10, 50 - 10 * len(risky)),
+                weight=0.5,
+                evidence=[f"{len(risky)} risky port(s) exposed"],
+            ))
+
+    # Privacy compliance posture — consent tool + privacy policy presence.
+    if result.privacy and not result.privacy.error:
+        signals.append(FAIRSignal(
+            name="privacy_compliance_posture",
+            score=result.privacy.score,
+            weight=0.8,
+            evidence=[
+                f"privacy compliance score={result.privacy.score}, grade={result.privacy.grade}",
+                f"consent tool: {result.privacy.consent_tool or 'none detected'}",
+            ],
+        ))
+
+    return _factor_from_signals(
+        signals,
+        notes="Higher Control Strength means stronger observed defences (WAF, TLS, headers, cookies, email auth).",
+    )
+
+
+def _build_loss_magnitude(result: DomainResult) -> FAIRFactor:
+    """Loss Magnitude: potential impact of a loss event."""
+    signals: list[FAIRSignal] = []
+
+    # Credential exposure — secrets leaked = direct loss potential.
+    # Weight reduced from 1.5 to 0.8: secrets are primarily a Vulnerability
+    # signal; Loss Magnitude captures the data type impact, not the count.
+    if result.secrets:
+        signals.append(FAIRSignal(
+            name="credential_exposure",
+            score=_aggregate_findings_score(result.secrets),
+            weight=0.8,
+            evidence=[f"{s.secret_type} exposed" for s in result.secrets[:5]],
+        ))
+
+    # Breach history — already-realised losses + data type breadth.
+    if result.breaches:
+        data_types = set()
+        for b in result.breaches:
+            data_types.update(b.data_types)
+        # Each breach adds 15, each distinct data class adds 5, capped 100.
+        score = min(100, 40 + 15 * len(result.breaches) + 5 * len(data_types))
+        signals.append(FAIRSignal(
+            name="breach_history",
+            score=score,
+            weight=1.3,
+            evidence=[
+                f"{b.breach_name or b.source} ({', '.join(b.data_types[:3])})"
+                for b in result.breaches[:5]
+            ],
+        ))
+
+    # IoC categories implying sensitive data handling gone wrong.
+    sensitive_iocs = [
+        i for i in result.ioc_findings
+        if i.ioc_type in ("credential_harvest", "webshell_path", "defacement")
+    ]
+    if sensitive_iocs:
+        signals.append(FAIRSignal(
+            name="sensitive_data_iocs",
+            score=_aggregate_findings_score(sensitive_iocs),
+            weight=1.1,
+            evidence=[f"{i.ioc_type}" for i in sensitive_iocs[:3]],
+        ))
+
+    # DNS information leakage — HINFO/LOC/RP records expose sensitive details.
+    dns = result.dns.records if result.dns else None
+    if dns and not dns.error:
+        info_leak_evidence: list[str] = []
+        if dns.hinfo_records:
+            info_leak_evidence.append(f"HINFO exposes OS/hardware: {dns.hinfo_records[0].cpu}/{dns.hinfo_records[0].os}")
+        if dns.loc_records:
+            info_leak_evidence.append("LOC exposes physical coordinates")
+        if dns.rp_records:
+            info_leak_evidence.append(f"RP exposes admin contact: {dns.rp_records[0].mbox}")
+        if info_leak_evidence:
+            signals.append(FAIRSignal(
+                name="dns_information_leakage",
+                score=min(100, 25 * len(info_leak_evidence)),
+                weight=0.6,
+                evidence=info_leak_evidence,
+            ))
+
+    # Broad email surface = broader phishing blast radius if credentials leak.
+    email_count = len(result.emails)
+    if email_count >= 5:
+        signals.append(FAIRSignal(
+            name="phishing_blast_radius",
+            score=min(100, email_count * 5),
+            weight=0.6,
+            evidence=[f"{email_count} distinct emails available for phishing"],
+        ))
+
+    # Public-footprint multiplier (if we have passive data).
+    passive = result.passive_intel
+    if passive and passive.wayback and passive.wayback.snapshot_count > 50:
+        signals.append(FAIRSignal(
+            name="public_footprint_multiplier",
+            score=min(100, 40 + passive.wayback.snapshot_count // 10),
+            weight=0.4,
+            evidence=[
+                f"{passive.wayback.snapshot_count} archived snapshots "
+                "— larger public footprint amplifies reputational loss"
+            ],
+        ))
+
+    # Breach data type sensitivity — weight by what was actually exposed.
+    if result.breaches:
+        all_types: set[str] = set()
+        for b in result.breaches:
+            all_types.update(b.data_types)
+        sensitivity_score = min(
+            100, sum(_SENSITIVE_DATA_WEIGHTS.get(t, 3) for t in all_types)
+        )
+        if sensitivity_score > 30:
+            top_sensitive = sorted(
+                all_types,
+                key=lambda t: _SENSITIVE_DATA_WEIGHTS.get(t, 3),
+                reverse=True,
+            )
+            signals.append(FAIRSignal(
+                name="breach_data_sensitivity",
+                score=sensitivity_score,
+                weight=1.2,
+                evidence=[f"Exposed: {', '.join(top_sensitive[:5])}"],
+            ))
+
+    # Source code exposure from JS sourcemaps.
+    if result.js_intel:
+        recovered = result.js_intel.recovered_source_files
+        smaps = result.js_intel.sourcemaps_found
+        if recovered:
+            from .easm_report import count_first_party_sources
+
+            first_party, _vendor = count_first_party_sources(recovered)
+            if first_party:
+                sc = min(100, 60 + first_party * 8)
+                evidence = f"{first_party} first-party source files recoverable from {len(smaps)} sourcemap(s)"
+            else:
+                sc = 20
+                evidence = f"{len(recovered)} vendor-only source files from {len(smaps)} sourcemap(s) (no proprietary code)"
+            signals.append(FAIRSignal(
+                name="source_code_exposure",
+                score=sc,
+                weight=1.3,
+                evidence=[evidence],
+            ))
+        elif smaps:
+            signals.append(FAIRSignal(
+                name="source_code_exposure",
+                score=45,
+                weight=1.3,
+                evidence=[f"{len(smaps)} sourcemap(s) accessible but no files recovered"],
+            ))
+
+    # External dependency count — supply chain risk.
+    if result.external_links:
+        ext_domains = {
+            (_urlparse(l.url).hostname or "").lower()
+            for l in result.external_links
+        }
+        ext_domains.discard("")
+        if len(ext_domains) >= 5:
+            signals.append(FAIRSignal(
+                name="external_dependency_risk",
+                score=min(100, len(ext_domains) * 3),
+                weight=0.5,
+                evidence=[f"{len(ext_domains)} unique external domains loaded"],
+            ))
+
+    # Brand impersonation risk from typosquatting.
+    # Weight reduced from 1.0 to 0.6: typosquatting is already heavily
+    # weighted in Vulnerability (1.3); Loss Magnitude uses a lighter touch.
+    if result.typosquatting and result.typosquatting.registered_candidates:
+        signals.append(FAIRSignal(
+            name="brand_impersonation_risk",
+            score=70,
+            weight=0.6,
+            evidence=[
+                f"{len(result.typosquatting.registered_candidates)} typosquat domains could be used for phishing",
+            ],
+        ))
+
+    # Attack path impact — Weight reduced from 2.0 to 1.2: attack paths
+    # already drive Vulnerability heavily (w=2.0); in Loss Magnitude the
+    # impact type matters more than the chain itself.
+    if result.attack_paths and result.attack_paths.paths:
+        impacts = {p.impact for p in result.attack_paths.paths}
+        high_impacts = impacts & {"data_theft", "code_execution", "account_takeover"}
+        if high_impacts:
+            signals.append(FAIRSignal(
+                name="confirmed_exploit_chain_impact",
+                score=90,
+                weight=1.2,
+                evidence=[f"Confirmed attack path leads to {', '.join(sorted(high_impacts))}"],
+            ))
+
+    return _factor_from_signals(
+        signals,
+        notes="Higher Loss Magnitude means a successful attack would have bigger impact.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
+
+def compute_fair_signals(
+    result: DomainResult,
+    *,
+    scan_mode: str = "full",
+) -> FAIRSignals:
+    """Derive FAIR-aligned risk signals from a populated ``DomainResult``.
+
+    ``scan_mode`` should be one of: ``passive``, ``lighttouch``,
+    ``standard``, ``full`` — it controls the ``confidence`` field and is
+    echoed on the output for downstream consumers.
+    """
+    try:
+        tef = _build_threat_event_frequency(result)
+        vuln = _build_vulnerability(result)
+        control = _build_control_strength(result)
+        loss_mag = _build_loss_magnitude(result)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("FAIR signal computation failed for %s: %s", result.target, exc)
+        return FAIRSignals(scan_mode=scan_mode, confidence="low")
+
+    # Derived: LEF = TEF × Vulnerability, attenuated by Control Strength.
+    # A control_strength of 100 halves the LEF; 0 leaves it untouched.
+    tef_n = _neutral(tef)
+    vuln_n = _neutral(vuln)
+    ctrl_n = _neutral(control)
+    raw_lef = (tef_n * vuln_n) / 100.0
+    attenuated_lef = raw_lef * (1.0 - ctrl_n / 200.0)
+    lef = max(0, min(100, int(round(attenuated_lef))))
+
+    # Overall risk = LEF × Loss Magnitude.
+    lm_n = _neutral(loss_mag)
+    overall = max(0, min(100, int(round(lef * lm_n / 100.0))))
+
+    if overall >= 75:
+        tier = "critical"
+    elif overall >= 50:
+        tier = "high"
+    elif overall >= 25:
+        tier = "medium"
+    else:
+        tier = "low"
+
+    return FAIRSignals(
+        threat_event_frequency=tef,
+        vulnerability=vuln,
+        control_strength=control,
+        loss_magnitude=loss_mag,
+        loss_event_frequency=lef,
+        overall_risk=overall,
+        risk_tier=tier,
+        confidence=_confidence_for_mode(scan_mode),
+        scan_mode=scan_mode,
+    )
+
+
+__all__ = ["compute_fair_signals"]
