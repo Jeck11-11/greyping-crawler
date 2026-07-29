@@ -56,7 +56,11 @@ async def find_subdomains(domain: str, *, timeout: int = C99_TIMEOUT) -> list[di
             sub = str(entry)
             ip = ""
             cf = None
-        sub = _MARKDOWN_LINK_RE.sub(r"\1", sub)
+        # C99 returns each subdomain wrapped as a markdown link, e.g.
+        # "[www.x.com](https://www.x.com)". Unwrap via the capture group directly
+        # (a lambda replacement, not a "\1" backreference string — the latter was
+        # observed not to expand under the Alpine container runtime).
+        sub = _MARKDOWN_LINK_RE.sub(lambda m: m.group(1), sub)
         sub = sub.strip().lower().rstrip(".")
         if sub:
             if isinstance(cf, str):

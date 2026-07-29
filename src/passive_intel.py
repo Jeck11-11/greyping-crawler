@@ -102,7 +102,10 @@ def _clean_hostname(raw: str) -> str:
     """
     if not raw:
         return ""
-    host = _MARKDOWN_LINK_RE.sub(r"\1", raw).strip().lower()
+    # Unwrap markdown links via the capture group directly (a lambda replacement,
+    # not a "\1" backreference string — the latter was observed not to expand
+    # under the Alpine container runtime, leaving the wrapper intact).
+    host = _MARKDOWN_LINK_RE.sub(lambda m: m.group(1), raw).strip().lower()
     host = host.removeprefix("https://").removeprefix("http://")
     host = host.lstrip("*.").rstrip(".").split("/")[0]
     if not _VALID_HOSTNAME_RE.match(host):

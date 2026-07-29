@@ -46,6 +46,17 @@ class TestHostnameCleaning:
         assert _clean_hostname("not a hostname") == ""
         assert _clean_hostname("") == ""
 
+    def test_c99_markdown_unwrapped_without_backreference(self):
+        # C99's subdomainfinder returns each subdomain as a markdown link. The
+        # unwrap must not rely on a "\1" backreference string (which failed to
+        # expand under the Alpine container runtime) — assert the capture-group
+        # replacement leaves a bare hostname.
+        from src.c99_client import _MARKDOWN_LINK_RE
+        raw = "[www.greyping.com](https://www.greyping.com)"
+        cleaned = _MARKDOWN_LINK_RE.sub(lambda m: m.group(1), raw)
+        assert cleaned == "www.greyping.com"
+        assert "[" not in cleaned and "](" not in cleaned
+
 
 # 3. affects_risk_score consistency
 class TestAffectsRiskScoreConsistency:
