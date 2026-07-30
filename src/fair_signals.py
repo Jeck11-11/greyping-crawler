@@ -30,6 +30,7 @@ from .models import (
     FAIRFactor,
     FAIRSignal,
     FAIRSignals,
+    FlatFAIRSignal,
 )
 
 logger = logging.getLogger(__name__)
@@ -77,6 +78,11 @@ _SENSITIVE_ROBOTS_PATTERNS: tuple[str, ...] = (
 _WEAK_CIPHERS: tuple[str, ...] = ("RC4", "DES", "3DES", "MD5", "NULL", "EXPORT")
 
 _HAS_VERSION = re.compile(r"\d+[\.\d]+")
+
+# Minimum Threat Event Frequency for a live, internet-facing asset. Any public
+# host sees opportunistic/automated threat traffic, so TEF should not sit near
+# zero purely because the discovered footprint is small.
+_TEF_LIVE_BASELINE = 30
 
 _SENSITIVE_DATA_WEIGHTS: dict[str, int] = {
     "Passwords": 25, "Plaintext Passwords": 25,
@@ -136,6 +142,17 @@ def _neutral(factor: FAIRFactor) -> int:
     from collapsing overall_risk to zero.
     """
     return factor.score if factor.signals else 50
+
+
+def _tier(score: int) -> str:
+    """Band a 0-100 score: low (0-24), medium (25-49), high (50-74), critical (75-100)."""
+    if score >= 75:
+        return "critical"
+    if score >= 50:
+        return "high"
+    if score >= 25:
+        return "medium"
+    return "low"
 
 
 def _confidence_for_mode(mode: str) -> str:
@@ -221,6 +238,55 @@ def _build_threat_event_frequency(result: DomainResult) -> FAIRFactor:
             evidence=[f"{email_count} email addresses harvested"],
         ))
 
+    # Phone numbers — additional social-engineering / vishing surface.
+    phone_count = len(result.phone_numbers)
+    if phone_count:
+        signals.append(FAIRSignal(
+            name="phone_contact_surface",
+            score=min(100, phone_count * 15),
+            weight=0.4,
+            evidence=[f"{phone_count} phone number(s) harvested"],
+        ))
+
+    # Social profiles — OSINT footprint for pretext / impersonation.
+    social_count = len(result.social_profiles)
+    if social_count:
+        signals.append(FAIRSignal(
+            name="social_presence",
+            score=min(100, social_count * 10),
+            weight=0.3,
+            evidence=[f"{social_count} social profile(s) discovered"],
+        ))
+
+    # Sitemap-enumerated URL surface — a large declared URL set is more to probe.
+    if result.sitemap and result.sitemap.url_count:
+        url_count = result.sitemap.url_count
+        signals.append(FAIRSignal(
+            name="sitemap_surface",
+            score=min(100, 20 + url_count // 5),
+            weight=0.6,
+            evidence=[f"{url_count} URL(s) declared in sitemap"],
+        ))
+
+    # Favicon hash — a stable fingerprint attackers can pivot on (Shodan/etc.).
+    if result.favicon and result.favicon.hash:
+        signals.append(FAIRSignal(
+            name="favicon_fingerprint",
+            score=30,
+            weight=0.4,
+            evidence=[f"Favicon hash {result.favicon.hash} enables cross-host pivoting"],
+        ))
+
+    # Crawl breadth — more reachable pages = larger interactive surface.
+    pages = result.pages_scanned
+    if pages and pages >= 5:
+        signals.append(FAIRSignal(
+            name="crawl_breadth",
+            score=min(100, pages * 5),
+            weight=0.4,
+            evidence=[f"{pages} pages crawled, {len(result.internal_links)} internal link(s)"],
+        ))
+
     # Internal network hostnames leaked via JS bundles.
     if result.js_intel and result.js_intel.internal_hosts:
         hosts = result.js_intel.internal_hosts
@@ -269,10 +335,26 @@ def _build_threat_event_frequency(result: DomainResult) -> FAIRFactor:
                 ],
             ))
 
-    return _factor_from_signals(
+    factor = _factor_from_signals(
         signals,
         notes="Higher TEF means threat actors are more likely to engage this target.",
     )
+
+    # Baseline floor: any live, internet-facing asset sees opportunistic and
+    # automated threat traffic, so a near-zero TEF is unrealistic. If the target
+    # resolved / responded, floor the factor at a modest baseline so the
+    # (multiplicative) overall_risk is not collapsed purely by a small footprint.
+    a_records = bool(
+        result.dns and result.dns.records and result.dns.records.a_records
+    ) if result.dns else False
+    is_live = (result.pages_scanned or 0) > 0 or a_records
+    if is_live and factor.score < _TEF_LIVE_BASELINE:
+        factor.score = _TEF_LIVE_BASELINE
+        note = (" Baseline applied: live internet-facing asset (opportunistic "
+                "threat traffic).")
+        factor.notes = (factor.notes + note) if factor.notes else note.strip()
+
+    return factor
 
 
 def _build_vulnerability(result: DomainResult) -> FAIRFactor:
@@ -614,6 +696,9 @@ def _build_vulnerability(result: DomainResult) -> FAIRFactor:
         if sc.scripts_without_sri:
             sc_score += min(30, sc.scripts_without_sri * 5)
             sc_evidence.append(f"{sc.scripts_without_sri} external scripts without SRI")
+        if sc.stylesheets_without_sri:
+            sc_score += min(15, sc.stylesheets_without_sri * 3)
+            sc_evidence.append(f"{sc.stylesheets_without_sri} external stylesheets without SRI")
         if sc_score:
             signals.append(FAIRSignal(
                 name="supply_chain_risk",
@@ -737,6 +822,19 @@ def _build_control_strength(result: DomainResult) -> FAIRFactor:
             score=85,
             weight=1.4,
             evidence=[f"{n} fronting the target" for n in waf_names[:3]],
+        ))
+
+    # Confirmed WAF ruleset (distinct from a CDN sitting in front). Only fires
+    # when active detection actually asserted a WAF — a CDN with an unassessed
+    # WAF (the common Cloudflare case) does NOT count as ruleset evidence.
+    waf = result.waf
+    if waf and waf.waf_detected is True:
+        provider = getattr(waf, "waf_provider", "") or getattr(waf, "firewall", "") or "WAF"
+        signals.append(FAIRSignal(
+            name="waf_ruleset_confirmed",
+            score=90,
+            weight=1.3,
+            evidence=[f"Active WAF ruleset confirmed: {provider}"],
         ))
 
     # Security headers — straight grade. Require a grade OR findings,
@@ -1081,6 +1179,25 @@ def _build_loss_magnitude(result: DomainResult) -> FAIRFactor:
             ],
         ))
 
+    # Deliverable / role-based contact accounts — validated and shared-role
+    # addresses are higher-value phishing targets, so they raise loss magnitude.
+    if result.email_validations:
+        deliverable = [v for v in result.email_validations if v.valid]
+        role_accounts = [v for v in result.email_validations if getattr(v, "role_account", False)]
+        if deliverable or role_accounts:
+            score = min(100, 30 + len(deliverable) * 10 + len(role_accounts) * 15)
+            evidence = []
+            if deliverable:
+                evidence.append(f"{len(deliverable)} deliverable address(es)")
+            if role_accounts:
+                evidence.append(f"{len(role_accounts)} shared/role account(s)")
+            signals.append(FAIRSignal(
+                name="deliverable_contact_accounts",
+                score=score,
+                weight=0.6,
+                evidence=evidence,
+            ))
+
     # Attack path impact — Weight reduced from 2.0 to 1.2: attack paths
     # already drive Vulnerability heavily (w=2.0); in Loss Magnitude the
     # impact type matters more than the chain itself.
@@ -1137,15 +1254,34 @@ def compute_fair_signals(
     # Overall risk = LEF × Loss Magnitude.
     lm_n = _neutral(loss_mag)
     overall = max(0, min(100, int(round(lef * lm_n / 100.0))))
+    tier = _tier(overall)
 
-    if overall >= 75:
-        tier = "critical"
-    elif overall >= 50:
-        tier = "high"
-    elif overall >= 25:
-        tier = "medium"
-    else:
-        tier = "low"
+    # Security posture score — an additive, exposure-focused number that is NOT
+    # threat-gated. Where overall_risk answers "how likely is a loss event given
+    # who would attack this", posture answers "how bad are the observed hygiene
+    # gaps regardless of threat likelihood". Xano gets both.
+    posture = max(0, min(100, int(round(
+        0.55 * vuln_n + 0.30 * (100 - ctrl_n) + 0.15 * lm_n
+    ))))
+    posture_tier = _tier(posture)
+
+    # Flatten every signal across the four factors, factor-tagged, so a
+    # downstream consumer can iterate them in a single pass.
+    all_signals: list[FlatFAIRSignal] = []
+    for factor_name, factor in (
+        ("threat_event_frequency", tef),
+        ("vulnerability", vuln),
+        ("control_strength", control),
+        ("loss_magnitude", loss_mag),
+    ):
+        for s in factor.signals:
+            all_signals.append(FlatFAIRSignal(
+                factor=factor_name,
+                name=s.name,
+                score=s.score,
+                weight=s.weight,
+                evidence=s.evidence,
+            ))
 
     return FAIRSignals(
         threat_event_frequency=tef,
@@ -1157,6 +1293,10 @@ def compute_fair_signals(
         risk_tier=tier,
         confidence=_confidence_for_mode(scan_mode),
         scan_mode=scan_mode,
+        security_posture_score=posture,
+        posture_tier=posture_tier,
+        signal_count=len(all_signals),
+        all_signals=all_signals,
     )
 
 

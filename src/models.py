@@ -875,6 +875,24 @@ class FAIRFactor(BaseModel):
     )
 
 
+class FlatFAIRSignal(BaseModel):
+    """A single FAIR signal flattened out of its factor, tagged with the factor.
+
+    Lets a downstream consumer (e.g. Xano) iterate every signal in one pass
+    without walking the four nested factor arrays.
+    """
+
+    factor: str = Field(
+        ...,
+        description="Which factor emitted this: threat_event_frequency, "
+                    "vulnerability, control_strength, loss_magnitude.",
+    )
+    name: str = Field(..., description="Signal identifier, e.g. 'missing_security_headers'.")
+    score: int = Field(..., ge=0, le=100, description="Normalised 0-100 score.")
+    weight: float = Field(default=1.0, ge=0.0, description="Aggregation weight within its factor.")
+    evidence: list[str] = Field(default_factory=list)
+
+
 class FAIRSignals(BaseModel):
     """FAIR-aligned risk signals derived from a single DomainResult."""
 
@@ -916,6 +934,27 @@ class FAIRSignals(BaseModel):
     scan_mode: str = Field(
         default="",
         description="Which orchestrator produced these signals: passive, lighttouch, standard, full.",
+    )
+    security_posture_score: int = Field(
+        default=0, ge=0, le=100,
+        description=(
+            "Additive exposure/hygiene score (higher = worse posture). Unlike "
+            "overall_risk it is NOT threat-gated, so real hygiene gaps register "
+            "even for small-footprint targets with a low threat surface."
+        ),
+    )
+    posture_tier: str = Field(
+        default="low",
+        description="Banded tier on security_posture_score: low (0-24), medium "
+                    "(25-49), high (50-74), critical (75-100).",
+    )
+    signal_count: int = Field(
+        default=0, ge=0,
+        description="Total number of signals emitted across all four factors.",
+    )
+    all_signals: list[FlatFAIRSignal] = Field(
+        default_factory=list,
+        description="Every signal across all factors, factor-tagged, for single-pass consumption.",
     )
 
 

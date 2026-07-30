@@ -33,6 +33,17 @@ from src.models import (
     SSLCertResult,
     TechFinding,
     WaybackResult,
+    ContactsGroup,
+    PhoneFinding,
+    SocialFinding,
+    SitemapResult,
+    FaviconResult,
+    WAFResult,
+    EmailValidationResult,
+    TyposquattingResult,
+    TyposquatCandidate,
+    EmailSecurityResult,
+    DMARCResult,
 )
 
 
@@ -713,3 +724,129 @@ class TestNewLossMagnitudeSignals:
         signals = compute_fair_signals(result, scan_mode="full")
         names = [s.name for s in signals.loss_magnitude.signals]
         assert "external_dependency_risk" not in names  # < 5 unique domains
+
+
+# ---------------------------------------------------------------------------
+# Expanded coverage: new signals, TEF baseline floor, posture score, flatten
+# ---------------------------------------------------------------------------
+
+class TestExpandedTEFSignals:
+    def test_phone_and_social_and_sitemap_and_favicon(self):
+        result = DomainResult(
+            target="https://example.com",
+            contacts=ContactsGroup(
+                phone_numbers=[PhoneFinding(phone="+1234567890", found_on=["x"])],
+                social_profiles=[SocialFinding(platform="linkedin", url="https://l/x", found_on=["x"])],
+            ),
+            sitemap=SitemapResult(found=True, url_count=40),
+            favicon=FaviconResult(url="https://example.com/favicon.ico", hash="123456789"),
+        )
+        names = [s.name for s in compute_fair_signals(result).threat_event_frequency.signals]
+        assert {"phone_contact_surface", "social_presence", "sitemap_surface", "favicon_fingerprint"} <= set(names)
+
+    def test_signals_absent_when_fields_empty(self):
+        result = DomainResult(target="https://example.com")
+        names = [s.name for s in compute_fair_signals(result).threat_event_frequency.signals]
+        for n in ("phone_contact_surface", "social_presence", "sitemap_surface", "favicon_fingerprint", "crawl_breadth"):
+            assert n not in names
+
+
+class TestTEFBaselineFloor:
+    def _live(self):
+        # Live asset (has A record) with a tiny footprint -> low raw TEF.
+        return DomainResult(
+            target="https://example.com",
+            dns=DNSGroup(records=DNSResult(domain="example.com", a_records=[ARecord(address="1.2.3.4")])),
+            contacts=ContactsGroup(emails=[EmailFinding(email="a@example.com", found_on=["x"])]),
+        )
+
+    def test_floor_applied_to_live_asset(self):
+        fs = compute_fair_signals(self._live())
+        assert fs.threat_event_frequency.score >= 30
+
+    def test_no_floor_when_not_live(self):
+        # No A records, no pages scanned -> not internet-facing/live from our view.
+        result = DomainResult(
+            target="https://example.com",
+            contacts=ContactsGroup(emails=[EmailFinding(email="a@example.com", found_on=["x"])]),
+        )
+        fs = compute_fair_signals(result)
+        # contact_attack_surface alone scores 15; floor must NOT lift it.
+        assert fs.threat_event_frequency.score < 30
+
+
+class TestWafRulesetConfirmed:
+    def test_confirmed_waf_fires(self):
+        result = DomainResult(
+            target="https://example.com",
+            waf=WAFResult(url="x", detected=True, waf_detected=True, waf_provider="Imperva",
+                          waf_detection_status="assessed"),
+        )
+        names = [s.name for s in compute_fair_signals(result).control_strength.signals]
+        assert "waf_ruleset_confirmed" in names
+
+    def test_cdn_only_does_not_fire(self):
+        result = DomainResult(
+            target="https://example.com",
+            waf=WAFResult(url="x", detected=False, cdn_detected=True, cdn_provider="Cloudflare",
+                          waf_detected=None, waf_detection_status="not_assessed"),
+        )
+        names = [s.name for s in compute_fair_signals(result).control_strength.signals]
+        assert "waf_ruleset_confirmed" not in names
+
+
+class TestDeliverableContactAccounts:
+    def test_role_and_valid_accounts_raise_loss(self):
+        result = DomainResult(
+            target="https://example.com",
+            email_validations=[
+                EmailValidationResult(email="sales@example.com", valid=True, role_account=True),
+                EmailValidationResult(email="ceo@example.com", valid=True, role_account=False),
+            ],
+        )
+        names = [s.name for s in compute_fair_signals(result).loss_magnitude.signals]
+        assert "deliverable_contact_accounts" in names
+
+    def test_absent_when_no_valid(self):
+        result = DomainResult(
+            target="https://example.com",
+            email_validations=[EmailValidationResult(email="x@example.com", valid=False, role_account=False)],
+        )
+        names = [s.name for s in compute_fair_signals(result).loss_magnitude.signals]
+        assert "deliverable_contact_accounts" not in names
+
+
+class TestSecurityPostureAndFlatten:
+    def _greyping_like(self):
+        return DomainResult(
+            target="https://greyping.com",
+            dns=DNSGroup(
+                records=DNSResult(domain="greyping.com", a_records=[ARecord(address="104.17.249.72")]),
+                email_security=EmailSecurityResult(domain="greyping.com", receives_mail=True,
+                    applicable=True, grade="D", dmarc=DMARCResult(exists=True, policy="none")),
+            ),
+            ssl=SSLCertResult(cert_valid=True, grade="A"),
+            security=SecurityGroup(headers=SecurityHeadersResult(grade="D", findings=[
+                HeaderFinding(header="Content-Security-Policy", status="missing", severity="medium"),
+            ])),
+            contacts=ContactsGroup(emails=[EmailFinding(email="sales@greyping.com", found_on=["x"])]),
+            typosquatting=TyposquattingResult(domain="greyping.com", registered_candidates=[
+                TyposquatCandidate(domain="greyling.com", technique="keyboard", similarity_score=0.88),
+            ]),
+        )
+
+    def test_posture_higher_than_overall_for_low_threat_site(self):
+        fs = compute_fair_signals(self._greyping_like())
+        # Real hygiene gaps must register on posture even though the threat
+        # surface (and thus the multiplicative overall_risk) is low.
+        assert fs.security_posture_score > fs.overall_risk
+        assert fs.posture_tier in ("medium", "high", "critical")
+
+    def test_all_signals_flat_and_tagged(self):
+        fs = compute_fair_signals(self._greyping_like())
+        per_factor = (len(fs.threat_event_frequency.signals) + len(fs.vulnerability.signals)
+                      + len(fs.control_strength.signals) + len(fs.loss_magnitude.signals))
+        assert fs.signal_count == per_factor == len(fs.all_signals)
+        valid_factors = {"threat_event_frequency", "vulnerability", "control_strength", "loss_magnitude"}
+        assert all(s.factor in valid_factors for s in fs.all_signals)
+        assert all(0 <= s.score <= 100 for s in fs.all_signals)
