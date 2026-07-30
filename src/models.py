@@ -709,6 +709,28 @@ class DKIMResult(BaseModel):
     selectors_checked: list[str] = Field(default_factory=list)
     selectors_found: list[str] = Field(default_factory=list)
     issues: list[str] = Field(default_factory=list)
+    status: str = Field(
+        default="not_observed_common_selectors",
+        description="found / not_observed_common_selectors / not_checked. Failure to "
+                    "find a *common* selector does NOT prove DKIM is absent.",
+    )
+    confirmed_absent: bool = Field(
+        default=False,
+        description="Only true with authoritative proof of absence, never from a "
+                    "guessed-selector miss.",
+    )
+    confidence: float = Field(
+        default=0.4, ge=0.0, le=1.0,
+        description="Confidence in the DKIM determination (low when only common "
+                    "selectors were probed).",
+    )
+
+    @model_validator(mode="after")
+    def _derive_dkim_status(self) -> DKIMResult:
+        if self.selectors_found:
+            self.status = "found"
+            self.confidence = 0.9
+        return self
 
 
 class MTASTSResult(BaseModel):
@@ -844,21 +866,77 @@ class PassiveIntelResult(BaseModel):
 
 
 class FAIRSignal(BaseModel):
-    """A single piece of evidence mapped onto a FAIR factor."""
+    """A single piece of evidence mapped onto a FAIR factor.
+
+    The scanner produces *candidate* signals: it measures how strongly the
+    technical evidence supports a condition (``signal_strength``, 0-100) and how
+    confident it is (``confidence``). It is NOT the authoritative source for FAIR
+    weights or final category scores — those are applied downstream (Xano). The
+    ``weight`` field is retained only for backward compatibility and is marked
+    deprecated; downstream systems must not treat it as authoritative.
+    """
 
     name: str = Field(..., description="Short machine-readable identifier, e.g. 'exposed_secrets'.")
     score: int = Field(
         ..., ge=0, le=100,
-        description="Normalised 0-100 score for this signal within its factor.",
+        description="DEPRECATED alias of signal_strength. Technical strength of the "
+                    "evidence (0-100), NOT a final FAIR score.",
     )
     weight: float = Field(
         default=1.0, ge=0.0,
-        description="Relative weight of this signal when aggregating the factor.",
+        description="DEPRECATED legacy aggregation weight. Not authoritative — "
+                    "official FAIR weights are applied downstream (Xano).",
     )
     evidence: list[str] = Field(
         default_factory=list,
         description="Human-readable evidence strings that drove the score.",
     )
+
+    # --- Candidate-signal schema (authoritative meaning; see SignalEvaluation) ---
+    signal_strength: int | None = Field(
+        default=None, ge=0, le=100,
+        description="How strongly technical evidence supports this signal (0-100). "
+                    "Mirrors `score`. None when the signal is unknown/not applicable.",
+    )
+    fair_category: str = Field(
+        default="",
+        description="threat_event_frequency / vulnerability / control_strength / loss_magnitude.",
+    )
+    status: str = Field(
+        default="confirmed",
+        description="confirmed / inferred / informational / not_observed / "
+                    "not_applicable / unknown / scan_failed.",
+    )
+    confidence: float = Field(
+        default=0.9, ge=0.0, le=1.0,
+        description="Confidence the evidence supports this signal (0-1).",
+    )
+    severity: str = Field(default="", description="critical / high / medium / low / info.")
+    affects_risk_score: bool = Field(
+        default=True,
+        description="Whether this signal is eligible to contribute to a risk score.",
+    )
+    risk_eligible: bool = Field(
+        default=True,
+        description="Whether the underlying evidence passed is_evidence_risk_eligible().",
+    )
+    exclusion_reason: str = Field(
+        default="",
+        description="If not risk_eligible, why (e.g. 'Shared CDN edge; origin exposure not confirmed').",
+    )
+    reason: str = Field(default="", description="Free-form note about how the signal was derived.")
+    legacy_weight: float = Field(default=1.0, description="Copy of the deprecated weight.")
+    legacy_weight_deprecated: bool = Field(default=True)
+
+    @model_validator(mode="after")
+    def _mirror_signal_strength(self) -> FAIRSignal:
+        if self.signal_strength is None and self.status not in (
+            "unknown", "not_applicable", "scan_failed", "not_observed",
+        ):
+            self.signal_strength = self.score
+        if self.legacy_weight == 1.0 and self.weight != 1.0:
+            self.legacy_weight = self.weight
+        return self
 
 
 class FAIRFactor(BaseModel):
@@ -888,9 +966,24 @@ class FlatFAIRSignal(BaseModel):
                     "vulnerability, control_strength, loss_magnitude.",
     )
     name: str = Field(..., description="Signal identifier, e.g. 'missing_security_headers'.")
-    score: int = Field(..., ge=0, le=100, description="Normalised 0-100 score.")
-    weight: float = Field(default=1.0, ge=0.0, description="Aggregation weight within its factor.")
+    score: int = Field(..., ge=0, le=100, description="DEPRECATED alias of signal_strength.")
+    weight: float = Field(default=1.0, ge=0.0, description="DEPRECATED legacy aggregation weight (non-authoritative).")
     evidence: list[str] = Field(default_factory=list)
+    signal_strength: int | None = Field(default=None, ge=0, le=100)
+    status: str = Field(default="confirmed")
+    confidence: float = Field(default=0.9, ge=0.0, le=1.0)
+    affects_risk_score: bool = Field(default=True)
+    risk_eligible: bool = Field(default=True)
+
+    @model_validator(mode="after")
+    def _mirror_ss(self) -> FlatFAIRSignal:
+        # Preserve None for non-scoring statuses so the flat view stays honest
+        # (an unknown/not-applicable signal has no strength).
+        if self.signal_strength is None and self.status not in (
+            "unknown", "not_applicable", "scan_failed", "not_observed",
+        ):
+            self.signal_strength = self.score
+        return self
 
 
 class FAIRSignals(BaseModel):
@@ -956,6 +1049,151 @@ class FAIRSignals(BaseModel):
         default_factory=list,
         description="Every signal across all factors, factor-tagged, for single-pass consumption.",
     )
+    # --- Authority markers: the scanner is NOT the authoritative scorer ---
+    scoring_authority: str = Field(
+        default="downstream_xano",
+        description="Who owns authoritative FAIR weights/category scores/loss modelling.",
+    )
+    scanner_scores_are_candidate_signals: bool = Field(
+        default=True,
+        description="These factor/overall scores are candidate signals, not final FAIR scores.",
+    )
+    deprecated: bool = Field(
+        default=True,
+        description="This aggregated block is retained for back-compat only.",
+    )
+    authoritative: bool = Field(
+        default=False,
+        description="False — final scores are computed downstream from candidate signals.",
+    )
+    replacement: str = Field(
+        default="signal_evaluation.candidate_signals",
+        description="Where authoritative consumers should read candidate signals from.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Scan profile — one authoritative object describing what the scan covered
+# ---------------------------------------------------------------------------
+
+class ScanProfile(BaseModel):
+    """Authoritative description of what a scan actually covered.
+
+    Built once at the start of scoring and reused by every downstream section
+    (metadata, risk assessment, confidence, EASM report, executive summary,
+    compliance, coverage, narrative) so no section can claim "full" coverage
+    when active testing was excluded or failed.
+    """
+
+    scan_profile: str = Field(
+        default="passive_easm",
+        description="passive_easm / light_touch / standard_authorized / full_authorized.",
+    )
+    coverage_level: str = Field(
+        default="passive_plus_light_touch",
+        description="passive_only / passive_plus_light_touch / active_partial / active_complete.",
+    )
+    active_vulnerability_scanning_included: bool = False
+    active_vulnerability_scanning_completed: bool = False
+    modules_requested: list[str] = Field(default_factory=list)
+    modules_completed: list[str] = Field(default_factory=list)
+    modules_skipped: list[str] = Field(default_factory=list)
+    modules_failed: list[str] = Field(default_factory=list)
+
+
+class ReportConfidence(BaseModel):
+    """Separate confidence per assessment dimension, derived from coverage."""
+
+    asset_discovery_confidence: str = "medium"
+    configuration_assessment_confidence: str = "medium"
+    vulnerability_assessment_confidence: str = "low"
+    business_impact_confidence: str = "low"
+    overall_report_confidence: str = "medium"
+
+
+# ---------------------------------------------------------------------------
+# Candidate signal evaluation — authoritative scanner output (schema 2.0)
+# ---------------------------------------------------------------------------
+
+class EvidenceRef(BaseModel):
+    """A single structured piece of technical evidence behind a signal."""
+
+    evidence_type: str = Field(default="", description="e.g. http_header, open_port, dns_record.")
+    source_module: str = Field(default="", description="Which scanner module produced it.")
+    asset: str = Field(default="", description="Asset the evidence pertains to.")
+    field: str = Field(default="", description="Specific field/attribute observed.")
+    observed_value: Any = Field(default=None)
+    status: str = Field(default="", description="e.g. missing / present / open / weak.")
+    severity: str = Field(default="")
+    confidence: float = Field(default=0.9, ge=0.0, le=1.0)
+    fingerprint: str = Field(default="")
+
+    @model_validator(mode="after")
+    def _set_fingerprint(self) -> EvidenceRef:
+        if not self.fingerprint:
+            self.fingerprint = _fingerprint(
+                "evidence", self.evidence_type, self.source_module,
+                self.asset, self.field, str(self.observed_value),
+            )
+        return self
+
+
+class CandidateSignal(BaseModel):
+    """A candidate FAIR signal produced by the scanner (schema 2.0).
+
+    The scanner reports evidence, strength, confidence and status. Authoritative
+    FAIR weights, category scores and loss modelling are applied downstream.
+    """
+
+    signal_code: str = Field(..., description="e.g. 'missing_security_headers'.")
+    fair_category: str = Field(default="", description="vulnerability / control_strength / ...")
+    applies: bool = Field(default=True)
+    status: str = Field(
+        default="confirmed",
+        description="confirmed / inferred / informational / not_observed / "
+                    "not_applicable / unknown / scan_failed.",
+    )
+    signal_strength: int | None = Field(
+        default=None, ge=0, le=100,
+        description="0-100 technical strength; None for unknown/not-applicable.",
+    )
+    confidence: float = Field(default=0.9, ge=0.0, le=1.0)
+    severity: str = Field(default="")
+    raw_value: dict[str, Any] = Field(default_factory=dict)
+    reason: str = Field(default="")
+    evidence: list[EvidenceRef] = Field(default_factory=list)
+    evidence_count: int = Field(default=0)
+    affected_assets: list[str] = Field(default_factory=list)
+    source_modules: list[str] = Field(default_factory=list)
+    risk_eligible: bool = Field(default=True)
+    exclusion_reason: str = Field(default="")
+    first_seen: str = Field(default="")
+    last_seen: str = Field(default="")
+
+    @model_validator(mode="after")
+    def _count_evidence(self) -> CandidateSignal:
+        if not self.evidence_count:
+            self.evidence_count = len(self.evidence)
+        return self
+
+
+class SignalEvaluation(BaseModel):
+    """Authoritative scanner signal section (replaces risk_assessment.fair_signals).
+
+    ``candidate_signals`` are risk-eligible signals; ``informational_observations``
+    are useful but must not raise risk by default; ``excluded_signals`` were
+    evaluated but gated out (with a reason). Xano applies authoritative weights.
+    """
+
+    schema_version: str = "2.0"
+    scoring_authority: str = "downstream_xano"
+    scanner_scores_are_candidate_signals: bool = True
+    scan_profile: ScanProfile | None = None
+    report_confidence: ReportConfidence | None = None
+    candidate_signals: list[CandidateSignal] = Field(default_factory=list)
+    informational_observations: list[CandidateSignal] = Field(default_factory=list)
+    excluded_signals: list[CandidateSignal] = Field(default_factory=list)
+    evaluation_warnings: list[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -1501,10 +1739,27 @@ class TyposquatCandidate(BaseModel):
     a_records: list[str] = Field(default_factory=list)
     technique: str = ""
     similarity_score: float = 0.0
+    # --- Progressive threat state (registration alone is NOT a confirmed threat) ---
+    state: str = Field(
+        default="registered",
+        description="candidate_generated / registered / resolving / website_active / "
+                    "mail_configured / brand_content_detected / login_clone_detected / "
+                    "malicious_reputation_detected / confirmed_phishing.",
+    )
+    mail_configured: bool = Field(default=False, description="MX records present on the lookalike.")
+    website_active: bool = Field(default=False, description="Lookalike serves an active site.")
+    brand_content_detected: bool = Field(default=False)
+    login_clone_detected: bool = Field(default=False)
+    malicious_reputation: bool = Field(default=False)
     fingerprint: str = Field(default="", description="Stable hash for cross-scan deduplication.")
 
     @model_validator(mode="after")
-    def _set_fingerprint(self) -> TyposquatCandidate:
+    def _derive_state_and_fingerprint(self) -> TyposquatCandidate:
+        # Only escalate the auto-derived state from the passive DNS evidence we
+        # actually have (registration + A records). Higher states must be set
+        # explicitly by a collector that verified them.
+        if self.state in ("candidate_generated", "registered") and self.a_records:
+            self.state = "resolving"
         if not self.fingerprint:
             self.fingerprint = _fingerprint("typosquat", self.domain)
         return self
@@ -1903,6 +2158,15 @@ class DomainResult(BaseModel):
     sitemap: SitemapResult | None = None
     attack_paths: AttackPathResult | None = None
     risk_assessment: RiskAssessmentGroup | None = None
+    scan_profile: ScanProfile | None = Field(
+        default=None,
+        description="Authoritative description of what this scan covered.",
+    )
+    signal_evaluation: SignalEvaluation | None = Field(
+        default=None,
+        description="Authoritative candidate-signal section (schema 2.0). Supersedes "
+                    "risk_assessment.fair_signals for scoring consumers.",
+    )
 
     # --- Backward-compat read-only properties (not serialized to JSON) ---
 

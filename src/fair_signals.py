@@ -31,9 +31,65 @@ from .models import (
     FAIRSignal,
     FAIRSignals,
     FlatFAIRSignal,
+    ScanProfile,
 )
+from .signal_evaluation import is_evidence_risk_eligible
 
 logger = logging.getLogger(__name__)
+
+
+def _port_evidence(port) -> dict:
+    """Eligibility inputs for a scanned port (section 4/5).
+
+    A port may bear risk (exposed_services / large_port_surface / reduce
+    port_hygiene) only when it is a confirmed service on the customer's origin.
+    Shared-CDN edge ports are retained as observations but never as origin risk.
+    """
+    shared = getattr(port, "network_attribution", "origin") == "shared_cdn_edge"
+    reason = ""
+    if shared:
+        provider = ""  # provider lives on the PortScanResult, filled by caller
+        reason = "Shared CDN edge; origin exposure not confirmed"
+    return {
+        "affects_risk_score": getattr(port, "affects_risk_score", True),
+        "origin_required": True,
+        "origin_exposure_confirmed": getattr(port, "origin_exposure_confirmed", False),
+        "exclusion_reason": reason,
+    }
+
+
+def _eligible_origin_ports(result: DomainResult) -> list:
+    """Return open ports that are confirmed services on the customer origin.
+
+    Requires affects_risk_score AND origin_exposure_confirmed AND
+    service_confirmed — the three conditions from section 5.
+    """
+    if not (result.port_scan and result.port_scan.open_ports):
+        return []
+    eligible = []
+    for p in result.port_scan.open_ports:
+        if not is_evidence_risk_eligible(_port_evidence(p))["eligible"]:
+            continue
+        if not getattr(p, "service_confirmed", False):
+            continue
+        eligible.append(p)
+    return eligible
+
+
+def _port_surface_counts(result: DomainResult) -> dict:
+    """Summary counts distinguishing origin ports from shared-infra ports."""
+    ports = result.port_scan.open_ports if (result.port_scan and result.port_scan.open_ports) else []
+    shared = [p for p in ports if getattr(p, "network_attribution", "origin") == "shared_cdn_edge"]
+    origin = [p for p in ports if p not in shared]
+    confirmed_origin = [p for p in origin if getattr(p, "service_confirmed", False)
+                        and getattr(p, "origin_exposure_confirmed", False)]
+    risky_origin = [p for p in confirmed_origin if getattr(p, "is_risky", False)]
+    return {
+        "observed_edge_ports": len(shared),
+        "confirmed_origin_ports": len(confirmed_origin),
+        "confirmed_risky_origin_ports": len(risky_origin),
+        "excluded_shared_infrastructure_ports": len(shared),
+    }
 
 
 # Grades produced by security_headers and ssl_checker → normalised score.
@@ -76,6 +132,63 @@ _SENSITIVE_ROBOTS_PATTERNS: tuple[str, ...] = (
 )
 
 _WEAK_CIPHERS: tuple[str, ...] = ("RC4", "DES", "3DES", "MD5", "NULL", "EXPORT")
+
+# Normal discovery endpoints that must not be treated as sensitive-path exposure
+# merely because they return HTTP 200 (section 6).
+_NON_SENSITIVE_DISCOVERY_PATHS: frozenset[str] = frozenset(
+    {"/robots.txt", "/sitemap.xml", "/sitemap_index.xml", "/favicon.ico",
+     "/.well-known/security.txt"}
+)
+
+# Progressive typosquat threat states, weakest → strongest (section 10).
+_TYPO_STATE_ORDER: dict[str, int] = {
+    "candidate_generated": 0, "registered": 1, "resolving": 2,
+    "website_active": 3, "mail_configured": 4, "brand_content_detected": 5,
+    "login_clone_detected": 6, "malicious_reputation_detected": 7,
+    "confirmed_phishing": 8,
+}
+
+
+def _attack_path_risk_eligible(path) -> bool:
+    """An attack path bears risk only when it is more than an informational
+    relationship (section 11)."""
+    sev = (getattr(path, "severity", "") or "").lower()
+    likelihood = (getattr(path, "likelihood", "") or "").lower()
+    impact = (getattr(path, "impact", "") or "").lower()
+    if sev in ("info", "informational") or likelihood in ("informational", ""):
+        return False
+    if impact in ("informational", "info"):
+        return False
+    return True
+
+
+def _typosquat_signal_state(candidates: list) -> tuple[int, str, bool, str, str]:
+    """Map the strongest observed typosquat state to (strength, status,
+    affects_risk_score, severity, reason). Registration/resolution alone never
+    affects the risk score."""
+    def _rank(c) -> int:
+        r = _TYPO_STATE_ORDER.get(getattr(c, "state", "registered"), 1)
+        if getattr(c, "malicious_reputation", False):
+            r = max(r, 7)
+        if getattr(c, "login_clone_detected", False):
+            r = max(r, 6)
+        if getattr(c, "mail_configured", False):
+            r = max(r, 4)
+        if getattr(c, "brand_content_detected", False):
+            r = max(r, 5)
+        if getattr(c, "website_active", False):
+            r = max(r, 3)
+        return r
+
+    top = max((_rank(c) for c in candidates), default=1)
+    if top >= 7:
+        return 90, "confirmed", True, "high", "Lookalike domain shows malicious activity / confirmed phishing."
+    if top >= 4:
+        return 70, "confirmed", True, "high", "Lookalike domain has mail or login-clone indicators."
+    if top >= 3:
+        return 50, "inferred", True, "medium", "Lookalike domain serves an active site with brand-related content."
+    # registered / resolving only
+    return 10, "informational", False, "info", "Lookalike domain(s) registered; no active malicious use corroborated."
 
 _HAS_VERSION = re.compile(r"\d+[\.\d]+")
 
@@ -122,12 +235,39 @@ def _aggregate_findings_score(items: list, attr: str = "severity") -> int:
     return min(100, int(worst * 0.8) + count_bonus + 5)
 
 
+_NON_SCORING_STATUSES = frozenset(
+    {"informational", "unknown", "not_applicable", "scan_failed", "not_observed"}
+)
+
+
+def _is_scoring_signal(s: FAIRSignal) -> bool:
+    """A signal contributes to its factor's numeric aggregate only when it is a
+    real, risk-eligible measurement. Informational/unknown/excluded signals are
+    kept for traceability but must not move the score (sections 3, 8, 10)."""
+    if s.signal_strength is None:
+        return False
+    if not s.affects_risk_score or not s.risk_eligible:
+        return False
+    if s.status in _NON_SCORING_STATUSES:
+        return False
+    return True
+
+
 def _factor_from_signals(signals: list[FAIRSignal], notes: str = "") -> FAIRFactor:
-    """Weighted-average the signals into a single factor score."""
+    """Weighted-average the SCORING signals into a single factor score.
+
+    Every emitted signal is retained under ``signals`` (so candidate/
+    informational/excluded buckets and downstream consumers see them), but only
+    scoring signals move the aggregate.
+    """
     if not signals:
         return FAIRFactor(score=0, signals=[], notes=notes or "No evidence available.")
-    total_weight = sum(s.weight for s in signals) or 1.0
-    weighted = sum(s.score * s.weight for s in signals)
+    scoring = [s for s in signals if _is_scoring_signal(s)]
+    if not scoring:
+        return FAIRFactor(score=0, signals=signals, notes=notes)
+    total_weight = sum(s.weight for s in scoring) or 1.0
+    weighted = sum((s.signal_strength if s.signal_strength is not None else s.score) * s.weight
+                   for s in scoring)
     return FAIRFactor(
         score=int(round(weighted / total_weight)),
         signals=signals,
@@ -258,15 +398,36 @@ def _build_threat_event_frequency(result: DomainResult) -> FAIRFactor:
             evidence=[f"{social_count} social profile(s) discovered"],
         ))
 
-    # Sitemap-enumerated URL surface — a large declared URL set is more to probe.
-    if result.sitemap and result.sitemap.url_count:
+    # Sitemap-enumerated URL surface — only when URLs were actually extracted.
+    # A sitemap that responded but yielded zero URLs (parse failed/empty) is
+    # 'unknown', not a surface signal (section 6).
+    if result.sitemap and result.sitemap.found:
         url_count = result.sitemap.url_count
-        signals.append(FAIRSignal(
-            name="sitemap_surface",
-            score=min(100, 20 + url_count // 5),
-            weight=0.6,
-            evidence=[f"{url_count} URL(s) declared in sitemap"],
-        ))
+        parse_status = result.sitemap.sitemap_parse_status
+        if url_count > 0 and parse_status in ("complete", "partial"):
+            signals.append(FAIRSignal(
+                name="sitemap_surface",
+                score=min(100, 20 + url_count // 5),
+                weight=0.6,
+                fair_category="threat_event_frequency",
+                status="confirmed",
+                evidence=[f"{url_count} URL(s) extracted from sitemap"],
+            ))
+        else:
+            signals.append(FAIRSignal(
+                name="sitemap_surface",
+                score=0,
+                weight=0.6,
+                fair_category="threat_event_frequency",
+                status="unknown",
+                signal_strength=None,
+                confidence=0.3,
+                affects_risk_score=False,
+                risk_eligible=False,
+                exclusion_reason="Sitemap endpoint responded but parsing failed and no URLs were extracted",
+                reason="Sitemap endpoint responded but parsing failed and no URLs were extracted",
+                evidence=[f"sitemap_parse_status={parse_status or 'empty'}, urls_extracted={url_count}"],
+            ))
 
     # Favicon hash — a stable fingerprint attackers can pivot on (Shodan/etc.).
     if result.favicon and result.favicon.hash:
@@ -373,17 +534,28 @@ def _build_vulnerability(result: DomainResult) -> FAIRFactor:
             ],
         ))
 
-    # Sensitive paths reachable on the target.
+    # Sensitive paths reachable on the target. robots.txt / sitemap.xml are
+    # normal discovery endpoints, not sensitive exposure — a 200 there is NOT a
+    # sensitive-path finding (they are classified separately as recon value /
+    # sitemap surface).
     if result.sensitive_paths:
-        signals.append(FAIRSignal(
-            name="sensitive_paths_exposed",
-            score=_aggregate_findings_score(result.sensitive_paths),
-            weight=1.3,
-            evidence=[
-                f"{p.path} → {p.status_code} ({p.severity})"
-                for p in result.sensitive_paths[:5]
-            ],
-        ))
+        genuinely_sensitive = [
+            p for p in result.sensitive_paths
+            if p.path.lower().rstrip("/") not in _NON_SENSITIVE_DISCOVERY_PATHS
+        ]
+        if genuinely_sensitive:
+            signals.append(FAIRSignal(
+                name="sensitive_paths_exposed",
+                score=_aggregate_findings_score(genuinely_sensitive),
+                weight=1.3,
+                fair_category="vulnerability",
+                status="confirmed",
+                severity="high",
+                evidence=[
+                    f"{p.path} → {p.status_code} ({p.severity})"
+                    for p in genuinely_sensitive[:5]
+                ],
+            ))
 
     # IoCs detected on the site.
     if result.ioc_findings:
@@ -450,26 +622,49 @@ def _build_vulnerability(result: DomainResult) -> FAIRFactor:
     if email_sec and not email_sec.error:
         issues: list[str] = []
         score = 0
+        # SPF/DMARC gaps are directly observable from DNS → confirmed evidence.
+        has_confirmed = False
         if not email_sec.spf.exists:
             issues.append("No SPF record")
             score += 40
+            has_confirmed = True
         elif email_sec.spf.all_qualifier in ("+all", "?all"):
             issues.append(f"SPF uses {email_sec.spf.all_qualifier} (weak)")
             score += 25
+            has_confirmed = True
         if not email_sec.dmarc.exists:
             issues.append("No DMARC record — domain spoofing is trivial")
             score += 40
+            has_confirmed = True
         elif email_sec.dmarc.policy == "none":
             issues.append("DMARC p=none — monitoring only, no enforcement")
             score += 20
-        if not email_sec.dkim.selectors_found:
-            issues.append("No DKIM selectors found")
-            score += 20
+            has_confirmed = True
+        # DKIM absence is INFERRED only: we probe common selectors, so a miss
+        # does not prove DKIM is unconfigured (section 9). Contributes less and
+        # never on its own asserts DKIM is absent.
+        dkim_inferred = (
+            not email_sec.dkim.selectors_found
+            and not getattr(email_sec.dkim, "confirmed_absent", False)
+        )
+        if dkim_inferred:
+            issues.append("No DKIM records for tested common selectors (inferred, not confirmed absent)")
+            score += 10
         if issues:
+            # Confirmed if a directly-observable SPF/DMARC weakness exists;
+            # otherwise (DKIM-only) the signal is merely inferred.
+            status = "confirmed" if has_confirmed else "inferred"
+            confidence = 0.85 if has_confirmed else 0.4
             signals.append(FAIRSignal(
                 name="email_auth_missing",
                 score=min(100, score),
                 weight=1.2,
+                fair_category="vulnerability",
+                status=status,
+                confidence=confidence,
+                severity="medium",
+                reason=("DKIM absence is inferred from common-selector probing, "
+                        "not confirmed." if dkim_inferred else ""),
                 evidence=issues,
             ))
 
@@ -565,19 +760,28 @@ def _build_vulnerability(result: DomainResult) -> FAIRFactor:
             evidence=ip_rep.detections[:5] or [f"IP {ip_rep.ip} flagged as malicious"],
         ))
 
-    # Exposed services — risky ports open to the internet.
+    # Exposed services — risky ports CONFIRMED on the customer's origin only.
+    # Shared-CDN edge ports (affects_risk_score=false / origin unconfirmed) are
+    # retained as observations elsewhere but never counted as origin exposure.
     if result.port_scan and result.port_scan.open_ports:
-        risky = [p for p in result.port_scan.open_ports if p.is_risky]
+        origin_ports = _eligible_origin_ports(result)
+        risky = [p for p in origin_ports if p.is_risky]
         if risky:
             score = min(100, 50 + 10 * len(risky))
             signals.append(FAIRSignal(
                 name="exposed_services",
                 score=score,
                 weight=1.3,
+                fair_category="vulnerability",
+                status="confirmed",
+                confidence=0.9,
+                severity="high",
                 evidence=[
-                    f"Port {p.port}/{p.service} open" + (f" — banner: {p.banner[:60]}" if p.banner else "")
+                    f"Port {p.port}/{p.service} open on origin"
+                    + (f" — banner: {p.banner[:60]}" if p.banner else "")
                     for p in risky[:5]
                 ],
+                reason="Confirmed risky service(s) on the customer origin.",
             ))
 
     # URL/domain reputation — blacklisted domain.
@@ -707,15 +911,28 @@ def _build_vulnerability(result: DomainResult) -> FAIRFactor:
                 evidence=sc_evidence,
             ))
 
-    # Open ports (non-risky but numerous = larger attack surface)
+    # Large port surface — only CONFIRMED origin ports count. A wall of shared
+    # Cloudflare/Fastly edge ports is not customer origin exposure and must not
+    # inflate the attack surface.
     if result.port_scan and result.port_scan.open_ports:
-        total_open = len(result.port_scan.open_ports)
-        if total_open >= 5:
+        origin_ports = _eligible_origin_ports(result)
+        counts = _port_surface_counts(result)
+        if len(origin_ports) >= 5:
             signals.append(FAIRSignal(
                 name="large_port_surface",
-                score=min(100, total_open * 10),
+                score=min(100, len(origin_ports) * 10),
                 weight=0.6,
-                evidence=[f"{total_open} open ports detected"],
+                fair_category="vulnerability",
+                status="confirmed",
+                severity="medium",
+                evidence=[
+                    f"{len(origin_ports)} confirmed origin ports "
+                    f"({counts['excluded_shared_infrastructure_ports']} shared-edge ports excluded)"
+                ],
+                reason=(f"observed_edge_ports={counts['observed_edge_ports']}, "
+                        f"confirmed_origin_ports={counts['confirmed_origin_ports']}, "
+                        f"confirmed_risky_origin_ports={counts['confirmed_risky_origin_ports']}, "
+                        f"excluded_shared_infrastructure_ports={counts['excluded_shared_infrastructure_ports']}"),
             ))
 
     # Directory listing exposed
@@ -768,33 +985,63 @@ def _build_vulnerability(result: DomainResult) -> FAIRFactor:
                 evidence=parts,
             ))
 
-    # Typosquatting / brand impersonation exposure.
+    # Typosquatting / brand impersonation exposure. Registration (or mere
+    # resolution) is NOT a confirmed brand threat — only corroborated active
+    # use (brand content, mail, login clone, malicious reputation) raises risk
+    # (section 10). Bare registrations stay informational.
     if result.typosquatting and result.typosquatting.registered_candidates:
-        count = len(result.typosquatting.registered_candidates)
-        typo_score = min(100, 40 + count * 10)
+        cands = result.typosquatting.registered_candidates
+        count = len(cands)
+        strength, status, affects, sev, reason = _typosquat_signal_state(cands)
         signals.append(FAIRSignal(
             name="typosquatting_exposure",
-            score=typo_score,
+            score=strength,
             weight=1.3,
+            fair_category="vulnerability",
+            status=status,
+            confidence=0.9 if status == "confirmed" else (0.6 if status == "inferred" else 0.4),
+            severity=sev,
+            affects_risk_score=affects,
+            risk_eligible=affects,
+            exclusion_reason="" if affects else "Lookalike domain(s) registered but no active malicious use corroborated",
+            reason=reason,
             evidence=[
-                f"{count} lookalike domain(s) registered",
-                *[c.domain for c in result.typosquatting.registered_candidates[:5]],
+                f"{count} lookalike domain(s), highest state: "
+                + max((c.state for c in cands), key=_TYPO_STATE_ORDER.__getitem__, default="registered"),
+                *[f"{c.domain} ({c.state})" for c in cands[:5]],
             ],
         ))
 
+    # Attack-path chains — only risk-eligible paths count. An informational
+    # relationship (e.g. a registered lookalike with no malicious use) is not an
+    # exploit chain and must not drive a chain score (section 11).
     if result.attack_paths and result.attack_paths.paths:
-        critical_chains = sum(1 for p in result.attack_paths.paths if p.severity == "critical")
-        high_chains = sum(1 for p in result.attack_paths.paths if p.severity == "high")
-        score = min(100, 70 + critical_chains * 15 + high_chains * 5)
-        signals.append(FAIRSignal(
-            name="attack_path_chains",
-            score=score,
-            weight=2.0,
-            evidence=[
-                f"{len(result.attack_paths.paths)} exploit chain(s) identified",
-                *[f"[{p.severity}] {p.title}" for p in result.attack_paths.paths[:3]],
-            ],
-        ))
+        risk_paths = [p for p in result.attack_paths.paths if _attack_path_risk_eligible(p)]
+        if risk_paths:
+            critical_chains = sum(1 for p in risk_paths if p.severity == "critical")
+            high_chains = sum(1 for p in risk_paths if p.severity == "high")
+            possible = any(p.likelihood in ("possible",) for p in risk_paths)
+            # A single possible/low-confidence chain should not saturate: scale
+            # the base by the strongest path's credibility.
+            base = 70 if (critical_chains or high_chains) else 25
+            score = min(100, base + critical_chains * 15 + high_chains * 5)
+            status = "confirmed" if any(
+                p.likelihood in ("confirmed", "validated") for p in risk_paths) else "inferred"
+            signals.append(FAIRSignal(
+                name="attack_path_chains",
+                score=score,
+                weight=2.0,
+                fair_category="vulnerability",
+                status=status,
+                confidence=0.85 if status == "confirmed" else 0.6,
+                severity="critical" if critical_chains else ("high" if high_chains else "medium"),
+                reason=("Possible/low-confidence chain only." if possible and status == "inferred" else ""),
+                evidence=[
+                    f"{len(risk_paths)} risk-eligible chain(s) "
+                    f"({len(result.attack_paths.paths) - len(risk_paths)} informational excluded)",
+                    *[f"[{p.severity}/{p.likelihood}] {p.title}" for p in risk_paths[:3]],
+                ],
+            ))
 
     return _factor_from_signals(
         signals,
@@ -810,18 +1057,35 @@ def _build_control_strength(result: DomainResult) -> FAIRFactor:
     """
     signals: list[FAIRSignal] = []
 
-    # WAF / CDN in front of the target.
+    # WAF / CDN in front of the target. A CDN/reverse-proxy is NOT the same as
+    # a confirmed WAF ruleset — grade the control strength by what was actually
+    # evidenced so a CDN-only result never scores like a confirmed WAF (section 7).
     waf_names = [
         t.name for t in result.technologies
         if t.name in _WAF_CDN_NAMES
         or any(c in _WAF_CDN_CATEGORIES for c in t.categories)
     ]
-    if waf_names:
+    waf = result.waf
+    waf_confirmed = bool(waf and waf.waf_detected is True)
+    cdn_confirmed = bool(waf and (waf.cdn_detected or waf.reverse_proxy_detected)) or bool(waf_names)
+    if waf_confirmed:
+        provider = getattr(waf, "waf_provider", "") or "WAF"
+        strength, reason, conf = 70, f"Confirmed WAF: {provider}", 0.9
+    elif cdn_confirmed:
+        provider = (getattr(waf, "cdn_provider", "") if waf else "") or (waf_names[0] if waf_names else "CDN")
+        strength, reason, conf = 30, f"CDN only ({provider}); WAF ruleset not confirmed", 0.7
+    else:
+        provider, strength, reason, conf = "", 0, "", 0.0
+    if strength:
         signals.append(FAIRSignal(
             name="waf_or_cdn_detected",
-            score=85,
+            score=strength,
             weight=1.4,
-            evidence=[f"{n} fronting the target" for n in waf_names[:3]],
+            fair_category="control_strength",
+            status="confirmed" if waf_confirmed else "inferred",
+            confidence=conf,
+            reason=reason,
+            evidence=[reason] + [f"{n} fronting the target" for n in waf_names[:2]],
         ))
 
     # Confirmed WAF ruleset (distinct from a CDN sitting in front). Only fires
@@ -980,35 +1244,91 @@ def _build_control_strength(result: DomainResult) -> FAIRFactor:
         except (ValueError, TypeError):
             pass
 
-    # Port hygiene — no risky ports open = good security posture.
+    # Port hygiene — judged on CONFIRMED origin ports only. Shared-CDN edge
+    # ports neither prove good hygiene nor reduce it (section 5).
     if result.port_scan and result.port_scan.open_ports:
-        risky = [p for p in result.port_scan.open_ports if p.is_risky]
-        if not risky:
+        counts = _port_surface_counts(result)
+        origin_ports = _eligible_origin_ports(result)
+        risky = [p for p in origin_ports if p.is_risky]
+        if counts["confirmed_origin_ports"] == 0:
+            # Everything observed was shared infrastructure — hygiene not assessable.
+            signals.append(FAIRSignal(
+                name="port_hygiene",
+                score=0,
+                weight=0.5,
+                fair_category="control_strength",
+                status="unknown",
+                signal_strength=None,
+                confidence=0.3,
+                affects_risk_score=False,
+                risk_eligible=False,
+                exclusion_reason="No confirmed origin ports; observed ports are shared CDN edge infrastructure",
+                evidence=[f"{counts['observed_edge_ports']} shared-edge port(s) excluded; "
+                          "no confirmed origin ports"],
+            ))
+        elif not risky:
             signals.append(FAIRSignal(
                 name="port_hygiene",
                 score=80,
                 weight=0.5,
-                evidence=[f"{len(result.port_scan.open_ports)} open ports, none risky"],
+                fair_category="control_strength",
+                status="confirmed",
+                evidence=[f"{counts['confirmed_origin_ports']} confirmed origin port(s), none risky"],
             ))
         else:
             signals.append(FAIRSignal(
                 name="port_hygiene",
                 score=max(10, 50 - 10 * len(risky)),
                 weight=0.5,
-                evidence=[f"{len(risky)} risky port(s) exposed"],
+                fair_category="control_strength",
+                status="confirmed",
+                evidence=[f"{len(risky)} risky origin port(s) exposed"],
             ))
 
-    # Privacy compliance posture — consent tool + privacy policy presence.
+    # Privacy compliance posture. Consent behaviour and pre-consent tracking are
+    # NOT observable from an external scan, so the absence of a recognised
+    # consent vendor is not a confirmed compliance failure. When manual
+    # validation is required and no positive consent evidence exists, report
+    # UNKNOWN (no grade F, no risk contribution) rather than a zero score
+    # (section 8).
     if result.privacy and not result.privacy.error:
-        signals.append(FAIRSignal(
-            name="privacy_compliance_posture",
-            score=result.privacy.score,
-            weight=0.8,
-            evidence=[
-                f"privacy compliance score={result.privacy.score}, grade={result.privacy.grade}",
-                f"consent tool: {result.privacy.consent_tool or 'none detected'}",
-            ],
-        ))
+        priv = result.privacy
+        consent_detected = priv.consent_platform == "detected"
+        policy_found = any(
+            i.name == "privacy_policy" and i.present for i in priv.indicators
+        )
+        if getattr(priv, "manual_validation_required", True) and not (consent_detected or policy_found):
+            signals.append(FAIRSignal(
+                name="privacy_compliance_posture",
+                score=0,
+                weight=0.8,
+                fair_category="control_strength",
+                status="unknown",
+                signal_strength=None,
+                confidence=0.25,
+                affects_risk_score=False,
+                risk_eligible=False,
+                exclusion_reason="Consent behaviour was not assessed and manual validation is required",
+                reason="Consent behaviour was not assessed and manual validation is required",
+                evidence=[
+                    "Consent platform: " + (priv.consent_platform or "not_detected"),
+                    f"nonessential_tracking_before_consent={priv.nonessential_tracking_before_consent}",
+                    "Manual validation required — not a confirmed compliance failure",
+                ],
+            ))
+        else:
+            signals.append(FAIRSignal(
+                name="privacy_compliance_posture",
+                score=priv.score,
+                weight=0.8,
+                fair_category="control_strength",
+                status="confirmed",
+                confidence=0.6,
+                evidence=[
+                    f"privacy indicators score={priv.score}, grade={priv.grade}",
+                    f"consent tool: {priv.consent_tool or 'none detected'}",
+                ],
+            ))
 
     return _factor_from_signals(
         signals,
@@ -1170,12 +1490,22 @@ def _build_loss_magnitude(result: DomainResult) -> FAIRFactor:
     # Weight reduced from 1.0 to 0.6: typosquatting is already heavily
     # weighted in Vulnerability (1.3); Loss Magnitude uses a lighter touch.
     if result.typosquatting and result.typosquatting.registered_candidates:
+        cands = result.typosquatting.registered_candidates
+        strength, status, affects, sev, _reason = _typosquat_signal_state(cands)
         signals.append(FAIRSignal(
             name="brand_impersonation_risk",
-            score=70,
+            score=strength if affects else 10,
             weight=0.6,
+            fair_category="loss_magnitude",
+            status=status,
+            confidence=0.9 if status == "confirmed" else (0.6 if status == "inferred" else 0.4),
+            severity=sev,
+            affects_risk_score=affects,
+            risk_eligible=affects,
+            exclusion_reason="" if affects else "Registered lookalike(s) only; no active brand impersonation corroborated",
             evidence=[
-                f"{len(result.typosquatting.registered_candidates)} typosquat domains could be used for phishing",
+                f"{len(cands)} lookalike domain(s); "
+                + ("corroborated active use" if affects else "registration only — informational"),
             ],
         ))
 
@@ -1202,14 +1532,20 @@ def _build_loss_magnitude(result: DomainResult) -> FAIRFactor:
     # already drive Vulnerability heavily (w=2.0); in Loss Magnitude the
     # impact type matters more than the chain itself.
     if result.attack_paths and result.attack_paths.paths:
-        impacts = {p.impact for p in result.attack_paths.paths}
+        risk_paths = [p for p in result.attack_paths.paths if _attack_path_risk_eligible(p)]
+        impacts = {p.impact for p in risk_paths}
         high_impacts = impacts & {"data_theft", "code_execution", "account_takeover"}
         if high_impacts:
+            confirmed = any(p.likelihood in ("confirmed", "validated") for p in risk_paths)
             signals.append(FAIRSignal(
                 name="confirmed_exploit_chain_impact",
-                score=90,
+                score=90 if confirmed else 60,
                 weight=1.2,
-                evidence=[f"Confirmed attack path leads to {', '.join(sorted(high_impacts))}"],
+                fair_category="loss_magnitude",
+                status="confirmed" if confirmed else "inferred",
+                confidence=0.85 if confirmed else 0.6,
+                severity="high",
+                evidence=[f"Risk-eligible attack path leads to {', '.join(sorted(high_impacts))}"],
             ))
 
     return _factor_from_signals(
@@ -1226,12 +1562,15 @@ def compute_fair_signals(
     result: DomainResult,
     *,
     scan_mode: str = "full",
+    scan_profile: "ScanProfile | None" = None,
 ) -> FAIRSignals:
-    """Derive FAIR-aligned risk signals from a populated ``DomainResult``.
+    """Derive FAIR-aligned *candidate* risk signals from a ``DomainResult``.
 
-    ``scan_mode`` should be one of: ``passive``, ``lighttouch``,
-    ``standard``, ``full`` — it controls the ``confidence`` field and is
-    echoed on the output for downstream consumers.
+    ``scan_mode`` (``passive``/``lighttouch``/``standard``/``full``) controls
+    the back-compat ``confidence`` field. These scores are candidate signals —
+    authoritative FAIR weights and category scores are applied downstream
+    (see ``scoring_authority``); the aggregate block is retained for
+    compatibility only.
     """
     try:
         tef = _build_threat_event_frequency(result)
@@ -1281,6 +1620,11 @@ def compute_fair_signals(
                 score=s.score,
                 weight=s.weight,
                 evidence=s.evidence,
+                signal_strength=s.signal_strength,
+                status=s.status,
+                confidence=s.confidence,
+                affects_risk_score=s.affects_risk_score,
+                risk_eligible=s.risk_eligible,
             ))
 
     return FAIRSignals(

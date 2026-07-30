@@ -13,12 +13,14 @@ from dataclasses import dataclass, field
 from functools import partial
 from datetime import datetime, timezone
 
+from .signal_evaluation import report_confidence_for
 from .models import (
     AssetContext,
     CloudAsset,
     ComplianceControl,
     CompliancePosture,
     DomainResult,
+    ScanProfile,
     EASMReport,
     ExecutiveSummary,
     FinancialImpact,
@@ -1638,6 +1640,7 @@ def _build_executive_summary(
     ransomware: RansomwareIndex | None = None,
     financial: FinancialImpact | None = None,
     compliance: list[CompliancePosture] | None = None,
+    scan_profile: "ScanProfile | None" = None,
 ) -> ExecutiveSummary:
     confirmed = [f for f in findings if f.classification == FindingClassification.confirmed_issue]
     critical_high = [f for f in confirmed if f.severity in ("critical", "high")]
@@ -1699,8 +1702,25 @@ def _build_executive_summary(
         else:
             parts.append(f"Site runs on {platform}.")
 
-    confidence = _CONFIDENCE_LABEL.get(scan_mode, "low")
-    parts.append(f"Based on a {scan_mode} scan with {confidence} confidence.")
+    # Coverage/confidence must derive from the authoritative scan profile so the
+    # narrative never claims "full" coverage or high confidence when active
+    # vulnerability testing was excluded (sections 1, 15).
+    if scan_profile is not None:
+        rc = report_confidence_for(scan_profile)
+        coverage = scan_profile.coverage_level
+        parts.append(
+            f"Coverage: {coverage} ({scan_profile.scan_profile}); "
+            f"overall report confidence {rc.overall_report_confidence}."
+        )
+        if not scan_profile.active_vulnerability_scanning_included:
+            parts.append(
+                "Active vulnerability testing (Nuclei) was not included in this "
+                f"profile, so vulnerability-assessment confidence is "
+                f"{rc.vulnerability_assessment_confidence}."
+            )
+    else:
+        confidence = _CONFIDENCE_LABEL.get(scan_mode, "low")
+        parts.append(f"Based on a {scan_mode} scan with {confidence} confidence.")
 
     positives: list[str] = []
     if not any(f.category == "secrets" for f in findings):
@@ -1749,7 +1769,7 @@ def _build_executive_summary(
         narrative=" ".join(parts),
         key_positives=positives[:3],
         key_concerns=concerns,
-        scan_coverage=scan_mode,
+        scan_coverage=(scan_profile.coverage_level if scan_profile is not None else scan_mode),
         overall_grade=overall_grade,
         grades=grades,
         top_risks=top_risks,
@@ -2569,8 +2589,16 @@ def _compute_compliance_posture(
 
 def build_easm_report(
     result: DomainResult, *, scan_mode: str = "full",
+    scan_profile: "ScanProfile | None" = None,
 ) -> EASMReport:
-    """Build a business-grade EASM report from a populated DomainResult."""
+    """Build a business-grade EASM report from a populated DomainResult.
+
+    When ``scan_profile`` is supplied it is the authoritative source of coverage
+    and confidence — the narrative and scan_confidence derive from it and will
+    never claim "full" coverage when active testing was excluded.
+    """
+    if scan_profile is None:
+        scan_profile = getattr(result, "scan_profile", None)
     try:
         platform, profile = _detect_primary_platform(result)
 
@@ -2654,6 +2682,7 @@ def build_easm_report(
             ransomware=ransomware,
             financial=financial,
             compliance=compliance,
+            scan_profile=scan_profile,
         )
 
         confirmed = sum(1 for f in sorted_findings if f.classification == FindingClassification.confirmed_issue)
@@ -2675,9 +2704,12 @@ def build_easm_report(
         _tier_map = [(25, "critical"), (50, "high"), (70, "moderate"), (100, "low")]
         _g = _grade_to_score(overall_grade)
         risk_tier = next((t for thr, t in _tier_map if _g <= thr), "low")
-        scan_confidence = executive.grades.get("confidence", "") or (
-            "medium" if scan_mode == "full" else "low"
-        )
+        if scan_profile is not None:
+            scan_confidence = report_confidence_for(scan_profile).overall_report_confidence
+        else:
+            scan_confidence = executive.grades.get("confidence", "") or (
+                "medium" if scan_mode == "full" else "low"
+            )
 
         # Plain-English posture per assessed category, from component grades.
         _grade_label = {

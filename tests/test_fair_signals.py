@@ -177,6 +177,10 @@ class TestFAIRBuilder:
             technologies=[
                 TechFinding(name="Cloudflare", categories=["cdn"]),
             ],
+            # A CDN alone is not a strong control; a *confirmed* WAF ruleset is.
+            waf=WAFResult(url="x", cdn_detected=True, cdn_provider="Cloudflare",
+                          waf_detected=True, waf_provider="Cloudflare",
+                          waf_detection_status="detected"),
         )
         signals = compute_fair_signals(clean, scan_mode="full")
 

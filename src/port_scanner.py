@@ -255,6 +255,11 @@ async def scan_ports(
             p.affects_risk_score = False
             p.confidence = "low"
         else:
+            # A successful direct TCP connect to a non-CDN origin IP confirms the
+            # port is exposed on the customer's origin.
+            p.network_attribution = "origin"
+            p.origin_exposure_confirmed = True
+            p.affects_risk_score = True
             p.confidence = "high" if p.service_confirmed else "medium"
 
     return PortScanResult(

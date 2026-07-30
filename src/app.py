@@ -44,6 +44,7 @@ from .c99_client import check_ip_reputation, check_url_reputation, detect_waf, f
 from .postprocess import fill_not_found
 from .middleware import APIKeyMiddleware, RateLimitMiddleware
 from .module_status import nuclei_module_status
+from .signal_evaluation import build_signal_evaluation, resolve_scan_profile
 from .js_miner import mine_javascript
 from .extractors import (
     classify_social_url,
@@ -195,6 +196,31 @@ def _screenshot_succeeded(ss: ScreenshotResult) -> bool:
     )
 
 
+def _finalize_risk_assessment(result: "DomainResult", scan_mode: str) -> None:
+    """Build the authoritative scan profile, FAIR candidate signals, EASM report
+    and the schema-2.0 signal_evaluation, wiring them consistently so no section
+    can claim coverage the scan did not perform.
+    """
+    # At synchronous-response time active Nuclei scanning is out-of-band; only
+    # count it completed if findings were actually attached (e.g. via webhook).
+    nuclei = result.nuclei
+    nuclei_status = "completed" if (nuclei and nuclei.findings) else "skipped"
+    profile = resolve_scan_profile(scan_mode=scan_mode, nuclei_status=nuclei_status)
+    result.scan_profile = profile
+
+    fair = compute_fair_signals(result, scan_mode=scan_mode, scan_profile=profile)
+    result.risk_assessment = RiskAssessmentGroup(fair_signals=fair)
+    result.risk_assessment.easm_report = build_easm_report(
+        result, scan_mode=scan_mode, scan_profile=profile,
+    )
+    result.signal_evaluation = build_signal_evaluation(fair, profile)
+
+    report = result.risk_assessment.easm_report
+    if report:
+        result.summary.overall_grade = report.overall_grade
+        result.summary.ransomware_susceptibility = report.ransomware_susceptibility.score
+
+
 async def _scan_single_target(
     target: str,
     request: ScanRequest,
@@ -267,10 +293,7 @@ async def _scan_single_target(
             scan_finished_at=datetime.now(timezone.utc).isoformat(),
             error=str(crawl_result),
         )
-        failed.risk_assessment = RiskAssessmentGroup(
-            fair_signals=compute_fair_signals(failed, scan_mode="full"),
-            easm_report=build_easm_report(failed, scan_mode="full"),
-        )
+        _finalize_risk_assessment(failed, scan_mode="full")
         fill_not_found(failed)
         return failed
 
@@ -867,13 +890,7 @@ async def _scan_single_target(
         },
     )
     result.attack_paths = analyze_attack_paths(result)
-    result.risk_assessment = RiskAssessmentGroup(
-        fair_signals=compute_fair_signals(result, scan_mode="full"),
-    )
-    result.risk_assessment.easm_report = build_easm_report(result, scan_mode="full")
-    if result.risk_assessment.easm_report:
-        result.summary.overall_grade = result.risk_assessment.easm_report.overall_grade
-        result.summary.ransomware_susceptibility = result.risk_assessment.easm_report.ransomware_susceptibility.score
+    _finalize_risk_assessment(result, scan_mode="full")
     fill_not_found(result)
     return result
 
@@ -1521,13 +1538,7 @@ async def _lighttouch_single_target(target: str, timeout: int, *, company_size: 
         error=None if html else "landing page fetch failed",
     )
     result.attack_paths = analyze_attack_paths(result)
-    result.risk_assessment = RiskAssessmentGroup(
-        fair_signals=compute_fair_signals(result, scan_mode="lighttouch"),
-    )
-    result.risk_assessment.easm_report = build_easm_report(result, scan_mode="lighttouch")
-    if result.risk_assessment.easm_report:
-        result.summary.overall_grade = result.risk_assessment.easm_report.overall_grade
-        result.summary.ransomware_susceptibility = result.risk_assessment.easm_report.ransomware_susceptibility.score
+    _finalize_risk_assessment(result, scan_mode="lighttouch")
     fill_not_found(result)
     return result
 
@@ -1710,13 +1721,7 @@ async def _passive_single_target(
         error=passive_error,
     )
     result.attack_paths = analyze_attack_paths(result)
-    result.risk_assessment = RiskAssessmentGroup(
-        fair_signals=compute_fair_signals(result, scan_mode="passive"),
-    )
-    result.risk_assessment.easm_report = build_easm_report(result, scan_mode="passive")
-    if result.risk_assessment.easm_report:
-        result.summary.overall_grade = result.risk_assessment.easm_report.overall_grade
-        result.summary.ransomware_susceptibility = result.risk_assessment.easm_report.ransomware_susceptibility.score
+    _finalize_risk_assessment(result, scan_mode="passive")
     fill_not_found(result)
     return result
 
