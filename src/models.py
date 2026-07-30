@@ -1031,6 +1031,39 @@ class ModuleStatus(BaseModel):
     message: str = ""
 
 
+class QuantificationHint(BaseModel):
+    """Machine-readable magnitude hints for a finding.
+
+    Categorical only — the scanner stays evidence-only and never emits a dollar
+    figure. A downstream consumer (e.g. Xano) combines these with validated
+    business inputs to produce a defensible loss range and narrative, without
+    having to parse the free-prose ``why_it_matters`` / ``business_impact``.
+    """
+
+    records_at_risk_class: str = Field(
+        default="none",
+        description="Data volume potentially exposed: none / low / medium / high.",
+    )
+    data_sensitivity: str = Field(
+        default="none",
+        description="none / pii / financial / health / credentials / operational.",
+    )
+    exposure_confirmed: bool = Field(
+        default=False,
+        description="True only when the exposure itself is confirmed (not merely inferred).",
+    )
+    exploitability: str = Field(
+        default="not_exploitable",
+        description="not_exploitable / theoretical / likely / confirmed "
+                    "(passive scans cap at 'likely').",
+    )
+    loss_event_type: str = Field(
+        default="none",
+        description="Loss this finding enables: none / breach / spoofing / "
+                    "defacement / brand_abuse / service_disruption.",
+    )
+
+
 class PrioritizedFinding(BaseModel):
     id: str = Field(..., description="Stable identifier, e.g. 'missing_hsts', 'exposed_env'.")
     title: str
@@ -1057,6 +1090,10 @@ class PrioritizedFinding(BaseModel):
         description="Applicable compliance framework references.",
     )
     source_field: str = Field(default="", description="Which DomainResult field this came from.")
+    quantification_hint: QuantificationHint = Field(
+        default_factory=QuantificationHint,
+        description="Machine-readable magnitude hints for downstream $ quantification.",
+    )
     fingerprint: str = Field(default="", description="Stable hash for cross-scan deduplication.")
 
     @model_validator(mode="after")
@@ -1272,6 +1309,11 @@ class EASMReport(BaseModel):
     recon_artifacts: list[ReconArtifact] = Field(default_factory=list)
     prioritized_findings: list[PrioritizedFinding] = Field(
         default_factory=list, description="Sorted by severity desc, confidence desc, actionability desc.",
+    )
+    observations_detail: list[PrioritizedFinding] = Field(
+        default_factory=list,
+        description="The individual low-value observation rows that were collapsed into "
+                    "'*_observations' summary findings — retained for drill-down.",
     )
     total_findings: int = 0
     confirmed_issues: int = 0
@@ -1605,6 +1647,15 @@ class CloudAssetFinding(BaseModel):
     ownership_verified: bool = False
     public_exposure_confirmed: bool = False
     affects_risk_score: bool = False
+    corroborated: bool = Field(
+        default=False,
+        description="True when the bucket name/URL is referenced by the target's own "
+                    "collected resources (JS, links, supply chain, DNS) — not just name-guessed.",
+    )
+    corroboration: list[str] = Field(
+        default_factory=list,
+        description="Passive evidence that referenced this bucket, if corroborated.",
+    )
     evidence: list[str] = Field(default_factory=list)
     severity: str = "informational"
     fingerprint: str = Field(default="", description="Stable hash for cross-scan deduplication.")

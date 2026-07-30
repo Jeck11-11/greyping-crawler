@@ -11,6 +11,7 @@ from src.cloud_assets import (
     _PROVIDERS,
     _classify_response,
     _generate_candidates,
+    corroborate_cloud_findings,
     detect_cloud_services_from_dns,
     detect_exposed_databases_from_dns,
     discover_cloud_assets,
@@ -20,6 +21,9 @@ from src.models import (
     CloudAssetResult,
     CloudServiceFinding,
     DomainResult,
+    ExternalLinkFinding,
+    JSIntelResult,
+    LinksGroup,
 )
 
 
@@ -754,3 +758,52 @@ class TestDetectExposedDatabasesFromDNS:
         findings = detect_exposed_databases_from_dns(cname_records=records)
         assert findings[0].fingerprint
         assert len(findings[0].fingerprint) > 0
+
+
+# ---------------------------------------------------------------------------
+# Passive corroboration of name-guessed bucket candidates
+# ---------------------------------------------------------------------------
+
+class TestCorroborateCloudFindings:
+    def _result(self, links=None, js=None):
+        buckets = CloudAssetResult(domain="greyping.com", findings=[
+            CloudAssetFinding(bucket_name="greyping-com-assets", provider="backblaze_b2",
+                              url="https://greyping-com-assets.s3.us-west-004.backblazeb2.com/",
+                              status="exists_private", evidence=["AccessDenied"]),
+            CloudAssetFinding(bucket_name="greyping-com-backup", provider="backblaze_b2",
+                              url="https://greyping-com-backup.s3.us-west-004.backblazeb2.com/",
+                              status="exists_private", evidence=["AccessDenied"]),
+        ])
+        kwargs = {"target": "https://greyping.com", "cloud_assets": buckets}
+        if links is not None:
+            kwargs["links"] = links
+        if js is not None:
+            kwargs["js_intel"] = js
+        return DomainResult(**kwargs)
+
+    def test_referenced_bucket_is_corroborated(self):
+        r = self._result(links=LinksGroup(external=[ExternalLinkFinding(
+            url="https://greyping-com-assets.s3.us-west-004.backblazeb2.com/logo.png",
+            anchor_text="logo", found_on=["x"])]))
+        corroborate_cloud_findings(r)
+        by_name = {f.bucket_name: f for f in r.cloud_assets.findings}
+        assert by_name["greyping-com-assets"].corroborated is True
+        assert by_name["greyping-com-assets"].corroboration
+        assert by_name["greyping-com-backup"].corroborated is False
+
+    def test_no_references_leaves_all_uncorroborated(self):
+        r = self._result()
+        corroborate_cloud_findings(r)
+        assert all(not f.corroborated for f in r.cloud_assets.findings)
+
+    def test_js_intel_reference_corroborates(self):
+        r = self._result(js=JSIntelResult(
+            target="https://greyping.com", scripts_scanned=1,
+            internal_hosts=["greyping-com-backup.s3.us-west-004.backblazeb2.com"]))
+        corroborate_cloud_findings(r)
+        by_name = {f.bucket_name: f for f in r.cloud_assets.findings}
+        assert by_name["greyping-com-backup"].corroborated is True
+
+    def test_no_cloud_assets_is_noop(self):
+        r = DomainResult(target="https://greyping.com")
+        corroborate_cloud_findings(r)  # must not raise

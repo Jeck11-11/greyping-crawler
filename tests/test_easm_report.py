@@ -30,6 +30,13 @@ from src.models import (
     SensitivePathFinding,
     TechFinding,
     WaybackResult,
+    ARecord,
+    PortScanResult,
+    OpenPort,
+    CloudAssetResult,
+    CloudAssetFinding,
+    LinksGroup,
+    ExternalLinkFinding,
 )
 
 
@@ -199,7 +206,9 @@ class TestEmailSecurityClassification:
             )),
         )
         report = build_easm_report(result, scan_mode="passive")
-        ids = {f.id for f in report.prioritized_findings}
+        # Informational rows may be collapsed into observations_detail; confirmed
+        # issues stay in prioritized_findings. Search both surfaces.
+        ids = {f.id for f in report.prioritized_findings + report.observations_detail}
         assert "email_no_spf" in ids
         assert "email_no_dmarc" in ids
         assert "email_no_dkim" in ids
@@ -216,7 +225,10 @@ class TestEmailSecurityClassification:
             )),
         )
         report = build_easm_report(result, scan_mode="passive")
-        dmarc_f = [f for f in report.prioritized_findings if f.id == "email_dmarc_none"]
+        # email_dmarc_none is informational and may be collapsed into the
+        # email_security_observations summary — check both surfaces.
+        dmarc_f = [f for f in report.prioritized_findings + report.observations_detail
+                   if f.id == "email_dmarc_none"]
         assert len(dmarc_f) == 1
         assert dmarc_f[0].classification == FindingClassification.informational
 
@@ -443,3 +455,126 @@ def test_finding_owner_informational_alias_back_compat():
 
     assert FindingOwner.informational == FindingOwner.not_actionable
 
+
+
+# ---------------------------------------------------------------------------
+# Observation collapse, cloud-bucket summary, and quantification hints
+# ---------------------------------------------------------------------------
+
+def _cdn_ports(n_ports):
+    return PortScanResult(
+        target="greyping.com", ip="104.17.249.72",
+        network_attribution="shared_cdn_edge", cdn_provider="Cloudflare",
+        open_ports=[OpenPort(port=p, service="svc", network_attribution="shared_cdn_edge",
+                             affects_risk_score=False, service_confirmed=False)
+                    for p in n_ports],
+    )
+
+
+class TestObservationCollapse:
+    def test_cdn_edge_ports_collapse_to_one_row(self):
+        result = DomainResult(
+            target="https://greyping.com",
+            port_scan=_cdn_ports([80, 443, 2082, 2083, 2086, 2087, 8080, 8443, 8880]),
+        )
+        rep = build_easm_report(result, scan_mode="full")
+        ids = [f.id for f in rep.prioritized_findings]
+        assert not any(i.startswith("port_shared_edge_") for i in ids)
+        assert "network_observations" in ids
+        # All 9 originals retained for drill-down.
+        assert sum(1 for f in rep.observations_detail if f.id.startswith("port_shared_edge_")) == 9
+
+    def test_single_observation_not_collapsed(self):
+        # One shared-edge port is not "noise" — keep it as-is, no summary row.
+        result = DomainResult(target="https://greyping.com", port_scan=_cdn_ports([8443]))
+        rep = build_easm_report(result, scan_mode="full")
+        ids = [f.id for f in rep.prioritized_findings]
+        assert "network_observations" not in ids
+        assert any(i.startswith("port_shared_edge_") for i in ids)
+
+    def test_confirmed_issues_never_collapse(self):
+        result = DomainResult(
+            target="https://greyping.com",
+            security=SecurityGroup(headers=SecurityHeadersResult(grade="D", findings=[
+                HeaderFinding(header="Content-Security-Policy", status="missing", severity="medium"),
+            ])),
+            port_scan=_cdn_ports([80, 443, 2082]),
+        )
+        rep = build_easm_report(result, scan_mode="full")
+        ids = [f.id for f in rep.prioritized_findings]
+        assert "missing_content_security_policy" in ids  # confirmed_issue stays individual
+
+
+class TestCloudBucketSummary:
+    def _buckets(self, names):
+        return CloudAssetResult(
+            domain="greyping.com", buckets_checked=216, bucket_candidates_checked=216,
+            findings=[CloudAssetFinding(bucket_name=n, provider="backblaze_b2",
+                                        url=f"https://{n}.s3.us-west-004.backblazeb2.com/",
+                                        status="exists_private", evidence=["AccessDenied"])
+                      for n in names],
+        )
+
+    def test_uncorroborated_candidates_collapse_to_summary(self):
+        result = DomainResult(
+            target="https://greyping.com",
+            cloud_assets=self._buckets([f"greyping-com-{s}" for s in
+                                        ("assets", "backup", "media", "data", "logs")]),
+        )
+        rep = build_easm_report(result, scan_mode="full")
+        ids = [f.id for f in rep.prioritized_findings]
+        assert "cloud_bucket_candidates" in ids
+        assert not any(i.startswith("cloud_bucket_corroborated_") for i in ids)
+
+    def test_corroborated_bucket_promoted(self):
+        result = DomainResult(
+            target="https://greyping.com",
+            cloud_assets=self._buckets(["greyping-com-assets", "greyping-com-backup"]),
+            links=LinksGroup(external=[ExternalLinkFinding(
+                url="https://greyping-com-assets.s3.us-west-004.backblazeb2.com/logo.png",
+                anchor_text="logo", found_on=["x"])]),
+        )
+        rep = build_easm_report(result, scan_mode="full")
+        ids = [f.id for f in rep.prioritized_findings]
+        # The referenced bucket is promoted; the guessed one stays in the summary.
+        assert any(i.startswith("cloud_bucket_corroborated_") for i in ids)
+        assert "cloud_bucket_candidates" in ids
+
+
+class TestQuantificationHints:
+    def test_every_finding_has_a_hint(self):
+        result = DomainResult(
+            target="https://greyping.com",
+            security=SecurityGroup(headers=SecurityHeadersResult(grade="D", findings=[
+                HeaderFinding(header="Content-Security-Policy", status="missing", severity="medium"),
+            ])),
+        )
+        rep = build_easm_report(result, scan_mode="full")
+        assert rep.prioritized_findings
+        for f in rep.prioritized_findings:
+            assert f.quantification_hint is not None
+
+    def test_csp_maps_to_defacement(self):
+        result = DomainResult(
+            target="https://greyping.com",
+            security=SecurityGroup(headers=SecurityHeadersResult(grade="D", findings=[
+                HeaderFinding(header="Content-Security-Policy", status="missing", severity="medium"),
+            ])),
+        )
+        rep = build_easm_report(result, scan_mode="full")
+        csp = next(f for f in rep.prioritized_findings if f.id == "missing_content_security_policy")
+        assert csp.quantification_hint.loss_event_type == "defacement"
+        assert csp.quantification_hint.exploitability == "theoretical"
+
+    def test_unmapped_finding_gets_safe_default(self):
+        result = DomainResult(
+            target="https://greyping.com",
+            dns=DNSGroup(records=DNSResult(domain="greyping.com")),
+        )
+        rep = build_easm_report(result, scan_mode="full")
+        for f in rep.prioritized_findings:
+            h = f.quantification_hint
+            # Whatever fires, the hint schema is always fully populated.
+            assert h.records_at_risk_class in ("none", "low", "medium", "high")
+            assert h.loss_event_type in (
+                "none", "breach", "spoofing", "defacement", "brand_abuse", "service_disruption")

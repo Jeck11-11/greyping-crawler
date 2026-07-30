@@ -355,8 +355,65 @@ async def discover_cloud_assets(
     )
 
 
+def corroborate_cloud_findings(result) -> None:
+    """Passively mark name-guessed bucket candidates that the target actually references.
+
+    Sends NO new traffic — cross-references each candidate's bucket name / URL against
+    resources the scan already collected (JS intel, external links, supply-chain
+    resource URLs, tech evidence, DNS-detected cloud services). A match means the
+    bucket is likely a real asset rather than a blind permutation guess; it sets
+    ``corroborated=True`` and records the evidence on the finding in place.
+    """
+    ca = getattr(result, "cloud_assets", None)
+    if not ca or not ca.findings:
+        return
+
+    # Build a single lowercase haystack from the already-extracted inventories.
+    haystack: list[str] = []
+    js = getattr(result, "js_intel", None)
+    if js:
+        haystack += list(js.api_endpoints or [])
+        haystack += list(js.internal_hosts or [])
+        haystack += list(js.sourcemaps_found or [])
+        haystack += list(js.recovered_source_files or [])
+    for link in (getattr(result, "external_links", None) or []):
+        if getattr(link, "url", ""):
+            haystack.append(link.url)
+    sc = getattr(result, "supply_chain", None)
+    if sc:
+        for res in (sc.resources or []):
+            if getattr(res, "url", ""):
+                haystack.append(res.url)
+    for tech in (getattr(result, "technologies", None) or []):
+        haystack += list(getattr(tech, "evidence", None) or [])
+    # DNS-detected cloud services (CNAME targets) corroborate provider usage.
+    for svc in (ca.cloud_services or []):
+        if getattr(svc, "record_value", ""):
+            haystack.append(svc.record_value)
+
+    hay = "\n".join(h.lower() for h in haystack if h)
+    if not hay:
+        return
+
+    for f in ca.findings:
+        if f.status == "public":
+            continue
+        name = (f.bucket_name or "").lower()
+        # Host portion of the bucket URL, e.g. greyping-com.s3.us-west-004.backblazeb2.com
+        url_host = (f.url or "").lower().split("//")[-1].split("/")[0]
+        matched: list[str] = []
+        if name and len(name) >= 4 and name in hay:
+            matched.append(f"bucket name '{f.bucket_name}' referenced in collected resources")
+        if url_host and url_host in hay:
+            matched.append(f"bucket URL host '{url_host}' referenced in collected resources")
+        if matched:
+            f.corroborated = True
+            f.corroboration = matched
+
+
 __all__ = [
     "discover_cloud_assets",
     "detect_cloud_services_from_dns",
     "detect_exposed_databases_from_dns",
+    "corroborate_cloud_findings",
 ]

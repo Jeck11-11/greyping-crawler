@@ -25,6 +25,7 @@ from .models import (
     FindingClassification,
     FindingOwner,
     PrioritizedFinding,
+    QuantificationHint,
     RansomwareIndex,
     RemediationItem,
     ReconArtifact,
@@ -269,6 +270,121 @@ def _resolve_compliance(finding_id: str) -> list[str]:
         if finding_id.startswith(prefix) or finding_id == prefix.rstrip("_"):
             return list(_COMPLIANCE_PREFIX_MAP[prefix])
     return []
+
+
+# ---------------------------------------------------------------------------
+# Quantification hints — categorical magnitude cues for downstream $ modelling.
+# The scanner stays evidence-only; these tell Xano what KIND of loss a finding
+# enables and how sensitive/large the data at risk is, without emitting dollars.
+# Values: records_at_risk_class, data_sensitivity, exposure_confirmed,
+# exploitability, loss_event_type. Anything unmapped keeps the safe default.
+# ---------------------------------------------------------------------------
+_QUANT_HINT_MAP: dict[str, dict] = {
+    # Confirmed data exposure — the heavy hitters.
+    "public_cloud_bucket": dict(records_at_risk_class="high", data_sensitivity="pii",
+                                exposure_confirmed=True, exploitability="confirmed", loss_event_type="breach"),
+    "exposed_cloud_database": dict(records_at_risk_class="high", data_sensitivity="pii",
+                                   exposure_confirmed=True, exploitability="likely", loss_event_type="breach"),
+    "exposed_env": dict(records_at_risk_class="medium", data_sensitivity="credentials",
+                        exposure_confirmed=True, exploitability="likely", loss_event_type="breach"),
+    # Email spoofing family.
+    "email_no_dmarc": dict(exploitability="likely", loss_event_type="spoofing"),
+    "email_dmarc_none": dict(exploitability="likely", loss_event_type="spoofing"),
+    "email_no_spf": dict(exploitability="likely", loss_event_type="spoofing"),
+    "email_weak_spf": dict(exploitability="theoretical", loss_event_type="spoofing"),
+    # Web hygiene — enables XSS/clickjacking, not a direct breach.
+    "missing_content_security_policy": dict(exploitability="theoretical", loss_event_type="defacement"),
+    "missing_x_frame_options": dict(exploitability="theoretical", loss_event_type="defacement"),
+    # Brand.
+    "cloud_bucket_candidates": dict(loss_event_type="none"),
+}
+_QUANT_HINT_PREFIX_MAP: dict[str, dict] = {
+    "secret_": dict(records_at_risk_class="medium", data_sensitivity="credentials",
+                    exposure_confirmed=True, exploitability="likely", loss_event_type="breach"),
+    "breach_": dict(records_at_risk_class="high", data_sensitivity="pii",
+                    exposure_confirmed=True, exploitability="confirmed", loss_event_type="breach"),
+    "typosquat_": dict(exploitability="theoretical", loss_event_type="brand_abuse"),
+    "cloud_bucket_corroborated_": dict(records_at_risk_class="low", loss_event_type="breach"),
+    "port_exposed_": dict(exploitability="theoretical", loss_event_type="service_disruption"),
+    "subdomain_takeover": dict(exploitability="likely", loss_event_type="brand_abuse"),
+}
+
+
+def _resolve_quant_hint(finding_id: str) -> QuantificationHint:
+    """Categorical magnitude hint for a finding ID (exact, then longest prefix)."""
+    spec = _QUANT_HINT_MAP.get(finding_id)
+    if spec is None:
+        for prefix in sorted(_QUANT_HINT_PREFIX_MAP, key=len, reverse=True):
+            if finding_id.startswith(prefix) or finding_id == prefix.rstrip("_"):
+                spec = _QUANT_HINT_PREFIX_MAP[prefix]
+                break
+    return QuantificationHint(**spec) if spec else QuantificationHint()
+
+
+# ---------------------------------------------------------------------------
+# Observation collapse — fold non-scoring, low-value rows (CDN-edge ports,
+# informational email/DNS/privacy notes) into one "<category>_observations"
+# summary per category so a resold board report stays clean. Originals are
+# returned separately for drill-down.
+# ---------------------------------------------------------------------------
+_COLLAPSE_CLASSIFICATIONS = frozenset({
+    FindingClassification.informational,
+    FindingClassification.attack_surface_observation,
+})
+# Categories whose noise we roll up. Others (secrets, ssl, cloud) stay per-row.
+_COLLAPSE_CATEGORIES = frozenset({"network", "email_security", "dns", "privacy_indicators"})
+
+
+def _collapse_observations(
+    findings: list[PrioritizedFinding],
+) -> tuple[list[PrioritizedFinding], list[PrioritizedFinding]]:
+    """Return (collapsed_findings, observations_detail).
+
+    Rows that are non-scoring AND classified informational/attack_surface_observation
+    AND in a noisy category are grouped by category into one summary finding each;
+    every other row passes through unchanged.
+    """
+    kept: list[PrioritizedFinding] = []
+    groups: dict[str, list[PrioritizedFinding]] = {}
+    for f in findings:
+        collapsible = (
+            not f.affects_risk_score
+            and f.classification in _COLLAPSE_CLASSIFICATIONS
+            and f.category in _COLLAPSE_CATEGORIES
+        )
+        if collapsible:
+            groups.setdefault(f.category, []).append(f)
+        else:
+            kept.append(f)
+
+    detail: list[PrioritizedFinding] = []
+    _cat_label = {"network": "network / CDN-edge", "email_security": "email hygiene",
+                  "dns": "DNS hygiene", "privacy_indicators": "privacy"}
+    for category, rows in groups.items():
+        if len(rows) == 1:
+            # A lone observation isn't noise — keep it as-is.
+            kept.append(rows[0])
+            continue
+        detail.extend(rows)
+        label = _cat_label.get(category, category)
+        kept.append(PrioritizedFinding(
+            id=f"{category}_observations",
+            title=f"{len(rows)} {label} observations to review",
+            category=category,
+            severity="informational",
+            classification=FindingClassification.informational,
+            confidence="low",
+            evidence_quality="weak_inference",
+            affects_risk_score=False,
+            owner=FindingOwner.not_actionable,
+            why_it_matters="Low-severity observations grouped to keep the report focused; "
+                           "each is retained under observations_detail for drill-down.",
+            business_impact="Informational — no confirmed exposure.",
+            evidence=[f"{r.title}" for r in rows],
+            recommended_action="Review individually if relevant; none affect the grade.",
+            source_field="observations",
+        ))
+    return kept, detail
 
 
 # ---------------------------------------------------------------------------
@@ -1797,6 +1913,7 @@ def _classify_cloud_findings(result: DomainResult) -> list[PrioritizedFinding]:
                 source_field="cloud_assets",
             ))
 
+    candidates = [b for b in result.cloud_assets.findings if b.status != "public"]
     for bucket in result.cloud_assets.findings:
         if bucket.status == "public":
             findings.append(PrioritizedFinding(
@@ -1813,6 +1930,60 @@ def _classify_cloud_findings(result: DomainResult) -> list[PrioritizedFinding]:
                 recommended_action="Restrict bucket access. Review and remove any sensitive data.",
                 source_field="cloud_assets",
             ))
+
+    # Corroborated candidates — the bucket name is actually referenced by the
+    # target's own collected resources, so it is likely a real asset (still not
+    # confirmed public). Promote each to its own finding.
+    corroborated = [b for b in candidates if getattr(b, "corroborated", False)]
+    for bucket in corroborated:
+        findings.append(PrioritizedFinding(
+            id=f"cloud_bucket_corroborated_{bucket.provider}_{bucket.bucket_name}",
+            title=f"Likely-owned {bucket.provider} bucket: {bucket.bucket_name}",
+            category="cloud_infrastructure",
+            severity="low",
+            classification=FindingClassification.risk_candidate,
+            confidence="medium",
+            evidence_quality="strong_inference",
+            affects_risk_score=False,
+            owner=FindingOwner.customer,
+            why_it_matters="This bucket name is referenced by the site's own resources, so it "
+                           "is likely a real asset. Public exposure is NOT confirmed.",
+            business_impact="Potential storage asset to inventory and review (unconfirmed exposure).",
+            evidence=[f"URL: {bucket.url}"] + list(bucket.corroboration) + list(bucket.evidence),
+            recommended_action="Confirm ownership and that the bucket is not publicly listable.",
+            source_field="cloud_assets",
+        ))
+
+    # Everything else — name-permutation guesses that returned AccessDenied and
+    # are NOT referenced anywhere. Collapse into ONE summary instead of N rows.
+    uncorroborated = [b for b in candidates if not getattr(b, "corroborated", False)]
+    if uncorroborated:
+        ca = result.cloud_assets
+        checked = getattr(ca, "bucket_candidates_checked", 0) or getattr(ca, "buckets_checked", 0)
+        providers = sorted({b.provider for b in uncorroborated})
+        findings.append(PrioritizedFinding(
+            id="cloud_bucket_candidates",
+            title=f"{len(uncorroborated)} candidate storage buckets inferred by name (unverified)",
+            category="cloud_infrastructure",
+            severity="informational",
+            classification=FindingClassification.attack_surface_observation,
+            confidence="low",
+            evidence_quality="weak_inference",
+            affects_risk_score=False,
+            owner=FindingOwner.not_actionable,
+            why_it_matters="These names were generated by permutation and returned AccessDenied. "
+                           "Ownership is NOT confirmed and none are referenced by the target's own "
+                           "resources — treat as leads to validate, not confirmed assets.",
+            business_impact="No confirmed exposure. Name-squatting/inventory lead only.",
+            evidence=(
+                [f"{len(uncorroborated)} name-inferred candidates across {', '.join(providers)}",
+                 f"{checked} candidate name(s) probed; 0 confirmed owned or public"]
+                + [f"{b.provider}: {b.bucket_name}" for b in uncorroborated[:8]]
+                + (["…"] if len(uncorroborated) > 8 else [])
+            ),
+            recommended_action="No action unless a name matches a real bucket you own; then verify it is private.",
+            source_field="cloud_assets",
+        ))
 
     return findings
 
@@ -2408,6 +2579,11 @@ def build_easm_report(
         from .asset_classifier import classify_asset
         asset = classify_asset(result)
 
+        # Passively corroborate name-guessed cloud buckets against the target's
+        # own collected resources (marks result.cloud_assets.findings in place).
+        from .cloud_assets import corroborate_cloud_findings
+        corroborate_cloud_findings(result)
+
         all_findings: list[PrioritizedFinding] = []
         # Always-applicable evidence (transport, DNS, breach, network, brand).
         all_findings.extend(_classify_ssl_findings(result))
@@ -2445,9 +2621,15 @@ def build_easm_report(
             )
             f.affects_risk_score = f.affects_risk_score and scores
 
-        # Apply compliance framework tags
+        # Collapse non-scoring, low-value observation rows (CDN-edge ports,
+        # informational email/DNS/privacy notes) into one summary per category so
+        # a resold board report stays focused. Originals kept for drill-down.
+        sorted_findings, observations_detail = _collapse_observations(sorted_findings)
+
+        # Apply compliance framework tags + categorical quantification hints.
         for finding in sorted_findings:
             finding.compliance = _resolve_compliance(finding.id)
+            finding.quantification_hint = _resolve_quant_hint(finding.id)
 
         # Build compliance summary counts
         framework_counts: dict[str, int] = {}
@@ -2558,6 +2740,7 @@ def build_easm_report(
             cloud_assets=cloud_assets,
             recon_artifacts=recon_artifacts,
             prioritized_findings=sorted_findings,
+            observations_detail=observations_detail,
             total_findings=len(sorted_findings),
             confirmed_issues=confirmed,
             platform_behaviors=plat_beh,
