@@ -15,6 +15,11 @@ from pydantic import BaseModel
 _NF = "not_found"
 
 _SKIP_NAMES = frozenset({
+    # Authoritative machine-readable sections (schema 2.0) — empty means empty.
+    # Never inject "not_found" here or downstream (Xano) sees phantom modules,
+    # warnings and affected assets.
+    "scan_profile",
+    "signal_evaluation",
     # Error / metadata fields — never fill
     "error",
     # Evidence / provenance — empty means no evidence
