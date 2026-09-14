@@ -37,7 +37,7 @@ router = APIRouter(prefix="/recon", tags=["passive"])
 
 def _domain_of(target: str) -> str:
     parsed = urlparse(target)
-    return (parsed.hostname or target).lower().lstrip("www.")
+    return (parsed.hostname or target).lower().removeprefix("www.")
 
 
 @router.post("/dns", response_model=list[DNSResult])

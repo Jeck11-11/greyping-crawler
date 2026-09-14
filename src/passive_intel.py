@@ -519,16 +519,19 @@ async def query_ct_logs(domain: str, *, timeout: int = PASSIVE_TIMEOUT) -> CTRes
                 )
             data = resp.json()
 
+        domain_lower = domain.lower().rstrip(".")
         subdomains: set[str] = set()
         issuers: set[str] = set()
         for entry in data or []:
             name_value = entry.get("name_value") or ""
             for host in name_value.splitlines():
                 host = _clean_hostname(host)
-                if host and host.endswith(domain.lower()):
+                if host and (
+                    host == domain_lower or host.endswith("." + domain_lower)
+                ):
                     subdomains.add(host)
             cn = _clean_hostname(entry.get("common_name") or "")
-            if cn and cn.endswith(domain.lower()):
+            if cn and (cn == domain_lower or cn.endswith("." + domain_lower)):
                 subdomains.add(cn)
             issuer = (entry.get("issuer_name") or "").strip()
             if issuer:

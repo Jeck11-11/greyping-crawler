@@ -2,6 +2,7 @@
 
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -20,9 +21,10 @@ class TestHealthEndpoint:
 
 
 class TestScanEndpoint:
+    @patch("src.app.fetch_landing_page_full", new_callable=AsyncMock)
     @patch("src.app.crawl_domain", new_callable=AsyncMock)
     @patch("src.app.check_breaches", new_callable=AsyncMock)
-    def test_scan_returns_structured_response(self, mock_breaches, mock_crawl):
+    def test_scan_returns_structured_response(self, mock_breaches, mock_crawl, mock_landing):
         mock_crawl.return_value = [
             PageResult(
                 url="https://example.com",
@@ -34,6 +36,11 @@ class TestScanEndpoint:
             )
         ]
         mock_breaches.return_value = []
+        mock_landing.return_value = (
+            {"content-type": "text/html"},
+            httpx.Cookies(),
+            "<html><title>Example</title></html>",
+        )
 
         resp = client.post("/scan", json={
             "targets": ["https://example.com"],

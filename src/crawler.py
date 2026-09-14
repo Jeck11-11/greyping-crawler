@@ -4,12 +4,22 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Any
 from urllib.parse import urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
 
-from .config import CRAWL_TIMEOUT, MAX_PAGES, MAX_RESPONSE_BYTES, PD_TOOLS_API_URL, PLAYWRIGHT_EXTRA_WAIT_MS, UA_BROWSER, UA_HONEST
+from .config import (
+    CRAWL_CONCURRENCY,
+    CRAWL_TIMEOUT,
+    MAX_PAGES,
+    MAX_RESPONSE_BYTES,
+    PD_TOOLS_API_URL,
+    PLAYWRIGHT_EXTRA_WAIT_MS,
+    UA_BROWSER,
+    UA_HONEST,
+)
 from .extractors import extract_contacts, extract_links, extract_page_metadata
 from .ioc_scanner import scan_ioc
 from .models import ContactInfo, LinkInfo, PageResult
@@ -40,6 +50,7 @@ async def _fetch_static(
     *,
     follow_redirects: bool = True,
     timeout: int = CRAWL_TIMEOUT,
+    client: httpx.AsyncClient | None = None,
 ) -> tuple[str, int | None, list[str]]:
     """Fetch a URL with httpx and return (html, status_code, redirect_chain)."""
     headers = {
@@ -47,22 +58,51 @@ async def _fetch_static(
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
     }
+    async def _request(active_client: httpx.AsyncClient):
+        resp = await active_client.get(url, headers=headers)
+        chain = [str(r.url) for r in resp.history] if resp.history else []
+        body = resp.text[:MAX_RESPONSE_BYTES] if len(resp.content) > MAX_RESPONSE_BYTES else resp.text
+        return body, resp.status_code, chain
+
+    if client is not None:
+        return await _request(client)
+
     async with httpx.AsyncClient(
         follow_redirects=follow_redirects,
         timeout=httpx.Timeout(timeout),
         verify=False,  # OSINT scanning may hit self-signed certs
         max_redirects=10,
-    ) as client:
-        resp = await client.get(url, headers=headers)
-        chain = [str(r.url) for r in resp.history] if resp.history else []
-        body = resp.text[:MAX_RESPONSE_BYTES] if len(resp.content) > MAX_RESPONSE_BYTES else resp.text
-        return body, resp.status_code, chain
+    ) as owned_client:
+        return await _request(owned_client)
+
+
+async def _fetch_rendered_in_context(
+    context: Any,
+    url: str,
+    *,
+    timeout: int,
+) -> tuple[str, int | None, list[dict]]:
+    """Render one URL in an existing Playwright browser context."""
+    page = await context.new_page()
+    status_code: int | None = None
+    browser_cookies: list[dict] = []
+    try:
+        response = await page.goto(url, wait_until="networkidle", timeout=timeout * 1000)
+        if response:
+            status_code = response.status
+        await page.wait_for_timeout(PLAYWRIGHT_EXTRA_WAIT_MS)
+        html = await page.content()
+        browser_cookies = await context.cookies()
+        return html, status_code, browser_cookies
+    finally:
+        await page.close()
 
 
 async def _fetch_rendered(
     url: str,
     *,
     timeout: int = CRAWL_TIMEOUT,
+    context: Any | None = None,
 ) -> tuple[str, int | None, list[dict]]:
     """Fetch a URL via Playwright headless Chromium to execute JS.
 
@@ -70,28 +110,23 @@ async def _fetch_rendered(
     *browser_cookies* is a list of cookie dicts from the browser context
     (includes JS-set cookies invisible to plain HTTP).
     """
-    from playwright.async_api import async_playwright
+    if context is not None:
+        return await _fetch_rendered_in_context(context, url, timeout=timeout)
 
+    from playwright.async_api import async_playwright
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
-        context = await browser.new_context(
+        owned_context = await browser.new_context(
             user_agent=f"{UA_BROWSER} {UA_HONEST}",
             ignore_https_errors=True,
         )
-        page = await context.new_page()
-        status_code: int | None = None
-        browser_cookies: list[dict] = []
         try:
-            response = await page.goto(url, wait_until="networkidle", timeout=timeout * 1000)
-            if response:
-                status_code = response.status
-            await page.wait_for_timeout(PLAYWRIGHT_EXTRA_WAIT_MS)
-            html = await page.content()
-            browser_cookies = await context.cookies()
+            return await _fetch_rendered_in_context(
+                owned_context, url, timeout=timeout,
+            )
         finally:
-            await context.close()
+            await owned_context.close()
             await browser.close()
-    return html, status_code, browser_cookies
 
 
 async def crawl_page(
@@ -100,6 +135,8 @@ async def crawl_page(
     render_js: bool = True,
     follow_redirects: bool = True,
     timeout: int = CRAWL_TIMEOUT,
+    _http_client: httpx.AsyncClient | None = None,
+    _browser_context: Any | None = None,
 ) -> PageResult:
     """Crawl a single page and extract all OSINT data."""
     html: str = ""
@@ -111,19 +148,32 @@ async def crawl_page(
         pw_available = await _check_playwright()
         if render_js and pw_available:
             try:
-                html, status_code, _browser_cookies = await _fetch_rendered(url, timeout=timeout)
+                if _browser_context is None:
+                    html, status_code, _browser_cookies = await _fetch_rendered(
+                        url, timeout=timeout,
+                    )
+                else:
+                    html, status_code, _browser_cookies = await _fetch_rendered(
+                        url, timeout=timeout, context=_browser_context,
+                    )
             except Exception as pw_exc:
                 logger.warning(
                     "Playwright failed for %s (%s), falling back to static fetch",
                     url, pw_exc,
                 )
                 html, status_code, redirect_chain = await _fetch_static(
-                    url, follow_redirects=follow_redirects, timeout=timeout,
+                    url,
+                    follow_redirects=follow_redirects,
+                    timeout=timeout,
+                    client=_http_client,
                 )
                 notes = f"JS render failed ({pw_exc}), used static fallback"
         else:
             html, status_code, redirect_chain = await _fetch_static(
-                url, follow_redirects=follow_redirects, timeout=timeout,
+                url,
+                follow_redirects=follow_redirects,
+                timeout=timeout,
+                client=_http_client,
             )
     except Exception as exc:
         return PageResult(url=url, error=str(exc))
@@ -269,9 +319,71 @@ async def _crawl_domain_python(
     max_depth: int = 2,
     timeout: int = CRAWL_TIMEOUT,
 ) -> list[PageResult]:
-    """Built-in Python BFS crawler."""
+    """Built-in breadth-first crawler with bounded frontier concurrency.
+
+    A single HTTP client and, when enabled, a single Chromium process/context
+    are reused for the target.  The externally-visible list of ``PageResult``
+    objects is unchanged.
+    """
+    async with httpx.AsyncClient(
+        follow_redirects=follow_redirects,
+        timeout=httpx.Timeout(timeout),
+        verify=False,
+        max_redirects=10,
+    ) as http_client:
+        if render_js and await _check_playwright():
+            try:
+                from playwright.async_api import async_playwright
+
+                async with async_playwright() as pw:
+                    browser = await pw.chromium.launch(headless=True)
+                    browser_context = await browser.new_context(
+                        user_agent=f"{UA_BROWSER} {UA_HONEST}",
+                        ignore_https_errors=True,
+                    )
+                    try:
+                        return await _crawl_frontiers(
+                            target,
+                            render_js=True,
+                            follow_redirects=follow_redirects,
+                            max_depth=max_depth,
+                            timeout=timeout,
+                            http_client=http_client,
+                            browser_context=browser_context,
+                        )
+                    finally:
+                        await browser_context.close()
+                        await browser.close()
+            except Exception as exc:
+                logger.warning(
+                    "Shared Playwright session failed for %s (%s); using static crawl",
+                    target,
+                    exc,
+                )
+
+        return await _crawl_frontiers(
+            target,
+            render_js=False,
+            follow_redirects=follow_redirects,
+            max_depth=max_depth,
+            timeout=timeout,
+            http_client=http_client,
+        )
+
+
+async def _crawl_frontiers(
+    target: str,
+    *,
+    render_js: bool,
+    follow_redirects: bool,
+    max_depth: int,
+    timeout: int,
+    http_client: httpx.AsyncClient,
+    browser_context: Any | None = None,
+) -> list[PageResult]:
+    """Crawl breadth-first while fetching each depth frontier concurrently."""
     parsed_target = urlparse(target)
-    base_domain = (parsed_target.hostname or "").lower().lstrip("www.")
+    base_domain = (parsed_target.hostname or "").lower().removeprefix("www.")
 
     visited: set[str] = set()
     results: list[PageResult] = []
@@ -280,25 +392,41 @@ async def _crawl_domain_python(
     max_pages = MAX_PAGES
 
     while queue and len(results) < max_pages:
-        url, depth = queue.pop(0)
-        if url in visited:
+        remaining = max_pages - len(results)
+        batch: list[tuple[str, int]] = []
+        while queue and len(batch) < min(CRAWL_CONCURRENCY, remaining):
+            url, depth = queue.pop(0)
+            dedup_url = url.split("#", 1)[0]
+            if dedup_url in visited or not _is_crawlable_url(dedup_url):
+                continue
+            visited.add(dedup_url)
+            batch.append((dedup_url, depth))
+
+        if not batch:
             continue
-        visited.add(url)
 
-        if not _is_crawlable_url(url):
-            continue
+        pages = await asyncio.gather(*[
+            crawl_page(
+                url,
+                render_js=render_js,
+                follow_redirects=follow_redirects,
+                timeout=timeout,
+                _http_client=http_client,
+                _browser_context=browser_context,
+            )
+            for url, _depth in batch
+        ])
+        results.extend(pages)
 
-        page = await crawl_page(
-            url,
-            render_js=render_js,
-            follow_redirects=follow_redirects,
-            timeout=timeout,
-        )
-        results.append(page)
-
-        if depth < max_depth:
+        for page, (_url, depth) in zip(pages, batch):
+            if depth >= max_depth:
+                continue
             for link in page.links:
-                if link.link_type == "internal" and link.url not in visited:
-                    queue.append((link.url, depth + 1))
+                if link.link_type != "internal":
+                    continue
+                link_url = link.url.split("#", 1)[0]
+                link_host = (urlparse(link_url).hostname or "").lower().removeprefix("www.")
+                if link_host == base_domain and link_url not in visited:
+                    queue.append((link_url, depth + 1))
 
     return results

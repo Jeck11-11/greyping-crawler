@@ -1,10 +1,15 @@
 """Tests for JavaScript bundle mining."""
 
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
 from src.js_miner import (
     extract_endpoints,
     extract_internal_hosts,
     extract_script_urls,
     extract_sourcemap_url,
+    mine_javascript,
 )
 
 
@@ -109,3 +114,26 @@ def test_gateway_subdomain_detected():
     js = """const gw = "https://gateway.example.com/proxy";"""
     eps = extract_endpoints(js)
     assert any("gateway.example.com" in e for e in eps)
+
+
+@pytest.mark.asyncio
+async def test_miner_does_not_treat_false_suffix_host_as_own_script():
+    html = """
+    <script src="https://static.example.com/app.js"></script>
+    <script src="https://evilexample.com/tracker.js"></script>
+    """
+    fetched: list[str] = []
+
+    async def fake_fetch(_client, url: str):
+        fetched.append(url)
+        return "console.log('ok')"
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    with patch("src.js_miner.httpx.AsyncClient", return_value=mock_client), \
+         patch("src.js_miner._fetch_text", new_callable=AsyncMock, side_effect=fake_fetch):
+        await mine_javascript("https://example.com", html)
+
+    assert "https://static.example.com/app.js" in fetched
+    assert "https://evilexample.com/tracker.js" not in fetched

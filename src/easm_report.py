@@ -463,8 +463,10 @@ def _classify_header_findings(
                     title="CORS allows null origin (file:// bypass risk)",
                     category="security_headers",
                     severity="high",
-                    classification=FindingClassification.confirmed_issue,
-                    confidence="high",
+                    classification=FindingClassification.potential_issue,
+                    confidence="medium",
+                    evidence_quality="weak_inference",
+                    affects_risk_score=False,
                     owner=FindingOwner.customer,
                     why_it_matters=h.recommendation,
                     business_impact="Cross-origin data theft via sandboxed iframe or local file exploit",
@@ -479,8 +481,10 @@ def _classify_header_findings(
                         else "CORS with credentials — verify trusted origin",
                     category="security_headers",
                     severity=h.severity,
-                    classification=FindingClassification.confirmed_issue,
-                    confidence="high",
+                    classification=FindingClassification.potential_issue,
+                    confidence="medium",
+                    evidence_quality="weak_inference",
+                    affects_risk_score=False,
                     owner=FindingOwner.customer,
                     why_it_matters=h.recommendation,
                     business_impact="Cross-origin data theft risk" if is_wildcard
@@ -495,8 +499,10 @@ def _classify_header_findings(
                 title="CORS exposes sensitive HTTP methods",
                 category="security_headers",
                 severity=h.severity,
-                classification=FindingClassification.confirmed_issue,
-                confidence="high",
+                classification=FindingClassification.potential_issue,
+                confidence="medium",
+                evidence_quality="weak_inference",
+                affects_risk_score=False,
                 owner=FindingOwner.customer,
                 why_it_matters=h.recommendation,
                 business_impact="Cross-origin state-changing requests risk",
@@ -510,8 +516,10 @@ def _classify_header_findings(
                 title="CORS exposes sensitive response headers",
                 category="security_headers",
                 severity=h.severity,
-                classification=FindingClassification.confirmed_issue,
-                confidence="high",
+                classification=FindingClassification.potential_issue,
+                confidence="medium",
+                evidence_quality="weak_inference",
+                affects_risk_score=False,
                 owner=FindingOwner.customer,
                 why_it_matters=h.recommendation,
                 business_impact="Credential or token leakage via cross-origin reads",
@@ -797,20 +805,25 @@ def _classify_path_findings(result: DomainResult) -> list[PrioritizedFinding]:
 def _classify_ioc_findings(result: DomainResult) -> list[PrioritizedFinding]:
     findings: list[PrioritizedFinding] = []
     for ioc in result.ioc_findings:
-        is_heuristic = ioc.ioc_type == "suspicious_script" and ioc.severity == "medium"
+        # A known miner domain/constructor is direct compromise evidence.  The
+        # remaining HTML heuristics require corroboration before they can be
+        # described as active compromise.
+        is_confirmed = ioc.ioc_type == "cryptominer"
         findings.append(PrioritizedFinding(
             id=f"ioc_{ioc.ioc_type}",
             title=f"IoC detected: {ioc.ioc_type.replace('_', ' ').title()}",
             category="ioc",
             severity=ioc.severity,
-            classification=FindingClassification.informational if is_heuristic
-                else FindingClassification.confirmed_issue,
-            confidence="low" if is_heuristic else "high",
+            classification=FindingClassification.confirmed_issue if is_confirmed
+                else FindingClassification.potential_issue,
+            confidence="high" if is_confirmed else "medium",
+            evidence_quality="direct" if is_confirmed else "weak_inference",
+            affects_risk_score=is_confirmed,
             owner=FindingOwner.customer,
             why_it_matters=ioc.description,
-            business_impact="Active compromise indicator" if not is_heuristic else "Requires manual verification",
+            business_impact="Active compromise indicator" if is_confirmed else "Requires manual verification",
             evidence=[ioc.evidence] if ioc.evidence else [ioc.description],
-            recommended_action="Investigate immediately and engage incident response." if not is_heuristic
+            recommended_action="Investigate immediately and engage incident response." if is_confirmed
                 else "Review the flagged script manually to determine if it is malicious.",
             source_field="ioc_findings",
         ))
@@ -1526,7 +1539,9 @@ def _build_executive_summary(
     confirmed = [f for f in findings if f.classification == FindingClassification.confirmed_issue]
     critical_high = [f for f in confirmed if f.severity in ("critical", "high")]
 
-    if any(f.severity == "critical" for f in confirmed):
+    if not overall_grade:
+        risk_posture = "Unknown"
+    elif any(f.severity == "critical" for f in confirmed):
         risk_posture = "High"
     elif len(critical_high) >= 3:
         risk_posture = "High"
@@ -1540,7 +1555,9 @@ def _build_executive_summary(
     parts: list[str] = []
     if overall_grade:
         parts.append(f"Overall grade: {overall_grade}.")
-    parts.append(f"{risk_posture} overall external risk posture.")
+        parts.append(f"{risk_posture} overall external risk posture.")
+    else:
+        parts.append("Insufficient assessed evidence to determine the overall external risk posture.")
 
     if any(f.category == "secrets" for f in confirmed):
         secret_count = sum(1 for f in confirmed if f.category == "secrets")
@@ -1554,8 +1571,8 @@ def _build_executive_summary(
         parts.append(f"Primary concern: {top.title.lower()}.")
     elif confirmed:
         parts.append("Main exposure consists of standard web hygiene gaps.")
-    else:
-        parts.append("No evidence of leaked secrets, active compromise, or breach exposure.")
+    elif overall_grade:
+        parts.append("No confirmed scoring issues were found in the assessed modules.")
 
     # Surface ransomware whenever it's above 'low' so a medium/high tier never
     # sits silently next to a "Low" posture (which reads as a contradiction).
@@ -1587,10 +1604,8 @@ def _build_executive_summary(
     parts.append(f"Based on a {scan_mode} scan with {confidence} confidence.")
 
     positives: list[str] = []
-    if not any(f.category == "secrets" for f in findings):
+    if result.pages.total > 0 and not any(f.category == "secrets" for f in findings):
         positives.append("No exposed secrets or credentials detected")
-    if not result.breaches:
-        positives.append("No breach history found")
     ssl = result.ssl_certificate
     if ssl and ssl.cert_valid and ssl.grade in ("A+", "A", "A-", "B+", "B"):
         positives.append(f"SSL/TLS certificate is valid (grade {ssl.grade})")
@@ -1607,7 +1622,7 @@ def _build_executive_summary(
         name = (result.waf.cdn_provider if (result.waf and result.waf.cdn_provider)
                 else cdn_names[0])
         positives.append(f"CDN / reverse proxy in front of origin: {name}")
-    if ransomware and ransomware.tier == "low":
+    if overall_grade and ransomware and ransomware.tier == "low":
         positives.append(f"Low ransomware susceptibility ({ransomware.score}/100)")
 
     # Rank confirmed, scoring findings so the board always gets a top-risks and
@@ -1783,34 +1798,63 @@ def _classify_cloud_findings(result: DomainResult) -> list[PrioritizedFinding]:
                 title=f"Cloud database endpoint in DNS: {svc.service}",
                 category="cloud_infrastructure",
                 severity="high",
-                classification=FindingClassification.confirmed_issue,
-                confidence="high",
+                classification=FindingClassification.attack_surface_observation,
+                confidence="medium",
+                evidence_quality="direct",
+                affects_risk_score=False,
                 owner=FindingOwner.customer,
-                why_it_matters="Database endpoints resolvable via public DNS may be accessible from the internet.",
-                business_impact="Potential data breach if database accepts external connections",
+                why_it_matters=(
+                    "A database-style hostname is present in public DNS. DNS does "
+                    "not prove that the database port is reachable or customer-owned."
+                ),
+                business_impact="Potential exposure requiring reachability and ownership validation",
                 evidence=[
                     f"Service: {svc.service}",
                     f"Provider: {svc.provider}",
                     f"DNS record ({svc.record_type}): {svc.record_value}",
                 ],
-                recommended_action="Restrict database to private subnets/VPC. Remove public DNS records pointing to database endpoints.",
+                recommended_action=(
+                    "Confirm ownership and network reachability. Restrict the service "
+                    "to private networks if public access is not explicitly required."
+                ),
                 source_field="cloud_assets",
             ))
 
     for bucket in result.cloud_assets.findings:
         if bucket.status == "public":
+            confirmed = bucket.ownership_verified and bucket.public_exposure_confirmed
             findings.append(PrioritizedFinding(
                 id="public_cloud_bucket",
                 title=f"Public {bucket.provider} bucket: {bucket.bucket_name}",
                 category="cloud_infrastructure",
-                severity="critical",
-                classification=FindingClassification.confirmed_issue,
-                confidence="high",
+                severity="critical" if confirmed else "informational",
+                classification=FindingClassification.confirmed_issue if confirmed
+                    else FindingClassification.risk_candidate,
+                confidence="high" if confirmed else "medium",
+                evidence_quality="direct",
+                affects_risk_score=confirmed and bucket.affects_risk_score,
                 owner=FindingOwner.customer,
-                why_it_matters="Publicly accessible cloud storage may expose sensitive data.",
-                business_impact="Data breach via unauthenticated bucket access",
-                evidence=[f"URL: {bucket.url}", f"Status: {bucket.status}"] + bucket.evidence,
-                recommended_action="Restrict bucket access. Review and remove any sensitive data.",
+                why_it_matters=(
+                    "Publicly accessible customer-owned cloud storage may expose sensitive data."
+                    if confirmed else
+                    "A publicly readable bucket name resembling the domain was found, "
+                    "but customer ownership has not been verified."
+                ),
+                business_impact=(
+                    "Data breach via unauthenticated bucket access"
+                    if confirmed else "Unknown until customer ownership is confirmed"
+                ),
+                evidence=[
+                    f"URL: {bucket.url}",
+                    f"Status: {bucket.status}",
+                    f"ownership_verified={str(bucket.ownership_verified).lower()}",
+                    f"public_exposure_confirmed={str(bucket.public_exposure_confirmed).lower()}",
+                ] + bucket.evidence,
+                recommended_action=(
+                    "Restrict bucket access. Review and remove any sensitive data."
+                    if confirmed else
+                    "Verify ownership before remediation or risk scoring."
+                ),
                 source_field="cloud_assets",
             ))
 
@@ -1866,8 +1910,10 @@ def _classify_supply_chain_findings(result: DomainResult) -> list[PrioritizedFin
             title=f"{sc.scripts_without_sri} external script(s) without Subresource Integrity",
             category="supply_chain",
             severity="medium",
-            classification=FindingClassification.confirmed_issue,
-            confidence="high",
+            classification=FindingClassification.potential_issue,
+            confidence="medium",
+            evidence_quality="direct",
+            affects_risk_score=False,
             owner=FindingOwner.customer,
             why_it_matters="Without SRI, a compromised CDN can inject malicious code into your site.",
             business_impact="Supply chain attack vector — CDN compromise leads to site compromise",
@@ -1992,10 +2038,11 @@ def _compute_overall_grade(result: DomainResult, findings: list[PrioritizedFindi
     and security-header component grades and a penalty for confirmed, scoring
     findings. Quantitative risk modelling (FAIR) is performed downstream.
     """
-    ssl_grade_score = _grade_to_score(result.ssl.grade if result.ssl else "")
-    headers_grade_score = _grade_to_score(
-        result.security.headers.grade if result.security and result.security.headers else ""
-    )
+    component_scores = []
+    if result.ssl and result.ssl.grade:
+        component_scores.append(_grade_to_score(result.ssl.grade))
+    if result.security and result.security.headers and result.security.headers.grade:
+        component_scores.append(_grade_to_score(result.security.headers.grade))
 
     # Only confirmed issues that actually affect the risk score contribute a
     # penalty. Unverified candidates, shared-CDN observations, attack-surface
@@ -2011,7 +2058,13 @@ def _compute_overall_grade(result: DomainResult, findings: list[PrioritizedFindi
     low_count = sum(1 for f in confirmed if f.severity == "low")
     finding_penalty = min(45, crit_count * 18 + high_count * 8 + medium_count * 3 + low_count * 1)
 
-    component_avg = (ssl_grade_score + headers_grade_score) / 2.0
+    if not component_scores and not confirmed:
+        return ""
+
+    component_avg = (
+        sum(component_scores) / len(component_scores)
+        if component_scores else 100.0
+    )
     component_risk = max(0, 100 - component_avg)
 
     composite = int(round(component_risk * 0.6 + finding_penalty))
@@ -2323,8 +2376,42 @@ _ORGANISATIONAL_CONTROLS: frozenset[str] = frozenset({
 })
 
 
+def _assessed_compliance_controls(result: DomainResult) -> set[str]:
+    """Return controls for which the scanner collected positive evidence.
+
+    A missing finding is not proof that a module ran.  This deliberately uses
+    only explicit module output already present in the v1 model, keeping
+    unobserved controls ``not_assessed`` until a versioned module-status
+    contract is introduced.
+    """
+    assessed: set[str] = set()
+
+    if result.ssl and result.ssl.grade:
+        assessed.update({"PCI-DSS 4.1", "ISO 27001 A.10.1.1"})
+
+    headers = result.security_headers
+    if headers and (headers.grade or headers.findings):
+        assessed.update({
+            "PCI-DSS 6.5.5",
+            "PCI-DSS 6.5.7",
+            "ISO 27001 A.14.1.2",
+        })
+
+    nuclei = result.nuclei
+    if nuclei and nuclei.templates_run > 0 and not nuclei.error:
+        assessed.update({
+            "PCI-DSS 6.2",
+            "PCI-DSS 6.5.6",
+            "ISO 27001 A.12.6.1",
+        })
+
+    return assessed
+
+
 def _compute_compliance_posture(
     findings: list[PrioritizedFinding],
+    *,
+    assessed_controls: set[str] | None = None,
 ) -> list[CompliancePosture]:
     """Build per-framework EXTERNAL technical observations from tagged findings.
 
@@ -2332,6 +2419,7 @@ def _compute_compliance_posture(
     are always not_assessed — an external scan cannot verify procedures, training,
     incident response, or internal access. Absence of a finding is not a pass.
     """
+    assessed_controls = assessed_controls or set()
     failing_tags: set[str] = set()
     tag_to_findings: dict[str, list[str]] = {}
     for f in findings:
@@ -2371,13 +2459,21 @@ def _compute_compliance_posture(
                     findings=tag_to_findings.get(control_id, []),
                 ))
                 failing += 1
-            else:
+            elif control_id in assessed_controls:
                 controls.append(ComplianceControl(
                     control_id=control_id,
                     control_name=control_name,
                     status="pass",
                 ))
                 passing += 1
+            else:
+                controls.append(ComplianceControl(
+                    control_id=control_id,
+                    control_name=control_name,
+                    status="not_assessed",
+                    findings=["No explicit external assessment evidence"],
+                ))
+                not_assessed += 1
 
         # Readiness reflects only the externally-observable controls.
         observable = passing + failing
@@ -2396,6 +2492,26 @@ def _compute_compliance_posture(
     return postures
 
 
+def _safe_classifier_findings(
+    name: str,
+    classifier,
+    *args,
+) -> list[PrioritizedFinding]:
+    """Run one classifier without allowing it to erase sibling evidence."""
+    try:
+        return classifier(*args)
+    except Exception as exc:
+        target = getattr(args[0], "target", "unknown") if args else "unknown"
+        logger.warning(
+            "EASM classifier %s failed for %s: %s",
+            name,
+            target,
+            exc,
+            exc_info=True,
+        )
+        return []
+
+
 def build_easm_report(
     result: DomainResult, *, scan_mode: str = "full",
 ) -> EASMReport:
@@ -2410,26 +2526,42 @@ def build_easm_report(
 
         all_findings: list[PrioritizedFinding] = []
         # Always-applicable evidence (transport, DNS, breach, network, brand).
-        all_findings.extend(_classify_ssl_findings(result))
-        all_findings.extend(_classify_secret_findings(result))
-        all_findings.extend(_classify_ioc_findings(result))
-        all_findings.extend(_classify_email_security(result))
-        all_findings.extend(_classify_dns_findings(result))
-        all_findings.extend(_classify_breach_findings(result))
-        all_findings.extend(_classify_js_intel(result))
-        all_findings.extend(_classify_typosquatting_findings(result))
-        all_findings.extend(_classify_cloud_findings(result))
-        all_findings.extend(_classify_supply_chain_findings(result))
-        all_findings.extend(_classify_port_findings(result))
+        classifier_specs = [
+            ("ssl", _classify_ssl_findings, (result,)),
+            ("secrets", _classify_secret_findings, (result,)),
+            ("ioc", _classify_ioc_findings, (result,)),
+            ("email_security", _classify_email_security, (result,)),
+            ("dns", _classify_dns_findings, (result,)),
+            ("breaches", _classify_breach_findings, (result,)),
+            ("javascript", _classify_js_intel, (result,)),
+            ("typosquatting", _classify_typosquatting_findings, (result,)),
+            ("cloud", _classify_cloud_findings, (result,)),
+            ("supply_chain", _classify_supply_chain_findings, (result,)),
+            ("ports", _classify_port_findings, (result,)),
+        ]
+        for name, classifier, args in classifier_specs:
+            all_findings.extend(
+                _safe_classifier_findings(name, classifier, *args)
+            )
         # Website-only checks — gated by asset classification.
         if asset.website_checks_applicable:
-            all_findings.extend(_classify_header_findings(result, platform, profile))
-            all_findings.extend(_classify_path_findings(result))
-            all_findings.extend(_classify_robots_sitemap(result))
+            all_findings.extend(_safe_classifier_findings(
+                "headers", _classify_header_findings, result, platform, profile,
+            ))
+            all_findings.extend(_safe_classifier_findings(
+                "paths", _classify_path_findings, result,
+            ))
+            all_findings.extend(_safe_classifier_findings(
+                "robots_sitemap", _classify_robots_sitemap, result,
+            ))
         if asset.cookie_checks_applicable:
-            all_findings.extend(_classify_cookie_findings(result, platform, profile))
+            all_findings.extend(_safe_classifier_findings(
+                "cookies", _classify_cookie_findings, result, platform, profile,
+            ))
         if asset.privacy_checks_applicable:
-            all_findings.extend(_classify_privacy_findings(result))
+            all_findings.extend(_safe_classifier_findings(
+                "privacy", _classify_privacy_findings, result,
+            ))
 
         sorted_findings = _sort_findings(all_findings)
 
@@ -2447,7 +2579,11 @@ def build_easm_report(
 
         # Apply compliance framework tags
         for finding in sorted_findings:
-            finding.compliance = _resolve_compliance(finding.id)
+            finding.compliance = (
+                _resolve_compliance(finding.id)
+                if finding.classification == FindingClassification.confirmed_issue
+                else []
+            )
 
         # Build compliance summary counts
         framework_counts: dict[str, int] = {}
@@ -2464,7 +2600,10 @@ def build_easm_report(
         overall_grade = _compute_overall_grade(result, sorted_findings)
         ransomware = _compute_ransomware_index(result)
         financial = _compute_financial_impact(result)
-        compliance = _compute_compliance_posture(sorted_findings)
+        compliance = _compute_compliance_posture(
+            sorted_findings,
+            assessed_controls=_assessed_compliance_controls(result),
+        )
 
         executive = _build_executive_summary(
             sorted_findings, result, platform, scan_mode,
@@ -2491,10 +2630,13 @@ def build_easm_report(
             if not (f.classification == FindingClassification.confirmed_issue and f.affects_risk_score)
         ]
         _tier_map = [(25, "critical"), (50, "high"), (70, "moderate"), (100, "low")]
-        _g = _grade_to_score(overall_grade)
-        risk_tier = next((t for thr, t in _tier_map if _g <= thr), "low")
-        scan_confidence = executive.grades.get("confidence", "") or (
-            "medium" if scan_mode == "full" else "low"
+        if overall_grade:
+            _g = _grade_to_score(overall_grade)
+            risk_tier = next((t for thr, t in _tier_map if _g <= thr), "low")
+        else:
+            risk_tier = ""
+        scan_confidence = (
+            "low" if result.error else _CONFIDENCE_LABEL.get(scan_mode, "low")
         )
 
         # Plain-English posture per assessed category, from component grades.

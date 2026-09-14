@@ -263,7 +263,7 @@ class TestExecutiveSummary:
         )
         report = build_easm_report(result, scan_mode="full")
         assert report.executive_summary.risk_posture == "Low"
-        assert "No evidence of leaked secrets" in report.executive_summary.narrative
+        assert "No confirmed scoring issues" in report.executive_summary.narrative
 
     def test_secrets_found_raises_risk(self):
         result = DomainResult(
@@ -431,7 +431,7 @@ class TestEASMIntegration:
         assert resp.status_code == 200
         r = resp.json()["results"][0]
         assert r["risk_assessment"]["easm_report"] is not None
-        assert r["risk_assessment"]["easm_report"]["executive_summary"]["risk_posture"] in ("Low", "Moderate")
+        assert r["risk_assessment"]["easm_report"]["executive_summary"]["risk_posture"] == "Unknown"
         assert r["risk_assessment"]["easm_report"]["scan_mode"] == "passive"
 
 
@@ -442,4 +442,3 @@ def test_finding_owner_informational_alias_back_compat():
     from src.models import FindingOwner
 
     assert FindingOwner.informational == FindingOwner.not_actionable
-

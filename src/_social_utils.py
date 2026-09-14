@@ -18,7 +18,7 @@ SOCIAL_PLATFORM_MAP = {
 def detect_platform(url: str) -> str:
     """Return the platform name for a social URL, or empty string."""
     try:
-        host = (urlparse(url).hostname or "").lower().lstrip("www.")
+        host = (urlparse(url).hostname or "").lower().removeprefix("www.")
         return SOCIAL_PLATFORM_MAP.get(host, "")
     except Exception:
         return ""

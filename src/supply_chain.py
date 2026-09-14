@@ -202,8 +202,8 @@ def _check_vulnerable(url: str) -> tuple[str, str, str, str]:
 # ---------------------------------------------------------------------------
 
 def _is_external(url: str, target_domain: str) -> bool:
-    host = (urlparse(url).hostname or "").lower().lstrip("www.")
-    base = target_domain.lower().lstrip("www.")
+    host = (urlparse(url).hostname or "").lower().removeprefix("www.")
+    base = target_domain.lower().removeprefix("www.")
     if not host:
         return False
     return not (host == base or host.endswith("." + base))
@@ -234,7 +234,7 @@ def analyze_supply_chain(html: str | None, target: str) -> SupplyChainResult | N
     if not html:
         return None
 
-    target_domain = (urlparse(target).hostname or "").lower().lstrip("www.")
+    target_domain = (urlparse(target).hostname or "").lower().removeprefix("www.")
     if not target_domain:
         return None
 
