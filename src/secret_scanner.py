@@ -130,6 +130,39 @@ def _classify_location(source: str, match_start: int) -> str:
     return "body"
 
 
+def _is_public_token_attribute(source: str, match_start: int) -> bool:
+    """Return whether a generic ``token=`` match is a public HTML attribute.
+
+    Generic matching can start at the ``token`` suffix in attributes such as
+    ``data-token``.  Those values are commonly public form nonces or anti-spam
+    state and are not evidence of a reusable credential.  Only suppress the
+    ambiguous token/nonce attribute forms; provider-specific secret patterns
+    are still evaluated independently.
+    """
+    last_open = source.rfind("<", 0, match_start)
+    last_close = source.rfind(">", 0, match_start)
+    if last_open <= last_close:
+        return False
+
+    name_start = match_start
+    attribute_characters = "-_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    while (
+        name_start > last_open + 1
+        and source[name_start - 1] in attribute_characters
+    ):
+        name_start -= 1
+    attribute_name = source[name_start:match_start + len("token")].lower()
+    return attribute_name.endswith(("-token", "-nonce"))
+
+
+def _is_ambiguous_generic_match(source: str, pattern: _Pattern, match: re.Match[str]) -> bool:
+    """Identify generic matches that are intentionally public page state."""
+    if pattern.name != "generic_password":
+        return False
+    matched_key = match.group(0).split("=", 1)[0].split(":", 1)[0].strip().lower()
+    return matched_key == "token" and _is_public_token_attribute(source, match.start())
+
+
 def scan_secrets(source: str) -> list[SecretFinding]:
     """Scan *source* (raw HTML / JS) and return a list of secret findings."""
     findings: list[SecretFinding] = []
@@ -137,6 +170,8 @@ def scan_secrets(source: str) -> list[SecretFinding]:
 
     for pattern in _PATTERNS:
         for match in pattern.regex.finditer(source):
+            if _is_ambiguous_generic_match(source, pattern, match):
+                continue
             # Prefer the first capture group if present, else the full match
             value = match.group(1) if match.lastindex else match.group(0)
             dedup_key = (pattern.name, value)

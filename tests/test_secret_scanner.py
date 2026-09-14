@@ -34,6 +34,21 @@ class TestScanSecrets:
         findings = scan_secrets(html)
         assert any(f.secret_type == "generic_password" for f in findings)
 
+    def test_detects_prefixed_generic_password(self):
+        html = '<pre>DB_PASSWORD = "SuperSecret123!"</pre>'
+        findings = scan_secrets(html)
+        assert any(f.secret_type == "generic_password" for f in findings)
+
+    def test_ignores_wpforms_public_data_token_attribute(self):
+        token = "db75" + ("a" * 24) + "7adf"
+        html = (
+            '<form id="wpforms-form-6426" data-formid="6426" '
+            f'data-token="{token}" data-token-time="1789418599">'
+            "</form>"
+        )
+        findings = scan_secrets(html)
+        assert not any(f.secret_type == "generic_password" for f in findings)
+
     def test_detects_database_url(self):
         html = '<!-- postgres://admin:secret@db.example.com:5432/mydb -->'
         findings = scan_secrets(html)
