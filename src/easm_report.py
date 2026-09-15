@@ -29,6 +29,7 @@ from .models import (
     RemediationItem,
     ReconArtifact,
     SecretFinding,
+    _fingerprint,
 )
 
 logger = logging.getLogger(__name__)
@@ -395,6 +396,17 @@ _HEADER_CONSEQUENCE: dict[str, str] = {
     "cache-control": "Sensitive responses may be cached by browsers or shared proxies and exposed to later users of the same device.",
 }
 
+# Headers that are defence-in-depth hardening only: their absence on a public
+# page is a recommendation, not a confirmed, score-affecting security issue.
+_HARDENING_ONLY_HEADERS: frozenset[str] = frozenset({"cache-control"})
+
+# Server header values set by shared platform/CDN infrastructure, not the
+# customer origin — so information-leak findings on them are platform-owned.
+_PLATFORM_SERVER_TOKENS: tuple[str, ...] = (
+    "cloudflare", "akamai", "fastly", "cloudfront", "amazons3", "amazon s3",
+    "vercel", "netlify", "sucuri", "imperva", "gws", "github.com",
+)
+
 
 def _classify_header_findings(
     result: DomainResult, platform: str, profile: PlatformProfile,
@@ -407,7 +419,27 @@ def _classify_header_findings(
     for h in headers.findings:
         if h.status == "missing":
             hdr_lower = h.header.lower()
-            if hdr_lower in profile.managed_headers:
+            if hdr_lower in _HARDENING_ONLY_HEADERS:
+                # e.g. Cache-Control on a public page: a recommendation, not a
+                # confirmed, score-affecting issue.
+                findings.append(PrioritizedFinding(
+                    id=f"missing_{hdr_lower.replace('-', '_')}",
+                    title=f"Missing {h.header}",
+                    category="security_headers",
+                    severity="info",
+                    classification=FindingClassification.hardening_recommendation,
+                    confidence="high",
+                    affects_risk_score=False,
+                    owner=FindingOwner.customer,
+                    why_it_matters=_HEADER_CONSEQUENCE.get(
+                        hdr_lower, f"{h.header} is a defence-in-depth hardening header."
+                    ),
+                    business_impact="Hardening recommendation — not a confirmed issue on public pages.",
+                    evidence=[f"{h.header} not present in response"],
+                    recommended_action=h.recommendation or f"Optionally add {h.header}.",
+                    source_field="security_headers",
+                ))
+            elif hdr_lower in profile.managed_headers:
                 findings.append(PrioritizedFinding(
                     id=f"missing_{hdr_lower.replace('-', '_')}",
                     title=f"Missing {h.header}",
@@ -440,19 +472,76 @@ def _classify_header_findings(
                     recommended_action=h.recommendation or f"Add {h.header} header to server configuration.",
                     source_field="security_headers",
                 ))
+        elif h.status == "weak":
+            # Present but weakly configured (e.g. HSTS short max-age, weak CSP).
+            # These were previously dropped — only "missing" was surfaced — so a
+            # genuine weakness never reached the report.
+            hdr_lower = h.header.lower()
+            if hdr_lower in _HARDENING_ONLY_HEADERS:
+                findings.append(PrioritizedFinding(
+                    id=f"weak_{hdr_lower.replace('-', '_')}",
+                    title=f"Weak {h.header} configuration",
+                    category="security_headers",
+                    severity="info",
+                    classification=FindingClassification.hardening_recommendation,
+                    confidence="high",
+                    affects_risk_score=False,
+                    owner=FindingOwner.customer,
+                    why_it_matters=h.recommendation or f"{h.header} is present but not hardened.",
+                    business_impact="Hardening recommendation — not a confirmed issue on public pages.",
+                    evidence=[f"{h.header}: {h.value}"],
+                    recommended_action=h.recommendation or f"Strengthen the {h.header} configuration.",
+                    source_field="security_headers",
+                ))
+            else:
+                findings.append(PrioritizedFinding(
+                    id=f"weak_{hdr_lower.replace('-', '_')}",
+                    title=f"Weak {h.header} configuration",
+                    category="security_headers",
+                    severity=h.severity,
+                    classification=FindingClassification.confirmed_issue,
+                    confidence="high",
+                    owner=FindingOwner.customer,
+                    why_it_matters=h.recommendation or _HEADER_CONSEQUENCE.get(
+                        hdr_lower, f"{h.header} is present but weakly configured."
+                    ),
+                    business_impact="Web security hygiene",
+                    evidence=[f"{h.header}: {h.value}"],
+                    recommended_action=h.recommendation or f"Strengthen the {h.header} configuration.",
+                    source_field="security_headers",
+                ))
         elif h.status == "present" and h.header.lower() in ("server", "x-powered-by"):
+            # A Server header set by a shared CDN/platform (e.g. "cloudflare") is
+            # platform infrastructure, not the customer origin — attribute it to
+            # the platform rather than the customer.
+            val_lower = (h.value or "").strip().lower()
+            is_platform = (
+                h.header.lower() == "server"
+                and any(tok in val_lower for tok in _PLATFORM_SERVER_TOKENS)
+            )
             findings.append(PrioritizedFinding(
                 id=f"info_leak_{h.header.lower().replace('-', '_')}",
                 title=f"Information leakage via {h.header}",
                 category="security_headers",
                 severity="info",
-                classification=FindingClassification.informational,
+                classification=FindingClassification.platform_behavior if is_platform
+                    else FindingClassification.informational,
                 confidence="high",
-                owner=FindingOwner.customer,
-                why_it_matters="Reveals server software, aiding attacker reconnaissance.",
-                business_impact="Minimal — aids targeted attacks",
+                affects_risk_score=False,
+                owner=FindingOwner.platform if is_platform else FindingOwner.customer,
+                platform_name=(h.value if is_platform else ""),
+                why_it_matters=(
+                    "This header is set by shared platform/CDN infrastructure, not "
+                    "the customer origin." if is_platform
+                    else "Reveals server software, aiding attacker reconnaissance."
+                ),
+                business_impact="Minimal — platform-controlled" if is_platform
+                    else "Minimal — aids targeted attacks",
                 evidence=[f"{h.header}: {h.value}"],
-                recommended_action=f"Remove or obscure the {h.header} header.",
+                recommended_action=(
+                    "No action — this value is controlled by the platform/CDN."
+                    if is_platform else f"Remove or obscure the {h.header} header."
+                ),
                 source_field="security_headers",
             ))
         elif h.status == "misconfigured" and h.header == "Access-Control-Allow-Origin":
@@ -1531,7 +1620,18 @@ _RECON_ARTIFACT_PATHS = frozenset({"/robots.txt", "/sitemap.xml", "/security.txt
 
 def _extract_recon_artifacts(result: DomainResult) -> list[ReconArtifact]:
     artifacts: list[ReconArtifact] = []
+    seen: set[str] = set()
+    # robots.txt / sitemap.xml are no longer probed as sensitive paths — source
+    # them from their dedicated parsed results so this section is unchanged.
+    if result.robots_txt and result.robots_txt.found:
+        artifacts.append(ReconArtifact(path="/robots.txt", status_code=200, note="Standard web artifact"))
+        seen.add("/robots.txt")
+    if result.sitemap and result.sitemap.found:
+        artifacts.append(ReconArtifact(path="/sitemap.xml", status_code=200, note="Standard web artifact"))
+        seen.add("/sitemap.xml")
     for p in result.sensitive_paths:
+        if p.path in seen:
+            continue
         if p.path in _RECON_ARTIFACT_PATHS or p.severity == "info":
             note = "Standard web artifact" if p.path in _RECON_ARTIFACT_PATHS else p.risk or ""
             artifacts.append(ReconArtifact(path=p.path, status_code=p.status_code, note=note))
@@ -1703,6 +1803,9 @@ def _classify_typosquatting_findings(result: DomainResult) -> list[PrioritizedFi
             evidence_quality="direct",   # registration is direct evidence…
             affects_risk_score=False,     # …but malicious use is unverified
             owner=FindingOwner.customer,
+            # id is a stable finding-type; the fingerprint must be unique per
+            # domain so distinct lookalikes don't collapse into one Xano record.
+            fingerprint=_fingerprint("easm", "typosquat_domains_found", cand.domain),
             why_it_matters=(
                 "Registered lookalike domain identified. Ownership and malicious "
                 "use have not been confirmed."
