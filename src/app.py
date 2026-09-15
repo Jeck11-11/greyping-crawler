@@ -168,7 +168,7 @@ async def _target_validation_handler(_request: Request, exc: TargetValidationErr
 def _extract_domain(url: str) -> str:
     """Return the bare domain from a URL."""
     parsed = urlparse(url)
-    return (parsed.hostname or url).lower().lstrip("www.")
+    return (parsed.hostname or url).lower().removeprefix("www.")
 
 
 
@@ -176,6 +176,22 @@ def _extract_domain(url: str) -> str:
 # Backwards-compatible aliases — existing callers / tests may import these.
 _normalise_target = normalise_target
 _fetch_landing_page = fetch_landing_page
+
+
+def _analyze_observed_headers(
+    headers: dict[str, str],
+    body: str,
+) -> SecurityHeadersResult:
+    """Analyze headers only when an HTTP response was actually observed.
+
+    The v1 landing-page helper intentionally returns empty values on transport
+    failure.  Treating that empty sentinel as a real response creates a false
+    set of "missing header" findings.  Keep the v1 JSON type unchanged while
+    representing an unassessed header module with its existing empty defaults.
+    """
+    if not headers and not body:
+        return SecurityHeadersResult()
+    return analyze_headers(headers)
 
 
 def _screenshot_succeeded(ss: ScreenshotResult) -> bool:
@@ -254,25 +270,21 @@ async def _scan_single_target(
         return_exceptions=True,
     )
 
+    scan_errors: list[str] = []
+
     # Nuclei is a separate scan — use /recon/nuclei endpoint directly.
     nuclei_result = NucleiResult(target=target)
 
-    # Handle crawl failure
+    # A crawl failure must not discard SSL, DNS, CT, RDAP, port, or other
+    # successful results from the same parallel phase.  Preserve those results
+    # and mark the target partial through the existing ``error`` field.
     if isinstance(crawl_result, Exception):
-        logger.exception("Crawl failed for %s", target)
-        failed = DomainResult(
-            target=target,
-            scan_started_at=started,
-            scan_finished_at=datetime.now(timezone.utc).isoformat(),
-            error=str(crawl_result),
-        )
-        failed.risk_assessment = RiskAssessmentGroup(
-            easm_report=build_easm_report(failed, scan_mode="full"),
-        )
-        fill_not_found(failed)
-        return failed
-
-    pages = crawl_result
+        crawl_error = str(crawl_result) or crawl_result.__class__.__name__
+        logger.warning("Crawl failed for %s: %s", target, crawl_error)
+        scan_errors.append(f"crawl failed: {crawl_error}")
+        pages: list[PageResult] = []
+    else:
+        pages = crawl_result
 
     # Process SSL result
     if isinstance(ssl_result, Exception):
@@ -283,10 +295,15 @@ async def _scan_single_target(
     if isinstance(landing_result, Exception):
         logger.warning("Landing page fetch failed for %s: %s", target, landing_result)
         resp_headers, resp_cookies, landing_html = {}, httpx.Cookies(), ""
+        scan_errors.append(
+            f"landing page fetch failed: {str(landing_result) or landing_result.__class__.__name__}"
+        )
     else:
         resp_headers, resp_cookies, landing_html = landing_result
+        if not resp_headers and not landing_html:
+            scan_errors.append("landing page fetch failed")
 
-    headers_result = analyze_headers(resp_headers)
+    headers_result = _analyze_observed_headers(resp_headers, landing_html)
     browser_cookies = rendered_cookies_result if isinstance(rendered_cookies_result, list) else []
     cookie_findings = analyze_cookies(resp_cookies, browser_cookies=browser_cookies)
 
@@ -812,6 +829,7 @@ async def _scan_single_target(
         target=target,
         scan_started_at=started,
         scan_finished_at=finished,
+        error="; ".join(scan_errors) or None,
         summary=domain_summary,
         ssl=ssl_result,
         dns=dns_group,
@@ -972,7 +990,7 @@ async def board_scan(request: BoardScanRequest) -> BoardScanAck:
     """Start an async board scan. Returns immediately with a scan_id to poll."""
     scan_id = uuid.uuid4().hex
     started = datetime.now(timezone.utc).isoformat()
-    domain = request.root_domain.strip().lower().lstrip("www.")
+    domain = request.root_domain.strip().lower().removeprefix("www.")
 
     job = BoardJobStatus(scan_id=scan_id, status="pending", root_domain=domain, started_at=started)
     _BOARD_JOBS[scan_id] = job
@@ -1393,7 +1411,7 @@ async def _lighttouch_single_target(target: str, timeout: int, *, company_size: 
     except Exception as exc:
         logger.warning("Supply chain analysis failed for %s: %s", target, exc)
 
-    headers_result = analyze_headers(resp_headers)
+    headers_result = _analyze_observed_headers(resp_headers, html)
     cookie_findings = analyze_cookies(resp_cookies)
 
     # Enrich SSL result with HSTS and final URL

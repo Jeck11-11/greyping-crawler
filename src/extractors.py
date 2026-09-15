@@ -240,7 +240,7 @@ def extract_contacts(soup: BeautifulSoup, raw_html: str) -> ContactInfo:
         href = a_tag["href"]
         try:
             parsed = urlparse(href)
-            host = (parsed.hostname or "").lower().lstrip("www.")
+            host = (parsed.hostname or "").lower().removeprefix("www.")
             if host in _SOCIAL_DOMAINS and parsed.path not in ("", "/"):
                 socials.add(href)
         except Exception:
@@ -259,7 +259,7 @@ def extract_links(
 ) -> list[LinkInfo]:
     """Return all links found on the page, classified as internal or external."""
     parsed_base = urlparse(page_url)
-    base_domain = (parsed_base.hostname or "").lower().lstrip("www.")
+    base_domain = (parsed_base.hostname or "").lower().removeprefix("www.")
     links: list[LinkInfo] = []
     seen: set[str] = set()
 
@@ -281,7 +281,7 @@ def extract_links(
         if parsed.scheme not in ("http", "https"):
             continue
 
-        link_host = (parsed.hostname or "").lower().lstrip("www.")
+        link_host = (parsed.hostname or "").lower().removeprefix("www.")
         link_type = "internal" if link_host == base_domain else "external"
         anchor = tag.get_text(strip=True)[:200]
         links.append(LinkInfo(url=absolute, anchor_text=anchor, link_type=link_type))

@@ -111,6 +111,22 @@ async def test_query_ct_logs_dedupes_subdomains_and_collects_issuers():
 
 
 @pytest.mark.asyncio
+async def test_query_ct_logs_rejects_false_suffix_domain_matches():
+    fake_data = [{
+        "name_value": "api.example.com\nevilexample.com",
+        "common_name": "alsoevilexample.com",
+        "issuer_name": "Example CA",
+    }]
+    client = _patch_client(_fake_response(json_data=fake_data))
+    with patch("src.passive_intel.httpx.AsyncClient", return_value=client):
+        result = await query_ct_logs("example.com")
+
+    assert "api.example.com" in result.subdomains
+    assert "evilexample.com" not in result.subdomains
+    assert "alsoevilexample.com" not in result.subdomains
+
+
+@pytest.mark.asyncio
 async def test_query_ct_logs_handles_http_error():
     client = _patch_client(_fake_response(status_code=500, json_data=None))
     with patch("src.passive_intel.httpx.AsyncClient", return_value=client):

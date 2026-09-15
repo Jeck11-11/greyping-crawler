@@ -6,7 +6,8 @@ from unittest.mock import AsyncMock, patch, MagicMock
 import httpx
 import pytest
 
-from src.crawler import _fetch_static, crawl_page
+from src.crawler import _crawl_domain_python, _fetch_static, crawl_page
+from src.models import LinkInfo, PageResult
 
 
 class TestFetchStaticRedirectChain:
@@ -28,6 +29,25 @@ class TestFetchStaticRedirectChain:
             html, status, chain = await _fetch_static("https://example.com")
             assert chain == []
             assert status == 200
+
+    @pytest.mark.asyncio
+    async def test_reuses_supplied_http_client(self):
+        mock_resp = MagicMock()
+        mock_resp.text = "<html>shared</html>"
+        mock_resp.content = b"<html>shared</html>"
+        mock_resp.status_code = 200
+        mock_resp.history = []
+        shared_client = AsyncMock()
+        shared_client.get.return_value = mock_resp
+
+        with patch("src.crawler.httpx.AsyncClient") as mock_client_cls:
+            html, status, chain = await _fetch_static(
+                "https://example.com", client=shared_client,
+            )
+
+        mock_client_cls.assert_not_called()
+        shared_client.get.assert_awaited_once()
+        assert (html, status, chain) == ("<html>shared</html>", 200, [])
 
     @pytest.mark.asyncio
     async def test_redirects_captured_in_chain(self):
@@ -151,3 +171,82 @@ class TestCrawlPageRedirectChain:
                 page = await crawl_page("http://example.com", render_js=False)
                 assert len(page.redirect_chain) == 1
                 assert "http://example.com" in page.redirect_chain[0]
+
+
+class TestConcurrentDomainCrawl:
+    @pytest.mark.asyncio
+    async def test_fetches_frontier_with_bounded_concurrency_and_dedupes_fragments(self):
+        active = 0
+        peak = 0
+
+        async def fake_crawl_page(url: str, **_kwargs) -> PageResult:
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+            links = []
+            if url == "https://example.com":
+                links = [
+                    LinkInfo(url="https://example.com/a#one", link_type="internal"),
+                    LinkInfo(url="https://example.com/a#two", link_type="internal"),
+                    LinkInfo(url="https://example.com/b", link_type="internal"),
+                    LinkInfo(url="https://example.com/c", link_type="internal"),
+                ]
+            return PageResult(url=url, status_code=200, links=links)
+
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        with patch("src.crawler._check_playwright", new_callable=AsyncMock, return_value=False), \
+             patch("src.crawler.CRAWL_CONCURRENCY", 2), \
+             patch("src.crawler.httpx.AsyncClient", return_value=mock_client), \
+             patch("src.crawler.crawl_page", side_effect=fake_crawl_page):
+            pages = await _crawl_domain_python(
+                "https://example.com", render_js=False, max_depth=1,
+            )
+
+        assert peak == 2
+        assert [page.url for page in pages] == [
+            "https://example.com",
+            "https://example.com/a",
+            "https://example.com/b",
+            "https://example.com/c",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_reuses_one_browser_context_for_rendered_pages(self):
+        context = AsyncMock()
+        browser = AsyncMock()
+        browser.new_context.return_value = context
+        playwright = MagicMock()
+        playwright.chromium.launch = AsyncMock(return_value=browser)
+        playwright_manager = AsyncMock()
+        playwright_manager.__aenter__ = AsyncMock(return_value=playwright)
+        playwright_manager.__aexit__ = AsyncMock(return_value=False)
+
+        http_client = AsyncMock()
+        http_client.__aenter__ = AsyncMock(return_value=http_client)
+        http_client.__aexit__ = AsyncMock(return_value=False)
+        seen_contexts = []
+
+        async def fake_crawl_page(url: str, **kwargs) -> PageResult:
+            seen_contexts.append(kwargs.get("_browser_context"))
+            links = (
+                [LinkInfo(url="https://example.com/about", link_type="internal")]
+                if url == "https://example.com" else []
+            )
+            return PageResult(url=url, status_code=200, links=links)
+
+        with patch("src.crawler._check_playwright", new_callable=AsyncMock, return_value=True), \
+             patch("src.crawler.httpx.AsyncClient", return_value=http_client), \
+             patch("playwright.async_api.async_playwright", return_value=playwright_manager), \
+             patch("src.crawler.crawl_page", side_effect=fake_crawl_page):
+            pages = await _crawl_domain_python(
+                "https://example.com", render_js=True, max_depth=1,
+            )
+
+        assert len(pages) == 2
+        playwright.chromium.launch.assert_awaited_once()
+        browser.new_context.assert_awaited_once()
+        assert seen_contexts == [context, context]

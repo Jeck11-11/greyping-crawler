@@ -31,6 +31,9 @@ class TestConfigDefaults:
     def test_max_pages_default(self):
         assert config.MAX_PAGES == 50
 
+    def test_crawl_concurrency_default(self):
+        assert config.CRAWL_CONCURRENCY == 5
+
     def test_max_scripts_default(self):
         assert config.MAX_SCRIPTS == 50
 

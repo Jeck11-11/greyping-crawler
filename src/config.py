@@ -18,6 +18,7 @@ DNS_LIFETIME = int(os.getenv("DNS_LIFETIME", "8"))
 
 # Crawler limits
 MAX_PAGES = int(os.getenv("MAX_PAGES", "50"))
+CRAWL_CONCURRENCY = int(os.getenv("CRAWL_CONCURRENCY", "5"))
 MAX_SCRIPTS = int(os.getenv("MAX_SCRIPTS", "50"))
 PATH_CONCURRENCY = int(os.getenv("PATH_CONCURRENCY", "10"))
 BREACH_EMAIL_CAP = int(os.getenv("BREACH_EMAIL_CAP", "10"))

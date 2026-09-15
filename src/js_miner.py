@@ -140,11 +140,13 @@ async def mine_javascript(
 
     # Only follow scripts on the same registrable hostname (skip huge third-
     # party CDNs — they rarely leak useful endpoints of the target).
-    target_host = (urlparse(target).hostname or "").lower().lstrip("www.")
-    own_scripts = [
-        u for u in script_urls
-        if (urlparse(u).hostname or "").lower().lstrip("www.").endswith(target_host)
-    ] or script_urls  # fall back to all if none match
+    target_host = (urlparse(target).hostname or "").lower().removeprefix("www.")
+    own_scripts = []
+    for url in script_urls:
+        host = (urlparse(url).hostname or "").lower().removeprefix("www.")
+        if host == target_host or host.endswith("." + target_host):
+            own_scripts.append(url)
+    own_scripts = own_scripts or script_urls  # fall back to all if none match
 
     api_endpoints: set[str] = set()
     internal_hosts: set[str] = set()
