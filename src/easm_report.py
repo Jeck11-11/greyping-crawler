@@ -2607,13 +2607,11 @@ def build_easm_report(
 
         # Apply compliance framework tags
         for finding in sorted_findings:
-            if (
-                finding.category == "secrets"
-                and finding.classification != FindingClassification.confirmed_issue
-            ):
-                finding.compliance = []
-            else:
-                finding.compliance = _resolve_compliance(finding.id)
+            finding.compliance = (
+                _resolve_compliance(finding.id)
+                if finding.classification == FindingClassification.confirmed_issue
+                else []
+            )
 
         # Build compliance summary counts
         framework_counts: dict[str, int] = {}

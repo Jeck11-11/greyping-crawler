@@ -24,3 +24,11 @@ jobs:
         run: python -m compileall -q src tests
       - name: Run test suite
         run: python -m pytest -q
+
+  docker-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build production image
+        run: docker build --tag greyping-crawler:test .
