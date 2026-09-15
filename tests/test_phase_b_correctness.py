@@ -113,6 +113,22 @@ class TestTyposquatCandidate:
         assert "not been confirmed" in f.why_it_matters.lower()
         assert "takedown" not in f.recommended_action.lower() or "confirmed" in f.recommended_action.lower()
 
+    def test_each_registered_lookalike_has_a_unique_fingerprint(self):
+        result = DomainResult(
+            target="zirona.ie",
+            typosquatting=TyposquattingResult(
+                domain="zirona.ie",
+                registered_candidates=[
+                    TyposquatCandidate(domain="zirona.com", technique="tld_swap"),
+                    TyposquatCandidate(domain="zirona.org", technique="tld_swap"),
+                    TyposquatCandidate(domain="sirona.ie", technique="homoglyph"),
+                ],
+            ),
+        )
+        findings = _classify_typosquatting_findings(result)
+        assert len(findings) == 3
+        assert len({finding.fingerprint for finding in findings}) == 3
+
 
 # --------------------------------------------------------------------------
 # Test 10 — Privacy indicators, no confirmed GDPR violation

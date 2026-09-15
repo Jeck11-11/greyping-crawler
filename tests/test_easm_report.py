@@ -113,6 +113,80 @@ class TestHeaderClassification:
         assert hsts[0].classification == FindingClassification.confirmed_issue
         assert hsts[0].owner == FindingOwner.customer
 
+    def test_weak_hsts_is_preserved_as_confirmed_direct_evidence(self):
+        result = DomainResult(
+            target="https://example.com",
+            security=SecurityGroup(headers=SecurityHeadersResult(
+                grade="D", score=59,
+                findings=[HeaderFinding(
+                    header="Strict-Transport-Security",
+                    status="weak",
+                    value="max-age=15768000;includeSubdomains",
+                    recommendation=(
+                        "HSTS max-age is 15768000s (182d) — recommended minimum "
+                        "is 31536000s (1 year). Add includeSubDomains for full coverage."
+                    ),
+                    severity="medium",
+                )],
+            )),
+        )
+        report = build_easm_report(result, scan_mode="full")
+        hsts = next(
+            f for f in report.prioritized_findings
+            if f.id == "weak_strict_transport_security"
+        )
+        assert hsts.classification == FindingClassification.confirmed_issue
+        assert hsts.evidence_quality == "direct"
+        assert hsts.affects_risk_score is True
+        assert "add includesubdomains" not in hsts.recommended_action.lower()
+        assert hsts.compliance
+
+    def test_public_cache_control_observation_is_not_confirmed_or_scored(self):
+        result = DomainResult(
+            target="https://example.com",
+            security=SecurityGroup(headers=SecurityHeadersResult(
+                grade="A", score=100,
+                findings=[HeaderFinding(
+                    header="Cache-Control",
+                    status="missing",
+                    recommendation="Review caching on sensitive responses.",
+                    severity="info",
+                )],
+            )),
+        )
+        report = build_easm_report(result, scan_mode="full")
+        cache = next(
+            f for f in report.prioritized_findings
+            if f.id == "missing_cache_control"
+        )
+        assert cache.classification == FindingClassification.potential_issue
+        assert cache.evidence_quality == "weak_inference"
+        assert cache.affects_risk_score is False
+        assert cache.compliance == []
+        assert "public content may remain cacheable" in cache.recommended_action.lower()
+
+    def test_cloudflare_server_header_is_platform_behavior(self):
+        result = DomainResult(
+            target="https://example.com",
+            security=SecurityGroup(headers=SecurityHeadersResult(
+                grade="A", score=100,
+                findings=[HeaderFinding(
+                    header="Server", status="present", value="cloudflare",
+                    severity="info",
+                )],
+            )),
+        )
+        report = build_easm_report(result, scan_mode="full")
+        server = next(
+            f for f in report.prioritized_findings
+            if f.id == "info_leak_server"
+        )
+        assert server.classification == FindingClassification.platform_behavior
+        assert server.owner == FindingOwner.platform
+        assert server.platform_name == "Cloudflare"
+        assert server.affects_risk_score is False
+        assert server.compliance == []
+
 
     @patch("src.easm_report._classify_ssl_findings", side_effect=RuntimeError("boom"))
     def test_classifier_failure_does_not_empty_entire_report(self, _mock_ssl):

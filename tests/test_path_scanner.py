@@ -4,7 +4,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from src.path_scanner import scan_sensitive_paths
+from src.models import SensitivePathFinding
+from src.path_scanner import count_sensitive_exposures, scan_sensitive_paths
 
 
 class _FakeResponse:
@@ -72,7 +73,6 @@ class TestScanSensitivePaths:
             findings = await scan_sensitive_paths("https://example.com", timeout=5)
 
         assert len(findings) == 0
-
     @pytest.mark.asyncio
     async def test_403_not_reported(self):
         """A 403 no longer counts as the path existing (WAF/CDN default)."""
@@ -94,7 +94,6 @@ class TestScanSensitivePaths:
             findings = await scan_sensitive_paths("https://example.com", timeout=5)
 
         assert len(findings) == 0
-
     @pytest.mark.asyncio
     async def test_empty_200_not_reported(self):
         """A 0-byte 200 (soft-404 / placeholder) is not a real exposed file."""
@@ -120,7 +119,6 @@ class TestScanSensitivePaths:
             findings = await scan_sensitive_paths("https://example.com", timeout=5)
 
         assert len(findings) == 0
-
     @pytest.mark.asyncio
     async def test_catch_all_server_skipped(self):
         """A server returning 200 for nonexistent paths is skipped entirely."""
@@ -167,3 +165,14 @@ class TestScanSensitivePaths:
             findings = await scan_sensitive_paths("https://example.com", timeout=5)
 
         assert len(findings) == 0
+
+
+class TestSensitiveExposureCount:
+    def test_excludes_standard_and_policy_pages(self):
+        findings = [
+            SensitivePathFinding(path="/robots.txt", severity="info"),
+            SensitivePathFinding(path="/sitemap.xml", severity="info"),
+            SensitivePathFinding(path="/privacy-policy", severity="info"),
+            SensitivePathFinding(path="/.env", severity="critical"),
+        ]
+        assert count_sensitive_exposures(findings) == 1

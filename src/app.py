@@ -116,7 +116,7 @@ from .passive_intel import (
     query_rdap,
     query_wayback,
 )
-from .path_scanner import scan_sensitive_paths
+from .path_scanner import count_sensitive_exposures, scan_sensitive_paths
 from .robots_sitemap import fetch_and_parse_robots_sitemap
 from .routers import content as content_router
 from .routers import discovery as discovery_router
@@ -778,7 +778,7 @@ async def _scan_single_target(
         security_headers_grade=headers_result.grade,
         ssl_grade=ssl_result.grade,
         cookie_issues=cookie_issues_count,
-        sensitive_paths_found=len(paths_result),
+        sensitive_paths_found=count_sensitive_exposures(paths_result),
         ioc_findings=len(all_iocs),
         technologies_found=len(tech_findings),
         js_endpoints_found=js_endpoints_count,

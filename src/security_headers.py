@@ -66,6 +66,13 @@ _LEAK_HEADERS: list[tuple[str, str]] = [
 
 _HSTS_MIN_MAX_AGE = 31536000  # 1 year in seconds
 
+# Generic edge-provider values identify the reverse proxy, not customer-owned
+# server software.  Reporting these as software leakage creates a false action
+# item that the site owner cannot remediate at the origin.
+_SHARED_EDGE_SERVER_MARKERS: tuple[tuple[str, str], ...] = (
+    ("cloudflare", "Cloudflare"),
+)
+
 _CSP_UNSAFE_DIRECTIVES = re.compile(
     r"'unsafe-inline'|'unsafe-eval'", re.IGNORECASE,
 )
@@ -88,12 +95,23 @@ def _check_hsts(value: str) -> tuple[str, str]:
     if match:
         age = int(match.group(1))
         if age < _HSTS_MIN_MAX_AGE:
-            return "weak", (
+            recommendation = (
                 f"HSTS max-age is {age}s ({age // 86400}d) — "
-                f"recommended minimum is {_HSTS_MIN_MAX_AGE}s (1 year). "
-                "Add includeSubDomains for full coverage."
+                f"recommended minimum is {_HSTS_MIN_MAX_AGE}s (1 year)."
             )
+            if "includesubdomains" not in value.lower():
+                recommendation += " Add includeSubDomains for full coverage."
+            return "weak", recommendation
     return "present", ""
+
+
+def shared_edge_provider_from_server(value: str) -> str:
+    """Return a provider name for a generic shared-edge Server value."""
+    normalised = value.strip().lower()
+    for marker, provider in _SHARED_EDGE_SERVER_MARKERS:
+        if marker in normalised:
+            return provider
+    return ""
 
 
 def _check_csp(value: str) -> tuple[str, str]:
@@ -169,16 +187,24 @@ def analyze_headers(headers: dict[str, str]) -> SecurityHeadersResult:
     for header, recommendation in _LEAK_HEADERS:
         value = lower.get(header.lower(), "")
         if value:
+            edge_provider = (
+                shared_edge_provider_from_server(value)
+                if header == "Server" else ""
+            )
             findings.append(
                 HeaderFinding(
                     header=header,
                     status="present",
                     value=value,
-                    recommendation=recommendation,
-                    severity="low",
+                    recommendation=(
+                        f"No action required — this is the generic {edge_provider} edge header."
+                        if edge_provider else recommendation
+                    ),
+                    severity="info" if edge_provider else "low",
                 )
             )
-            score -= 3  # small penalty for information leakage
+            if not edge_provider:
+                score -= 3  # small penalty for customer-owned information leakage
 
     # CORS comprehensive analysis
     cors_origin = lower.get("access-control-allow-origin", "")
@@ -293,7 +319,10 @@ def analyze_headers(headers: dict[str, str]) -> SecurityHeadersResult:
         issues=cors_issues,
     )
 
-    # Cache-Control on sensitive pages
+    # This request is the public landing page.  Missing/private caching policy
+    # only becomes a security issue on an authenticated or sensitive response,
+    # which this scanner has not established.  Preserve the observation without
+    # lowering the header score or claiming a confirmed vulnerability.
     cache_control = lower.get("cache-control", "")
     if not cache_control or ("no-store" not in cache_control.lower() and "private" not in cache_control.lower()):
         findings.append(
@@ -301,11 +330,14 @@ def analyze_headers(headers: dict[str, str]) -> SecurityHeadersResult:
                 header="Cache-Control",
                 status="missing" if not cache_control else "weak",
                 value=cache_control,
-                recommendation="Add 'Cache-Control: no-store' or 'private' to prevent caching of sensitive responses.",
-                severity="low",
+                recommendation=(
+                    "Review caching on authenticated or sensitive responses and use "
+                    "'Cache-Control: no-store' or 'private' where required. Public "
+                    "content may remain cacheable."
+                ),
+                severity="info",
             )
         )
-        score -= 3
 
     score = max(0, score)
 

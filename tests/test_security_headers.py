@@ -79,6 +79,20 @@ class TestAnalyzeHeaders:
         assert len(hsts) == 1
         assert hsts[0].status == "weak"
         assert "3600" in hsts[0].recommendation
+        assert "add includesubdomains" in hsts[0].recommendation.lower()
+
+    def test_weak_hsts_does_not_recommend_existing_include_subdomains(self):
+        headers = {
+            "Strict-Transport-Security": "max-age=15768000;includeSubdomains",
+        }
+        result = analyze_headers(headers)
+        hsts = next(
+            f for f in result.findings
+            if f.header == "Strict-Transport-Security"
+        )
+        assert hsts.status == "weak"
+        assert "15768000" in hsts.recommendation
+        assert "add includesubdomains" not in hsts.recommendation.lower()
 
     def test_weak_csp_unsafe_inline(self):
         headers = {"Content-Security-Policy": "default-src 'self' 'unsafe-inline'"}
@@ -115,7 +129,8 @@ class TestAnalyzeHeaders:
         cache = [f for f in result.findings if f.header == "Cache-Control"]
         assert len(cache) == 1
         assert cache[0].status == "missing"
-        assert cache[0].severity == "low"
+        assert cache[0].severity == "info"
+        assert "public content may remain cacheable" in cache[0].recommendation.lower()
 
     def test_cache_control_weak(self):
         headers = {"Cache-Control": "max-age=3600"}
@@ -135,6 +150,14 @@ class TestAnalyzeHeaders:
         result = analyze_headers(headers)
         cache = [f for f in result.findings if f.header == "Cache-Control"]
         assert len(cache) == 0
+
+    def test_cloudflare_server_header_is_not_scored_as_customer_leak(self):
+        baseline = analyze_headers({})
+        result = analyze_headers({"Server": "cloudflare"})
+        server = next(f for f in result.findings if f.header == "Server")
+        assert server.severity == "info"
+        assert "no action required" in server.recommendation.lower()
+        assert result.score == baseline.score
 
 
 class TestCORSAnalysis:

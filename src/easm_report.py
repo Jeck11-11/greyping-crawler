@@ -48,6 +48,10 @@ _COMPLIANCE_MAP: dict[str, list[str]] = {
         "PCI-DSS 4.1",
         "ISO 27001 A.14.1.2",
     ],
+    "weak_strict_transport_security": [
+        "PCI-DSS 4.1",
+        "ISO 27001 A.14.1.2",
+    ],
     "missing_content_security_policy": [
         "PCI-DSS 6.5.7",
         "ISO 27001 A.14.1.2",
@@ -405,8 +409,47 @@ def _classify_header_findings(
         return findings
 
     for h in headers.findings:
+        hdr_lower = h.header.lower()
+
+        # A landing-page Cache-Control observation has no sensitivity context.
+        # Retain the evidence for review, but do not score it or describe it as
+        # a confirmed vulnerability.
+        if hdr_lower == "cache-control" and h.status in ("missing", "weak"):
+            cache_recommendation = (
+                "Review caching on authenticated or sensitive responses and use "
+                "'Cache-Control: no-store' or 'private' where required. Public "
+                "content may remain cacheable."
+            )
+            findings.append(PrioritizedFinding(
+                id="missing_cache_control" if h.status == "missing" else "weak_cache_control",
+                title=(
+                    "Cache-Control not set on assessed response"
+                    if h.status == "missing" else
+                    "Cache-Control policy requires context review"
+                ),
+                category="security_headers",
+                severity="info",
+                classification=FindingClassification.potential_issue,
+                confidence="low",
+                evidence_quality="weak_inference",
+                affects_risk_score=False,
+                owner=FindingOwner.customer,
+                why_it_matters=(
+                    "Caching can expose sensitive responses, but the assessed public "
+                    "landing page does not establish that sensitive data is present."
+                ),
+                business_impact="Unknown without authenticated or sensitive-response evidence",
+                evidence=[
+                    f"Cache-Control: {h.value}" if h.value
+                    else "Cache-Control not present on the assessed public response",
+                    "response_sensitivity=not_assessed",
+                ],
+                recommended_action=cache_recommendation,
+                source_field="security_headers",
+            ))
+            continue
+
         if h.status == "missing":
-            hdr_lower = h.header.lower()
             if hdr_lower in profile.managed_headers:
                 findings.append(PrioritizedFinding(
                     id=f"missing_{hdr_lower.replace('-', '_')}",
@@ -440,19 +483,63 @@ def _classify_header_findings(
                     recommended_action=h.recommendation or f"Add {h.header} header to server configuration.",
                     source_field="security_headers",
                 ))
-        elif h.status == "present" and h.header.lower() in ("server", "x-powered-by"):
+        elif h.status == "weak" and hdr_lower == "strict-transport-security":
+            # Re-evaluate from the raw value so reports rebuilt from older stored
+            # HeaderFinding objects do not retain stale recommendation wording.
+            from .security_headers import _check_hsts
+
+            _, hsts_recommendation = _check_hsts(h.value)
             findings.append(PrioritizedFinding(
-                id=f"info_leak_{h.header.lower().replace('-', '_')}",
+                id="weak_strict_transport_security",
+                title="Weak Strict-Transport-Security policy",
+                category="security_headers",
+                severity=h.severity,
+                classification=FindingClassification.confirmed_issue,
+                confidence="high",
+                evidence_quality="direct",
+                affects_risk_score=True,
+                owner=FindingOwner.customer,
+                why_it_matters=_HEADER_CONSEQUENCE[hdr_lower],
+                business_impact="Reduced protection against HTTPS downgrade attacks",
+                evidence=[f"Strict-Transport-Security: {h.value}"],
+                recommended_action=hsts_recommendation or h.recommendation,
+                source_field="security_headers",
+            ))
+        elif h.status == "present" and hdr_lower in ("server", "x-powered-by"):
+            from .security_headers import shared_edge_provider_from_server
+
+            edge_provider = (
+                shared_edge_provider_from_server(h.value)
+                if hdr_lower == "server" else ""
+            )
+            findings.append(PrioritizedFinding(
+                id=f"info_leak_{hdr_lower.replace('-', '_')}",
                 title=f"Information leakage via {h.header}",
                 category="security_headers",
                 severity="info",
-                classification=FindingClassification.informational,
+                classification=(
+                    FindingClassification.platform_behavior
+                    if edge_provider else FindingClassification.informational
+                ),
                 confidence="high",
-                owner=FindingOwner.customer,
-                why_it_matters="Reveals server software, aiding attacker reconnaissance.",
-                business_impact="Minimal — aids targeted attacks",
+                affects_risk_score=False,
+                owner=FindingOwner.platform if edge_provider else FindingOwner.customer,
+                platform_name=edge_provider,
+                why_it_matters=(
+                    f"This is a generic {edge_provider} reverse-proxy header, not "
+                    "customer-origin software disclosure."
+                    if edge_provider else
+                    "Reveals server software, aiding attacker reconnaissance."
+                ),
+                business_impact=(
+                    "None — shared edge-provider identification"
+                    if edge_provider else "Minimal — aids targeted attacks"
+                ),
                 evidence=[f"{h.header}: {h.value}"],
-                recommended_action=f"Remove or obscure the {h.header} header.",
+                recommended_action=(
+                    "No action required — do not change the origin based on this edge header."
+                    if edge_provider else f"Remove or obscure the {h.header} header."
+                ),
                 source_field="security_headers",
             ))
         elif h.status == "misconfigured" and h.header == "Access-Control-Allow-Origin":
@@ -1719,6 +1806,7 @@ def _classify_typosquatting_findings(result: DomainResult) -> list[PrioritizedFi
                 "register defensively only if brand risk is confirmed."
             ),
             source_field="typosquatting",
+            fingerprint=cand.fingerprint,
         ))
     return findings
 

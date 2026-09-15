@@ -104,6 +104,14 @@ _SOFT_404_PROBES = (
 )
 
 
+def count_sensitive_exposures(findings: list[SensitivePathFinding]) -> int:
+    """Count actual sensitive exposures, excluding standard/info web pages."""
+    return sum(
+        1 for finding in findings
+        if finding.severity.lower() not in {"info", "informational"}
+    )
+
+
 async def _is_catch_all(client: httpx.AsyncClient, base_url: str) -> bool:
     """Detect a server that returns 200 for paths that should not exist."""
     for probe in _SOFT_404_PROBES:
