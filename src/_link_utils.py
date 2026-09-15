@@ -16,7 +16,7 @@ MAX_FOUND_ON = 5
 def normalise_ext_url(url: str) -> str:
     """Normalise an external URL for deduplication (strip trailing slash, www)."""
     parsed = urlparse(url)
-    host = (parsed.hostname or "").lower().lstrip("www.")
+    host = (parsed.hostname or "").lower().removeprefix("www.")
     path = parsed.path.rstrip("/") or ""
     qs = f"?{parsed.query}" if parsed.query else ""
     frag = f"#{parsed.fragment}" if parsed.fragment else ""
@@ -26,7 +26,7 @@ def normalise_ext_url(url: str) -> str:
 def is_social_url(url: str) -> bool:
     """Return True if the URL points to a known social media platform."""
     try:
-        host = (urlparse(url).hostname or "").lower().lstrip("www.")
+        host = (urlparse(url).hostname or "").lower().removeprefix("www.")
         return host in _SOCIAL_HOSTS
     except Exception:
         return False

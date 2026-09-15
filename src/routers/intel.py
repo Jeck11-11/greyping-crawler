@@ -29,7 +29,7 @@ router = APIRouter(prefix="/recon", tags=["intel"])
 
 def _domain_of(target: str) -> str:
     parsed = urlparse(target)
-    return (parsed.hostname or target).lower().lstrip("www.")
+    return (parsed.hostname or target).lower().removeprefix("www.")
 
 
 @router.post("/breaches", response_model=list[BreachReconResult])

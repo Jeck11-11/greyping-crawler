@@ -170,7 +170,7 @@ async def recon_takeover(request: ReconRequest) -> list[SubdomainTakeoverResult]
 
     async def _one(target: str) -> SubdomainTakeoverResult:
         hostname = urlparse(target).hostname or target
-        domain = hostname.lstrip("www.")
+        domain = hostname.removeprefix("www.")
         try:
             return await scan_subdomain_takeover(domain)
         except Exception as exc:
@@ -195,7 +195,7 @@ async def recon_subdomains(request: ReconRequest) -> list[SubdomainEnumResult]:
 
     async def _one(target: str) -> SubdomainEnumResult:
         hostname = urlparse(target).hostname or target
-        domain = hostname.lstrip("www.")
+        domain = hostname.removeprefix("www.")
         try:
             ct_result = None
             try:
@@ -235,7 +235,7 @@ async def recon_cloud_assets(request: ReconRequest) -> list[CloudAssetResult]:
 
     async def _one(target: str) -> CloudAssetResult:
         hostname = urlparse(target).hostname or target
-        domain = hostname.lstrip("www.")
+        domain = hostname.removeprefix("www.")
         try:
             return await discover_cloud_assets(domain)
         except Exception as exc:
@@ -255,7 +255,7 @@ async def recon_typosquatting(request: ReconRequest) -> list[TyposquattingResult
 
     async def _one(target: str) -> TyposquattingResult:
         hostname = urlparse(target).hostname or target
-        domain = hostname.lstrip("www.")
+        domain = hostname.removeprefix("www.")
         try:
             return await check_typosquatting(domain, timeout=request.timeout)
         except Exception as exc:
@@ -275,7 +275,7 @@ async def recon_privacy(request: ReconRequest) -> list[PrivacyComplianceResult]:
 
     async def _one(target: str) -> PrivacyComplianceResult:
         hostname = urlparse(target).hostname or target
-        domain = hostname.lstrip("www.")
+        domain = hostname.removeprefix("www.")
         try:
             headers, cookies, html = await fetch_landing_page_full(
                 target, timeout=request.timeout,

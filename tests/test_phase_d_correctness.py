@@ -59,9 +59,10 @@ class TestComplianceNotAssessed:
     def test_readiness_excludes_not_assessed(self):
         postures = _compute_compliance_posture([])
         gdpr = next(p for p in postures if p.framework == "GDPR")
-        # GDPR has 1 observable (Art.32) + 2 organisational => tested==1
-        assert gdpr.controls_tested == 1
-        assert gdpr.controls_not_tested == 2
+        # Art.32 needs explicit assessment evidence; Art.33/34 always require
+        # organisational evidence.
+        assert gdpr.controls_tested == 0
+        assert gdpr.controls_not_tested == 3
 
 
 # --------------------------------------------------------------------------
@@ -114,8 +115,9 @@ class TestScoringConsistency:
             security=SecurityGroup(),
         )
         report = build_easm_report(result)
-        # Every EASM report exposes tier + traceability that agree with the grade.
-        assert report.risk_tier in ("low", "moderate", "high", "critical")
+        # Unassessed evidence must not be converted into a low-risk tier.
+        assert report.overall_grade == ""
+        assert report.risk_tier == ""
         assert isinstance(report.score_inputs, list)
         assert isinstance(report.excluded_inputs, list)
 

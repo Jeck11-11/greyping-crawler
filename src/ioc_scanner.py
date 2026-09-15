@@ -40,7 +40,7 @@ def _check_cryptominers(soup: BeautifulSoup, html: str) -> list[IoCFinding]:
     for tag in soup.find_all("script", src=True):
         src: str = tag["src"]
         try:
-            host = (urlparse(src).hostname or "").lower().lstrip("www.")
+            host = (urlparse(src).hostname or "").lower().removeprefix("www.")
         except Exception:
             continue
         if host in _MINER_DOMAINS:
@@ -115,7 +115,7 @@ def _check_hidden_iframes(soup: BeautifulSoup, page_domain: str) -> list[IoCFind
             continue
 
         try:
-            iframe_host = (urlparse(src).hostname or "").lower().lstrip("www.")
+            iframe_host = (urlparse(src).hostname or "").lower().removeprefix("www.")
         except Exception:
             continue
 
@@ -256,7 +256,7 @@ def _check_seo_spam(soup: BeautifulSoup, page_domain: str) -> list[IoCFinding]:
         for a in tag.find_all("a", href=True):
             href = a["href"]
             try:
-                host = (urlparse(href).hostname or "").lower().lstrip("www.")
+                host = (urlparse(href).hostname or "").lower().removeprefix("www.")
             except Exception:
                 continue
             if host and host != page_domain:
@@ -306,7 +306,7 @@ def _check_credential_harvesting(soup: BeautifulSoup, page_domain: str) -> list[
             continue  # relative or same-page – probably legitimate
 
         try:
-            action_host = (urlparse(action).hostname or "").lower().lstrip("www.")
+            action_host = (urlparse(action).hostname or "").lower().removeprefix("www.")
         except Exception:
             continue
 
@@ -395,7 +395,7 @@ def _check_suspicious_scripts(soup: BeautifulSoup, page_domain: str) -> list[IoC
         src: str = tag["src"]
         try:
             parsed = urlparse(src)
-            host = (parsed.hostname or "").lower().lstrip("www.")
+            host = (parsed.hostname or "").lower().removeprefix("www.")
         except Exception:
             continue
 
@@ -443,7 +443,7 @@ def scan_ioc(html: str, page_url: str) -> list[IoCFinding]:
     soup = BeautifulSoup(html, "html.parser")
 
     try:
-        page_domain = (urlparse(page_url).hostname or "").lower().lstrip("www.")
+        page_domain = (urlparse(page_url).hostname or "").lower().removeprefix("www.")
     except Exception:
         page_domain = ""
 

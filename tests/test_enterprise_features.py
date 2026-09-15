@@ -251,12 +251,24 @@ class TestFinancialImpact:
 # ---------------------------------------------------------------------------
 
 class TestCompliancePosture:
-    def test_all_pass_when_no_findings(self):
+    def test_no_findings_without_assessment_are_not_passes(self):
         postures = _compute_compliance_posture([])
         assert len(postures) == 3
         for p in postures:
             assert p.controls_failing == 0
-            assert p.readiness_score == 100
+            assert p.controls_passing == 0
+            assert p.readiness_score == 0
+
+    def test_explicitly_assessed_clean_control_can_pass(self):
+        postures = _compute_compliance_posture(
+            [], assessed_controls={"PCI-DSS 4.1"},
+        )
+        pci = next(p for p in postures if "PCI" in p.framework)
+        control = next(c for c in pci.controls if c.control_id == "PCI-DSS 4.1")
+        assert control.status == "pass"
+        assert pci.controls_tested == 1
+        assert pci.controls_passing == 1
+        assert pci.readiness_score == 100
 
     def test_failing_controls_from_findings(self):
         findings = [
@@ -272,11 +284,13 @@ class TestCompliancePosture:
     def test_gdpr_controls_present(self):
         postures = _compute_compliance_posture([])
         gdpr = next(p for p in postures if "GDPR" in p.framework)
-        # Art.33/34 are organisational => not_assessed; only Art.32 is observable.
-        assert gdpr.controls_tested == 1
-        assert gdpr.controls_not_tested == 2
-        assert gdpr.readiness_score == 100
+        # No external result can pass Art.32 without explicit assessment evidence;
+        # Art.33/34 always require organisational evidence.
+        assert gdpr.controls_tested == 0
+        assert gdpr.controls_not_tested == 3
+        assert gdpr.readiness_score == 0
         statuses = {c.control_id: c.status for c in gdpr.controls}
+        assert statuses["GDPR Art.32"] == "not_assessed"
         assert statuses["GDPR Art.33"] == "not_assessed"
         assert statuses["GDPR Art.34"] == "not_assessed"
 
