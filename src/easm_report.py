@@ -28,6 +28,7 @@ from .models import (
     RansomwareIndex,
     RemediationItem,
     ReconArtifact,
+    SecretFinding,
 )
 
 logger = logging.getLogger(__name__)
@@ -720,22 +721,46 @@ def _classify_ssl_findings(result: DomainResult) -> list[PrioritizedFinding]:
     return findings
 
 
+def _is_generic_secret(secret: SecretFinding) -> bool:
+    """Return whether a secret came from the ambiguous generic regex."""
+    return "generic" in secret.matched_pattern.lower()
+
+
 def _classify_secret_findings(result: DomainResult) -> list[PrioritizedFinding]:
     findings: list[PrioritizedFinding] = []
     for s in result.secrets:
-        is_generic = "generic" in s.matched_pattern.lower()
+        is_generic = _is_generic_secret(s)
         findings.append(PrioritizedFinding(
             id=f"secret_{s.secret_type}",
-            title=f"Exposed {s.secret_type}",
+            title=(
+                f"Potential exposed {s.secret_type}"
+                if is_generic else f"Exposed {s.secret_type}"
+            ),
             category="secrets",
             severity=s.severity,
-            classification=FindingClassification.confirmed_issue,
+            classification=(
+                FindingClassification.potential_issue
+                if is_generic else FindingClassification.confirmed_issue
+            ),
             confidence="medium" if is_generic else "high",
+            evidence_quality="weak_inference" if is_generic else "strong_inference",
+            affects_risk_score=not is_generic,
             owner=FindingOwner.customer,
-            why_it_matters="Exposed credentials can be used by attackers to access systems or data.",
-            business_impact="Data breach risk, unauthorized access",
+            why_it_matters=(
+                "A credential-like assignment was found, but generic matches require validation before they can be treated as exposed credentials."
+                if is_generic else
+                "Exposed credentials can be used by attackers to access systems or data."
+            ),
+            business_impact=(
+                "Unknown until the value is confirmed as a reusable credential"
+                if is_generic else "Data breach risk, unauthorized access"
+            ),
             evidence=[f"{s.secret_type} found in {s.location}: {s.value_preview}"],
-            recommended_action="Rotate the credential immediately and remove it from source code.",
+            recommended_action=(
+                "Review the source context and rotate the value only if it is confirmed as a reusable credential."
+                if is_generic else
+                "Rotate the credential immediately and remove it from source code."
+            ),
             source_field="secrets",
         ))
     return findings
@@ -2142,7 +2167,10 @@ def _compute_ransomware_index(result: DomainResult) -> RansomwareIndex:
             mitigations.append("SPF record configured")
 
     # Exposed credentials / secrets
-    secrets_count = len(result.security.secrets) if result.security else 0
+    secrets_count = (
+        sum(1 for secret in result.security.secrets if not _is_generic_secret(secret))
+        if result.security else 0
+    )
     if secrets_count:
         score += min(20, secrets_count * 10)
         factors.append(f"{secrets_count} exposed credential(s) / secret(s)")
@@ -2579,11 +2607,13 @@ def build_easm_report(
 
         # Apply compliance framework tags
         for finding in sorted_findings:
-            finding.compliance = (
-                _resolve_compliance(finding.id)
-                if finding.classification == FindingClassification.confirmed_issue
-                else []
-            )
+            if (
+                finding.category == "secrets"
+                and finding.classification != FindingClassification.confirmed_issue
+            ):
+                finding.compliance = []
+            else:
+                finding.compliance = _resolve_compliance(finding.id)
 
         # Build compliance summary counts
         framework_counts: dict[str, int] = {}

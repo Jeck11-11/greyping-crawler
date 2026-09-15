@@ -251,6 +251,68 @@ class TestSortOrder:
         assert report.prioritized_findings[0].severity == "critical"
 
 
+class TestSecretClassification:
+    def test_generic_secret_is_potential_and_non_scoring(self):
+        result = DomainResult(
+            target="https://example.com",
+            security=SecurityGroup(
+                secrets=[
+                    SecretFinding(
+                        secret_type="generic_password",
+                        matched_pattern="generic_password",
+                        value_preview="db75...7adf",
+                        location="body",
+                        severity="high",
+                    ),
+                ],
+                headers=SecurityHeadersResult(grade="A", score=100),
+            ),
+            ssl=SSLCertResult(cert_valid=True, grade="A"),
+        )
+
+        report = build_easm_report(result, scan_mode="full")
+        finding = next(f for f in report.prioritized_findings if f.id == "secret_generic_password")
+
+        assert finding.classification == FindingClassification.potential_issue
+        assert finding.evidence_quality == "weak_inference"
+        assert finding.affects_risk_score is False
+        assert finding.compliance == []
+        assert "review" in finding.recommended_action.lower()
+        assert not any(
+            "exposed credential" in factor.lower()
+            for factor in report.ransomware_susceptibility.factors
+        )
+
+    def test_provider_specific_secret_remains_confirmed_and_scoring(self):
+        result = DomainResult(
+            target="https://example.com",
+            security=SecurityGroup(
+                secrets=[
+                    SecretFinding(
+                        secret_type="aws_access_key",
+                        matched_pattern="aws_access_key_id",
+                        value_preview="AKIA...MPLE",
+                        location="script",
+                        severity="high",
+                    ),
+                ],
+                headers=SecurityHeadersResult(grade="A", score=100),
+            ),
+            ssl=SSLCertResult(cert_valid=True, grade="A"),
+        )
+
+        report = build_easm_report(result, scan_mode="full")
+        finding = next(f for f in report.prioritized_findings if f.id == "secret_aws_access_key")
+
+        assert finding.classification == FindingClassification.confirmed_issue
+        assert finding.affects_risk_score is True
+        assert finding.compliance
+        assert any(
+            "exposed credential" in factor.lower()
+            for factor in report.ransomware_susceptibility.factors
+        )
+
+
 # ---------------------------------------------------------------------------
 # Executive summary
 # ---------------------------------------------------------------------------
