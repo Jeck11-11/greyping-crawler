@@ -82,17 +82,22 @@ _CORS_MAX_AGE_THRESHOLD = 86400
 
 def _check_hsts(value: str) -> tuple[str, str]:
     """Return (status, recommendation) for an HSTS header value."""
-    if "max-age=0" in value:
+    lowered = value.lower()
+    has_subdomains = "includesubdomains" in lowered  # case-insensitive; sites send both casings
+    if "max-age=0" in lowered:
         return "weak", "HSTS max-age is 0, which effectively disables HSTS."
     match = re.search(r"max-age=(\d+)", value, re.IGNORECASE)
     if match:
         age = int(match.group(1))
         if age < _HSTS_MIN_MAX_AGE:
-            return "weak", (
+            rec = (
                 f"HSTS max-age is {age}s ({age // 86400}d) — "
-                f"recommended minimum is {_HSTS_MIN_MAX_AGE}s (1 year). "
-                "Add includeSubDomains for full coverage."
+                f"recommended minimum is {_HSTS_MIN_MAX_AGE}s (1 year)."
             )
+            # Only advise adding includeSubDomains when it is actually absent.
+            if not has_subdomains:
+                rec += " Also add includeSubDomains for full coverage."
+            return "weak", rec
     return "present", ""
 
 
