@@ -34,8 +34,6 @@ _SENSITIVE_PATHS: list[tuple[str, str, str]] = [
     ("/phpinfo.php", "phpinfo() leaks PHP version, extensions, and environment variables.", "high"),
     ("/info.php", "PHP info page leaks server configuration.", "high"),
     ("/.DS_Store", "macOS directory index may reveal hidden files and directory structure.", "medium"),
-    ("/robots.txt", "robots.txt may reveal hidden or sensitive paths.", "info"),
-    ("/sitemap.xml", "Sitemap reveals the full URL structure of the site.", "info"),
     ("/.well-known/security.txt", "security.txt is recommended; absence isn't a vulnerability.", "info"),
     ("/wp-login.php", "WordPress login page is exposed (consider restricting access).", "low"),
     ("/wp-admin/", "WordPress admin area is publicly reachable.", "low"),
@@ -81,9 +79,12 @@ _SENSITIVE_PATHS: list[tuple[str, str, str]] = [
 ]
 
 # Paths at info severity are always reported when found; others only on
-# interesting status codes.
+# interesting status codes. robots.txt / sitemap.xml are intentionally NOT here
+# (nor probed above): they are normal discovery artifacts, fetched and parsed
+# separately into result.robots_txt / result.sitemap, and must not be counted
+# as sensitive paths.
 _INFO_PATHS = {
-    "/robots.txt", "/sitemap.xml", "/.well-known/security.txt",
+    "/.well-known/security.txt",
     "/privacy", "/privacy-policy", "/cookie-policy",
     "/terms", "/terms-of-service", "/terms-of-use", "/terms-and-conditions", "/tos",
     "/gdpr", "/ccpa", "/data-request",

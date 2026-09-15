@@ -29,6 +29,7 @@ from .models import (
     RemediationItem,
     ReconArtifact,
     SecretFinding,
+    _fingerprint,
 )
 
 logger = logging.getLogger(__name__)
@@ -398,6 +399,17 @@ _HEADER_CONSEQUENCE: dict[str, str] = {
     "x-permitted-cross-domain-policies": "Legacy Adobe clients could load cross-domain data policies.",
     "cache-control": "Sensitive responses may be cached by browsers or shared proxies and exposed to later users of the same device.",
 }
+
+# Headers that are defence-in-depth hardening only: their absence on a public
+# page is a recommendation, not a confirmed, score-affecting security issue.
+_HARDENING_ONLY_HEADERS: frozenset[str] = frozenset({"cache-control"})
+
+# Server header values set by shared platform/CDN infrastructure, not the
+# customer origin — so information-leak findings on them are platform-owned.
+_PLATFORM_SERVER_TOKENS: tuple[str, ...] = (
+    "cloudflare", "akamai", "fastly", "cloudfront", "amazons3", "amazon s3",
+    "vercel", "netlify", "sucuri", "imperva", "gws", "github.com",
+)
 
 
 def _classify_header_findings(
@@ -1618,7 +1630,18 @@ _RECON_ARTIFACT_PATHS = frozenset({"/robots.txt", "/sitemap.xml", "/security.txt
 
 def _extract_recon_artifacts(result: DomainResult) -> list[ReconArtifact]:
     artifacts: list[ReconArtifact] = []
+    seen: set[str] = set()
+    # robots.txt / sitemap.xml are no longer probed as sensitive paths — source
+    # them from their dedicated parsed results so this section is unchanged.
+    if result.robots_txt and result.robots_txt.found:
+        artifacts.append(ReconArtifact(path="/robots.txt", status_code=200, note="Standard web artifact"))
+        seen.add("/robots.txt")
+    if result.sitemap and result.sitemap.found:
+        artifacts.append(ReconArtifact(path="/sitemap.xml", status_code=200, note="Standard web artifact"))
+        seen.add("/sitemap.xml")
     for p in result.sensitive_paths:
+        if p.path in seen:
+            continue
         if p.path in _RECON_ARTIFACT_PATHS or p.severity == "info":
             note = "Standard web artifact" if p.path in _RECON_ARTIFACT_PATHS else p.risk or ""
             artifacts.append(ReconArtifact(path=p.path, status_code=p.status_code, note=note))
@@ -1790,6 +1813,9 @@ def _classify_typosquatting_findings(result: DomainResult) -> list[PrioritizedFi
             evidence_quality="direct",   # registration is direct evidence…
             affects_risk_score=False,     # …but malicious use is unverified
             owner=FindingOwner.customer,
+            # id is a stable finding-type; the fingerprint must be unique per
+            # domain so distinct lookalikes don't collapse into one Xano record.
+            fingerprint=_fingerprint("easm", "typosquat_domains_found", cand.domain),
             why_it_matters=(
                 "Registered lookalike domain identified. Ownership and malicious "
                 "use have not been confirmed."
