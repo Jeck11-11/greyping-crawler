@@ -112,6 +112,14 @@ class CrawlReconRequest(ReconRequest):
     )
 
 
+class JevWebSurfaceRequest(CrawlReconRequest):
+    """Opt-in page classification; no FAIR or vulnerability scoring."""
+
+    targets: list[str] = Field(..., min_length=1, max_length=5)
+    max_depth: int = Field(default=0, ge=0, le=1)
+    max_jev_pages: int = Field(default=5, ge=1, le=5)
+
+
 class BreachReconRequest(ReconRequest):
     """Payload for /recon/breaches."""
 
@@ -1592,6 +1600,8 @@ class PageResult(BaseModel):
         default="",
         description="First 500 characters of visible page text.",
     )
+    headings: list[str] = Field(default_factory=list)
+    forms: list[dict[str, Any]] = Field(default_factory=list)
     links: list[LinkInfo] = Field(default_factory=list, exclude=True)
     contacts: ContactInfo = Field(default_factory=ContactInfo)
     secrets: list[SecretFinding] = Field(default_factory=list)
@@ -1603,6 +1613,26 @@ class PageResult(BaseModel):
         default="",
         description="Informational notes, e.g. Playwright fallback warning.",
     )
+    error: str | None = None
+
+
+class JevPageAssessment(BaseModel):
+    page_url: str
+    status: str = "completed"
+    model: str = ""
+    page_role: str | None = None
+    page_role_confidence: float | None = None
+    credential_surface_probability: float | None = None
+    external_workflow_probability: float | None = None
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    error: str | None = None
+
+
+class JevWebSurfaceResult(BaseModel):
+    target: str
+    pages_scanned: int = 0
+    pages_assessed: int = 0
+    assessments: list[JevPageAssessment] = Field(default_factory=list)
     error: str | None = None
 
 

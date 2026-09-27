@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 
-from fastapi import APIRouter
+import httpx
+from fastapi import APIRouter, HTTPException
 
 from .._http_utils import validate_target
 from .._link_utils import is_asset_url, normalise_ext_url, is_social_url, MAX_FOUND_ON
 from .._social_utils import detect_platform
 from ..crawler import crawl_domain
+from ..jev_web_surface import assess_page
 from ..postprocess import fill_not_found
 from ..screenshot import take_screenshot
 from ..models import (
@@ -20,6 +23,9 @@ from ..models import (
     EmailFinding,
     ExternalLinkFinding,
     IoCReconResult,
+    JevPageAssessment,
+    JevWebSurfaceRequest,
+    JevWebSurfaceResult,
     LinkReconResult,
     PhoneFinding,
     ReconRequest,
@@ -31,6 +37,54 @@ from ..models import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/recon", tags=["content"])
+
+
+@router.post("/jev-web-surface", response_model=list[JevWebSurfaceResult])
+async def recon_jev_web_surface(request: JevWebSurfaceRequest) -> list[JevWebSurfaceResult]:
+    """Opt-in Jev classifications of bounded crawler evidence, never findings."""
+    api_key = os.getenv("TYPESAFE_API_KEY", "")
+    if not api_key:
+        raise HTTPException(status_code=503, detail="TYPESAFE_API_KEY is not configured")
+    targets = [validate_target(t) for t in request.targets]
+    sem = asyncio.Semaphore(3)
+
+    async def _one(target: str) -> JevWebSurfaceResult:
+        try:
+            pages = await crawl_domain(
+                target,
+                render_js=request.render_js,
+                follow_redirects=request.follow_redirects,
+                max_depth=request.max_depth,
+                timeout=request.timeout,
+            )
+        except Exception as exc:
+            logger.warning("Jev crawl failed for %s: %s", target, type(exc).__name__)
+            return JevWebSurfaceResult(target=target, error="Crawl failed")
+
+        async def _assess(page):
+            async with sem:
+                try:
+                    return await assess_page(page, api_key=api_key)
+                except httpx.HTTPStatusError as exc:
+                    return JevPageAssessment(
+                        page_url=page.url, status="error",
+                        error=f"Jev API returned HTTP {exc.response.status_code}",
+                    )
+                except Exception as exc:
+                    logger.warning("Jev assessment failed for %s: %s", page.url, type(exc).__name__)
+                    return JevPageAssessment(
+                        page_url=page.url, status="error", error="Jev assessment failed",
+                    )
+
+        assessments = await asyncio.gather(*(_assess(p) for p in pages[:request.max_jev_pages]))
+        return JevWebSurfaceResult(
+            target=target,
+            pages_scanned=len(pages),
+            pages_assessed=sum(a.status == "completed" for a in assessments),
+            assessments=assessments,
+        )
+
+    return await asyncio.gather(*(_one(t) for t in targets))
 
 
 async def _crawl(target: str, request: CrawlReconRequest):

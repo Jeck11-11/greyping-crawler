@@ -103,10 +103,30 @@ Web crawling, contact harvesting, link mapping, and content analysis.
 | Method | Path | Purpose | Scan Mode | Output |
 |--------|------|---------|-----------|--------|
 | POST | `/recon/crawl` | Crawl target(s) and return raw per-page results | Full | URLs, titles, status codes, content snippets, JS-rendered flag |
+| POST | `/recon/jev-web-surface` | Optional Jev page classification from crawled evidence | Full | Advisory page role and probabilities, with source page evidence |
 | POST | `/recon/contacts` | Extract emails, phone numbers, social profiles from crawled pages | Full | Deduplicated list of contacts found |
 | POST | `/recon/links` | Extract and classify internal vs. external links with anchor text | Full | Categorized links, frequency, anchor text |
 | POST | `/recon/secrets` | Detect exposed secrets in page bodies, scripts, comments | Full | Secret type, location (HTML comment, script, etc.), redacted preview |
 | POST | `/recon/ioc` | Detect indicators of compromise (cryptominers, hidden iframes, obfuscated JS) | Full | IoC findings with severity and description |
+
+### Jev web surface pilot
+
+Set `TYPESAFE_API_KEY` on the crawler server and call the opt-in endpoint:
+
+```bash
+curl -X POST http://localhost:8089/recon/jev-web-surface \
+  -H 'Content-Type: application/json' \
+  -H 'X-API-Key: YOUR_GREYPING_API_KEY' \
+  -d '{"targets":["https://example.com"],"max_depth":0,"render_js":false,"max_jev_pages":5}'
+```
+
+The endpoint crawls up to `max_jev_pages` pages per target, then sends bounded
+title, headings, form metadata, and labelled link hosts to Jev. It does not send
+raw HTML, form values, cookies, or extracted secrets. A failed or challenged
+page is skipped, and a Jev error is returned per page. Results are advisory:
+they do not create findings, feed FAIR, or change `/scan` output. Keep the
+TypeSafe key on the server, and evaluate classifications against labelled pages
+before using them in customer reports.
 
 ### Passive Intelligence Endpoints
 

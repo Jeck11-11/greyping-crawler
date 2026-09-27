@@ -22,6 +22,27 @@ logger = logging.getLogger(__name__)
 _PLAYWRIGHT_AVAILABLE: bool | None = None
 
 
+def _web_surface_fields(soup: BeautifulSoup, base_url: str) -> tuple[list[str], list[dict]]:
+    """Extract bounded, value-free DOM evidence for optional page classification."""
+    headings = [
+        tag.get_text(" ", strip=True)[:120]
+        for tag in soup.find_all(["h1", "h2", "h3"], limit=12)
+    ]
+    forms = []
+    for form in soup.find_all("form", limit=10):
+        action = urlparse(urljoin(base_url, form.get("action") or base_url))
+        forms.append({
+            "method": (form.get("method") or "get").upper()[:10],
+            "action_host": action.hostname or "",
+            "action_path": action.path[:120],
+            "input_types": [
+                (field.get("type") or "text").lower()[:30]
+                for field in form.find_all(["input", "textarea", "select"], limit=20)
+            ],
+        })
+    return headings, forms
+
+
 async def _check_playwright() -> bool:
     global _PLAYWRIGHT_AVAILABLE
     if _PLAYWRIGHT_AVAILABLE is not None:
@@ -130,6 +151,7 @@ async def crawl_page(
 
     soup = BeautifulSoup(html, "html.parser")
     title, meta_desc, snippet = extract_page_metadata(soup)
+    headings, forms = _web_surface_fields(soup, url)
     contacts = extract_contacts(soup, html)
     links = extract_links(soup, url)
     secrets = scan_secrets(html)
@@ -142,6 +164,8 @@ async def crawl_page(
         title=title,
         meta_description=meta_desc,
         content_snippet=snippet,
+        headings=headings,
+        forms=forms,
         links=links,
         contacts=contacts,
         secrets=secrets,
@@ -201,6 +225,7 @@ def _katana_to_page_results(katana_result) -> list[PageResult]:
         try:
             soup = BeautifulSoup(endpoint.body, "html.parser")
             title, meta_desc, snippet = extract_page_metadata(soup)
+            headings, forms = _web_surface_fields(soup, endpoint.url)
             contacts = extract_contacts(soup, endpoint.body)
             links = extract_links(soup, endpoint.url)
             secrets = scan_secrets(endpoint.body)
@@ -210,6 +235,8 @@ def _katana_to_page_results(katana_result) -> list[PageResult]:
                 title=title,
                 meta_description=meta_desc,
                 content_snippet=snippet,
+                headings=headings,
+                forms=forms,
                 contacts=contacts,
                 links=links,
                 secrets=secrets,
