@@ -1,6 +1,6 @@
 # GreyPing OSINT Reconnaissance API
 
-A comprehensive, production-grade reconnaissance API for automated website security assessment. Combines passive intelligence gathering (DNS, CT logs, WHOIS, Wayback) with active probing (crawling, path scanning, secret detection) and vulnerability correlation to deliver quantified risk scores via the FAIR framework.
+A comprehensive, production-grade reconnaissance API for automated website security assessment. Combines passive intelligence gathering (DNS, CT logs, WHOIS, Wayback) with active probing (crawling, path scanning, secret detection) and vulnerability correlation to deliver technical evidence for downstream Xano scenario assessments.
 
 > **Authorised security testing only.** This tool is designed for assessing assets you own or have explicit written permission to test. Unauthorised scanning may violate applicable laws and third-party terms of service (HIBP, target websites, etc.).
 
@@ -13,7 +13,7 @@ The GreyPing API performs rapid, parallel reconnaissance across multiple targets
 1. **Discovers exposed infrastructure** — identifies unpatched software, weak TLS, missing security headers, credential leaks, and exposed administrative panels.
 2. **Extracts attack surface** — harvests email addresses, phone numbers, links, API endpoints, JavaScript sourcemaps, and technology stack details from crawled content.
 3. **Correlates breach history** — checks targets and extracted emails against Have I Been Pwned and identifies which breaches are most relevant.
-4. **Quantifies risk** — applies the FAIR framework (Threat, Vulnerability, Control Strength, Loss Magnitude) to produce actionable risk scores suitable for dashboards and workflow automation.
+4. **Supplies risk evidence** — produces technical findings for Xano, which owns financial FAIR calculations independently for each loss scenario.
 
 ### Three Scan Modes: Latency vs. Coverage
 
@@ -52,7 +52,7 @@ Request → Input Validation → Async Worker Pool (8x concurrent) → Results A
                     ├─ CVE Correlation from Tech Stack (osv.dev)
                     └─ Favicon Hashing (mmh3 for Shodan/Censys pivoting)
                                      ↓
-                    Post-processing applies EASM report summary + FAIR framework signals
+                    Post-processing builds the technical EASM report; financial FAIR belongs to Xano
                                      ↓
                     JSON response with findings, risk scores, and errors
 ```
@@ -173,7 +173,7 @@ Zero-traffic reconnaissance via public databases.
 | Module | Purpose |
 |--------|---------|
 | `easm_report.py` | EASM (External Attack Surface Management) report generation; executive summary of findings |
-| `fair_signals.py` | **FAIR framework integration** — maps scanner evidence to four factors (TEF, Vulnerability, Control Strength, Loss Magnitude); computes risk score |
+| Xano (separate backend) | Owns candidate-signal persistence and financial FAIR calculations; no financial calculator runs in this scanner |
 | `_link_utils.py` | Utility functions for link normalization, social URL detection, external URL classification |
 | `_social_utils.py` | Social platform detection (Twitter, LinkedIn, Facebook, etc.) from URLs and HTML |
 
@@ -223,7 +223,7 @@ All endpoints follow a consistent response pattern:
       "favicon": { /* FaviconResult */ },
       "pages_crawled": 5,
       "easm_report": { /* EASMReport */ },
-      "fair_signals": { /* FAIRSignals */ }
+      "easm_report": { /* technical findings; financial status is insufficient_data */ }
     }
   ]
 }
@@ -243,29 +243,20 @@ All `/recon/*` endpoints return a list of per-target results:
 ]
 ```
 
-### FAIR Signals (Risk Quantification)
+### Financial FAIR ownership
 
-Every `DomainResult` includes a `fair_signals` object:
+`DomainResult.risk_assessment.easm_report` contains the scanner's technical
+report. The current `RiskAssessmentGroup` has no `fair_signals` field and the
+repository has no `src/fair_signals.py` module. Older examples showing them do
+not describe the current main-branch contract.
 
-```json
-{
-  "risk_score": 67,
-  "threat_event_frequency": 55,
-  "vulnerability": 72,
-  "control_strength": 40,
-  "loss_magnitude": 60,
-  "signals": [
-    {
-      "name": "missing_hsts",
-      "factor": "control_strength",
-      "impact": -15,
-      "evidence": "HSTS header not present"
-    }
-  ]
-}
-```
+Xano owns financial calculations and persistence independently per loss scenario.
+Scanner financial fields retain their existing integer-zero defaults with
+`financial_impact_status="insufficient_data"`; these are compatibility placeholders,
+not measured zero loss. Consumers must honour that status and use canonical
+Xano scenario results for financial displays and reports.
 
-See [docs/FAIR.md](docs/FAIR.md) for detailed risk factor documentation.
+See [docs/FAIR.md](docs/FAIR.md) for the ownership boundary and verification gates.
 
 ---
 
@@ -462,21 +453,19 @@ The Docker image is built on Alpine Linux (musl libc). Playwright does not publi
 
 ---
 
-## Risk Quantification: FAIR Framework
+## Financial risk: Xano scenario assessments
 
-Every scan result includes a `fair_signals` object that quantifies risk using the FAIR (Factor Analysis of Information Risk) framework. FAIR combines four factors to compute an overall risk score (0–100):
+Technical grades and ransomware susceptibility scores are prioritisation
+indicators. They are not monetary losses, annual event frequencies or calibrated
+probabilities. Do not convert them into financial FAIR factors in a frontend,
+report generator or AI narrative.
 
-1. **Threat Event Frequency (TEF)** — How likely are threat actors to target this asset? (Raised by: exposed CMS, webmail, secrets, suspicious IoCs)
-2. **Vulnerability (V)** — How likely is a threat to succeed? (Raised by: missing headers, expired SSL, weak TLS, unpatched CVEs)
-3. **Control Strength (CS)** — How effective are defensive measures? (Raised by: HSTS, CSP, WAF, strong email security)
-4. **Loss Magnitude (LM)** — How much harm if exploited? (Raised by: credential harvesting, secrets, breaches, sensitive tech)
+The platform must trigger the existing Xano pipeline after successful initial
+scan ingestion and refresh it nightly through its existing backend scheduler.
+Both paths must use the same tenant-scoped calculation and persistence pipeline.
+No platform scheduler or canonical financial calculator is implemented here.
 
-```
-Risk = Loss Event Frequency × Loss Magnitude
-Loss Event Frequency = TEF × Vulnerability / (1 + Control Strength attenuator)
-```
-
-For detailed documentation on risk factors, evidence mapping, and interpretation, see [docs/FAIR.md](docs/FAIR.md).
+See [docs/FAIR.md](docs/FAIR.md) for the decision, units and acceptance gates.
 
 ---
 
